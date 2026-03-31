@@ -2,6 +2,41 @@
 
 여러 핸드폰을 동기화된 스피커로 만드는 모바일 앱 (Flutter)
 
+## 현재 진행 상황
+
+### 완료
+- [x] 프로젝트 생성 (Flutter, 패키지명: com.synchorus.synchorus)
+- [x] GitHub 연동 (https://github.com/shnskr/synchorus.git)
+- [x] 개발 환경 세팅 (Flutter SDK, Android Studio, Xcode, CocoaPods)
+- [x] 패키지 구조 생성 (screens, services, models, providers, widgets)
+- [x] P2P 연결 코드 작성 (Phase 1 - 일부)
+  - p2p_service.dart: TCP 소켓 통신 (호스트/참가자)
+  - discovery_service.dart: UDP 브로드캐스트 (디바이스 발견)
+  - home_screen.dart: 홈 화면 (방 만들기/참가)
+  - room_screen.dart: 방 화면 (연결 상태/로그)
+  - models (peer.dart, room.dart)
+  - providers (app_providers.dart)
+
+### 다음 할 일
+- [ ] **P2P 연결 테스트** (실제 기기 2대 또는 기기+에뮬레이터로 연결 확인)
+- [ ] 시간 동기화 구현 (sync_service.dart)
+- [ ] 오디오 재생/공유 구현 (audio_service.dart)
+- [ ] 기본 UI 정리
+
+### 사용 중인 패키지
+```yaml
+flutter_riverpod: ^2.6.1      # 상태 관리/DI
+network_info_plus: ^6.1.1     # WiFi IP 확인
+permission_handler: ^11.4.0   # 권한 관리
+```
+
+### 추가 예정 패키지 (오디오 구현 시)
+```yaml
+just_audio: ^0.9.x            # 오디오 재생
+audio_service: ^0.18.x        # 백그라운드 재생
+file_picker: ^8.x             # 파일 선택
+```
+
 ## 핵심 요구사항
 
 1. 각각의 핸드폰이 모두 스피커가 되어 같은 오디오를 재생
