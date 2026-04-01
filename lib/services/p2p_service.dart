@@ -118,6 +118,7 @@ class P2PService {
 
           try {
             final message = jsonDecode(line) as Map<String, dynamic>;
+            message['_from'] = sourceId;
             if (isFirst && onFirstMessage != null) {
               onFirstMessage(message);
               isFirst = false;
@@ -147,6 +148,17 @@ class P2PService {
     }
   }
 
+  /// 호스트: 특정 참가자에게 메시지 전송
+  void sendToPeer(String peerId, Map<String, dynamic> message) {
+    final peer = _peers.cast<Peer?>().firstWhere(
+      (p) => p!.id == peerId,
+      orElse: () => null,
+    );
+    if (peer != null) {
+      _sendTo(peer.socket, message);
+    }
+  }
+
   /// 참가자: 호스트에게 메시지 전송
   void sendToHost(Map<String, dynamic> message) {
     if (_hostSocket != null) {
@@ -171,8 +183,8 @@ class P2PService {
     _serverSocket = null;
   }
 
-  void dispose() {
-    disconnect();
+  Future<void> dispose() async {
+    await disconnect();
     _messageController.close();
     _peerJoinController.close();
     _peerLeaveController.close();

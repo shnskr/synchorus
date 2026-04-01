@@ -32,7 +32,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
 
-    final port = await p2p.startHost();
+    int port;
+    try {
+      port = await p2p.startHost();
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('서버 시작 실패: 포트가 이미 사용 중입니다')),
+        );
+      }
+      return;
+    }
+
     final roomCode = p2p.generateRoomCode();
 
     await discovery.startBroadcast(

@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/app_providers.dart';
+import 'player_screen.dart';
 
 class RoomScreen extends ConsumerStatefulWidget {
   final String roomCode;
@@ -25,15 +26,22 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   StreamSubscription? _joinSub;
   StreamSubscription? _leaveSub;
   StreamSubscription? _messageSub;
+  bool _syncing = false;
+  bool _syncDone = false;
 
   @override
   void initState() {
     super.initState();
     final p2p = ref.read(p2pServiceProvider);
+    final sync = ref.read(syncServiceProvider);
 
     if (widget.isHost) {
       _addLog('방 생성 완료 (코드: ${widget.roomCode})');
       _addLog('참가자를 기다리는 중...');
+
+      // 호스트: sync-ping 응답 핸들러 시작
+      sync.startHostHandler();
+      _syncDone = true;
 
       _joinSub = p2p.onPeerJoin.listen((peer) {
         setState(() {
@@ -47,17 +55,51 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       });
     } else {
       _addLog('방 참가 완료 (코드: ${widget.roomCode})');
+      _startSync();
     }
 
     _messageSub = p2p.onMessage.listen((message) {
-      _addLog('메시지: ${message['type']}');
+      final type = message['type'] as String;
+      // 대량 메시지는 로그에서 제외
+      const hiddenTypes = {'sync-ping', 'sync-pong', 'audio-data', 'audio-meta'};
+      if (!hiddenTypes.contains(type)) {
+        _addLog('메시지: $type');
+      }
     });
+  }
+
+  /// 참가자: 시간 동기화 수행
+  Future<void> _startSync() async {
+    setState(() => _syncing = true);
+    _addLog('시간 동기화 중...');
+
+    try {
+      final sync = ref.read(syncServiceProvider);
+      final result = await sync.syncWithHost();
+      _addLog('동기화 완료! offset: ${result.offsetMs}ms, RTT: ${result.rttMs}ms');
+      setState(() {
+        _syncing = false;
+        _syncDone = true;
+      });
+    } catch (e) {
+      _addLog('동기화 실패: $e');
+      setState(() => _syncing = false);
+    }
   }
 
   void _addLog(String message) {
     setState(() {
       _logs.add('[${DateTime.now().toString().substring(11, 19)}] $message');
     });
+  }
+
+  void _goToPlayer() {
+    Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (_) => PlayerScreen(isHost: widget.isHost),
+      ),
+    );
   }
 
   Future<void> _leaveRoom() async {
@@ -113,6 +155,26 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
             Text(
               '접속자: ${_peerNames.length + 1}명',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            ),
+
+            const SizedBox(height: 16),
+
+            // 플레이어 이동 버튼
+            SizedBox(
+              width: double.infinity,
+              child: ElevatedButton.icon(
+                onPressed: _syncDone ? _goToPlayer : null,
+                icon: const Icon(Icons.play_arrow),
+                label: Text(_syncing
+                    ? '동기화 중...'
+                    : _syncDone
+                        ? '플레이어 열기'
+                        : '동기화 대기 중'),
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 14),
+                  textStyle: const TextStyle(fontSize: 16),
+                ),
+              ),
             ),
 
             const SizedBox(height: 16),

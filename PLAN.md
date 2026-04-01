@@ -16,25 +16,31 @@
   - room_screen.dart: 방 화면 (연결 상태/로그)
   - models (peer.dart, room.dart)
   - providers (app_providers.dart)
+- [x] 시간 동기화 구현
+  - sync_service.dart: ping/pong 방식 offset 계산 (best RTT 기준)
+  - room_screen에서 참가 시 자동 동기화 수행
+- [x] 오디오 재생/공유 구현
+  - audio_service.dart: just_audio 기반 재생, 파일 전송(청크), URL 공유, 동기화 play/pause/seek
+  - player_screen.dart: 플레이어 UI (파일 선택, URL 입력, 시크바, 볼륨)
+  - pubspec.yaml에 just_audio, file_picker, path_provider 추가
 
 ### 다음 할 일
-- [ ] **P2P 연결 테스트** (실제 기기 2대 또는 기기+에뮬레이터로 연결 확인)
-- [ ] 시간 동기화 구현 (sync_service.dart)
-- [ ] 오디오 재생/공유 구현 (audio_service.dart)
-- [ ] 기본 UI 정리
+- [ ] **실기기 테스트** (P2P 연결 + 시간 동기화 + 오디오 동기화 재생 확인)
+- [ ] 기본 UI 정리 / UX 개선
 
 ### 사용 중인 패키지
 ```yaml
 flutter_riverpod: ^2.6.1      # 상태 관리/DI
 network_info_plus: ^6.1.1     # WiFi IP 확인
 permission_handler: ^11.4.0   # 권한 관리
+just_audio: ^0.9.43           # 오디오 재생
+file_picker: ^8.1.7           # 파일 선택
+path_provider: ^2.1.5         # 임시 파일 저장 경로
 ```
 
-### 추가 예정 패키지 (오디오 구현 시)
+### 추가 예정 패키지 (백그라운드 재생 구현 시)
 ```yaml
-just_audio: ^0.9.x            # 오디오 재생
-audio_service: ^0.18.x        # 백그라운드 재생
-file_picker: ^8.x             # 파일 선택
+audio_service: ^0.18.x        # 백그라운드 재생 + 잠금화면 컨트롤
 ```
 
 ## 핵심 요구사항

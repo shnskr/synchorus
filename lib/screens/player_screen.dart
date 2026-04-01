@@ -1,0 +1,246 @@
+import 'dart:io';
+
+import 'package:file_picker/file_picker.dart';
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:just_audio/just_audio.dart';
+
+import '../providers/app_providers.dart';
+import '../services/audio_service.dart';
+
+class PlayerScreen extends ConsumerStatefulWidget {
+  final bool isHost;
+
+  const PlayerScreen({super.key, required this.isHost});
+
+  @override
+  ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
+}
+
+class _PlayerScreenState extends ConsumerState<PlayerScreen> {
+  final _urlController = TextEditingController();
+  double _volume = 1.0;
+
+  AudioSyncService get _audio => ref.read(audioSyncServiceProvider);
+
+  @override
+  void initState() {
+    super.initState();
+    _audio.startListening(isHost: widget.isHost);
+  }
+
+  @override
+  void dispose() {
+    _urlController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _pickFile() async {
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.audio,
+    );
+    if (result != null && result.files.single.path != null) {
+      await _audio.loadFile(File(result.files.single.path!));
+      setState(() {});
+    }
+  }
+
+  Future<void> _loadUrl() async {
+    final url = _urlController.text.trim();
+    if (url.isEmpty) return;
+    await _audio.loadUrl(url);
+    setState(() {});
+    FocusScope.of(context).unfocus();
+  }
+
+  void _togglePlay() {
+    final state = _audio.player.playerState;
+    if (state.playing) {
+      _audio.syncPause();
+    } else {
+      _audio.syncPlay();
+    }
+  }
+
+  String _formatDuration(Duration d) {
+    final minutes = d.inMinutes.remainder(60).toString().padLeft(2, '0');
+    final seconds = d.inSeconds.remainder(60).toString().padLeft(2, '0');
+    return '$minutes:$seconds';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Scaffold(
+      appBar: AppBar(
+        title: const Text('플레이어'),
+      ),
+      body: Padding(
+        padding: const EdgeInsets.all(16.0),
+        child: Column(
+          children: [
+            // 호스트 전용: 오디오 소스 선택
+            if (widget.isHost) ...[
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _pickFile,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('파일 선택'),
+                    ),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 12),
+              Row(
+                children: [
+                  Expanded(
+                    child: TextField(
+                      controller: _urlController,
+                      decoration: const InputDecoration(
+                        hintText: '오디오 URL 입력',
+                        border: OutlineInputBorder(),
+                        isDense: true,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(width: 8),
+                  ElevatedButton(
+                    onPressed: _loadUrl,
+                    child: const Text('로드'),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 8),
+            ],
+
+            // 현재 재생 정보
+            _buildNowPlaying(),
+
+            const Spacer(),
+
+            // 시크바 + 시간
+            _buildSeekBar(),
+
+            const SizedBox(height: 16),
+
+            // 재생 컨트롤
+            _buildControls(),
+
+            const SizedBox(height: 24),
+
+            // 볼륨
+            _buildVolumeSlider(),
+
+            const SizedBox(height: 16),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildNowPlaying() {
+    final fileName = _audio.currentFileName;
+    final url = _audio.currentUrl;
+    final title = fileName ?? url ?? '오디오를 선택하세요';
+
+    return Card(
+      child: ListTile(
+        leading: const Icon(Icons.music_note, size: 40),
+        title: Text(
+          title,
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
+        ),
+        subtitle: Text(widget.isHost ? '호스트' : '참가자'),
+      ),
+    );
+  }
+
+  Widget _buildSeekBar() {
+    return StreamBuilder<Duration?>(
+      stream: _audio.durationStream,
+      builder: (context, durationSnap) {
+        final duration = durationSnap.data ?? Duration.zero;
+        return StreamBuilder<Duration>(
+          stream: _audio.positionStream,
+          builder: (context, positionSnap) {
+            final position = positionSnap.data ?? Duration.zero;
+            return Column(
+              children: [
+                Slider(
+                  min: 0,
+                  max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
+                  value: position.inMilliseconds.toDouble().clamp(0, duration.inMilliseconds.toDouble().clamp(1, double.infinity)),
+                  onChanged: widget.isHost ? (value) {} : null,
+                  onChangeEnd: widget.isHost
+                      ? (value) {
+                          _audio.syncSeek(Duration(milliseconds: value.toInt()));
+                        }
+                      : null,
+                ),
+                Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16),
+                  child: Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
+                    children: [
+                      Text(_formatDuration(position)),
+                      Text(_formatDuration(duration)),
+                    ],
+                  ),
+                ),
+              ],
+            );
+          },
+        );
+      },
+    );
+  }
+
+  Widget _buildControls() {
+    return StreamBuilder<PlayerState>(
+      stream: _audio.playerStateStream,
+      builder: (context, snapshot) {
+        final playerState = snapshot.data;
+        final playing = playerState?.playing ?? false;
+        final hasAudio = _audio.currentFileName != null || _audio.currentUrl != null;
+
+        return Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            // 호스트만 재생/일시정지 가능, 오디오 로드 후에만 활성화
+            IconButton(
+              iconSize: 64,
+              onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
+              icon: Icon(
+                playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
+              ),
+            ),
+          ],
+        );
+      },
+    );
+  }
+
+  Widget _buildVolumeSlider() {
+    return Row(
+      children: [
+        const Icon(Icons.volume_down),
+        Expanded(
+          child: Slider(
+            min: 0,
+            max: 1,
+            value: _volume,
+            onChanged: (value) {
+              setState(() => _volume = value);
+              _audio.setVolume(value);
+            },
+          ),
+        ),
+        const Icon(Icons.volume_up),
+      ],
+    );
+  }
+}
