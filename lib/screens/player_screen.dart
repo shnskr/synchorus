@@ -26,7 +26,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    _audio.startListening(isHost: widget.isHost);
   }
 
   @override
@@ -40,8 +39,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       type: FileType.audio,
     );
     if (result != null && result.files.single.path != null) {
-      await _audio.loadFile(File(result.files.single.path!));
-      setState(() {});
+      try {
+        await _audio.loadFile(File(result.files.single.path!));
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text('파일 로드 실패: $e')),
+          );
+        }
+      }
+      if (mounted) setState(() {});
     }
   }
 
@@ -51,6 +58,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     await _audio.loadUrl(url);
     setState(() {});
     FocusScope.of(context).unfocus();
+  }
+
+  void _skipSeconds(int seconds) {
+    final current = _audio.player.position;
+    final duration = _audio.player.duration ?? Duration.zero;
+    final newPosition = current + Duration(seconds: seconds);
+    final clamped = Duration(
+      milliseconds: newPosition.inMilliseconds.clamp(0, duration.inMilliseconds),
+    );
+    _audio.syncSeek(clamped);
   }
 
   void _togglePlay() {
@@ -142,20 +159,37 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Widget _buildNowPlaying() {
-    final fileName = _audio.currentFileName;
-    final url = _audio.currentUrl;
-    final title = fileName ?? url ?? '오디오를 선택하세요';
+    return StreamBuilder<bool>(
+      stream: _audio.loadingStream,
+      initialData: _audio.isLoading,
+      builder: (context, loadingSnap) {
+        final isLoading = loadingSnap.data ?? false;
+        final fileName = _audio.currentFileName;
+        final url = _audio.currentUrl;
+        final title = isLoading
+            ? '파일 수신 중...'
+            : fileName ?? url ?? '오디오를 선택하세요';
 
-    return Card(
-      child: ListTile(
-        leading: const Icon(Icons.music_note, size: 40),
-        title: Text(
-          title,
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Text(widget.isHost ? '호스트' : '참가자'),
-      ),
+        return Card(
+          child: ListTile(
+            leading: isLoading
+                ? const SizedBox(
+                    width: 40, height: 40,
+                    child: Padding(
+                      padding: EdgeInsets.all(8),
+                      child: CircularProgressIndicator(strokeWidth: 3),
+                    ),
+                  )
+                : const Icon(Icons.music_note, size: 40),
+            title: Text(
+              title,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            subtitle: Text(widget.isHost ? '호스트' : '참가자'),
+          ),
+        );
+      },
     );
   }
 
@@ -210,13 +244,24 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         return Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            // 호스트만 재생/일시정지 가능, 오디오 로드 후에만 활성화
+            IconButton(
+              iconSize: 40,
+              onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
+              icon: const Icon(Icons.replay_5),
+            ),
+            const SizedBox(width: 16),
             IconButton(
               iconSize: 64,
               onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
               icon: Icon(
                 playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
               ),
+            ),
+            const SizedBox(width: 16),
+            IconButton(
+              iconSize: 40,
+              onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
+              icon: const Icon(Icons.forward_5),
             ),
           ],
         );

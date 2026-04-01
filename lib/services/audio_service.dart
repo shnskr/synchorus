@@ -23,6 +23,12 @@ class AudioSyncService {
   /// 현재 로드된 오디오 소스 정보
   String? _currentFileName;
   String? _currentUrl;
+  Uint8List? _cachedFileBytes;
+
+  final _loadingController = StreamController<bool>.broadcast();
+  Stream<bool> get loadingStream => _loadingController.stream;
+  bool _isLoading = false;
+  bool get isLoading => _isLoading;
 
   AudioPlayer get player => _player;
   String? get currentFileName => _currentFileName;
@@ -35,8 +41,12 @@ class AudioSyncService {
 
   AudioSyncService(this._p2p, this._sync);
 
+  bool _isHost = false;
+  int _sendGeneration = 0;
+
   /// 호스트/참가자 공통: P2P 메시지 리스닝 시작
   void startListening({required bool isHost}) {
+    _isHost = isHost;
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen((message) {
       switch (message['type']) {
@@ -58,6 +68,15 @@ class AudioSyncService {
         case 'seek':
           _handleSeek(message['data']);
           break;
+        case 'audio-request':
+          if (_isHost) _handleAudioRequest(message['_from']);
+          break;
+        case 'state-request':
+          if (_isHost) _handleStateRequest(message['_from']);
+          break;
+        case 'state-response':
+          if (!_isHost) _handleStateResponse(message['data']);
+          break;
       }
     });
   }
@@ -68,6 +87,7 @@ class AudioSyncService {
   Future<void> loadUrl(String url) async {
     _currentUrl = url;
     _currentFileName = null;
+    _cachedFileBytes = null;
     await _player.setUrl(url);
 
     _p2p.broadcastToAll({
@@ -78,30 +98,43 @@ class AudioSyncService {
 
   /// 호스트: 로컬 파일 로드 + 참가자에게 파일 전송
   Future<void> loadFile(File file) async {
+    _sendGeneration++; // 진행 중인 전송 모두 취소
     final fileName = file.uri.pathSegments.last;
     _currentFileName = fileName;
     _currentUrl = null;
+    _isLoading = true;
+    _loadingController.add(true);
 
     await _player.setFilePath(file.path);
 
-    // 파일 데이터를 참가자에게 전송
     final bytes = await file.readAsBytes();
+    _cachedFileBytes = bytes;
 
-    // 메타 정보 먼저 전송
-    _p2p.broadcastToAll({
+    await _sendFileChunks(fileName, bytes, broadcast: true);
+
+    _isLoading = false;
+    _loadingController.add(false);
+  }
+
+  /// 파일 청크 전송 (broadcast: 전체, false: 특정 피어)
+  Future<void> _sendFileChunks(String fileName, Uint8List bytes, {required bool broadcast, String? peerId}) async {
+    final gen = _sendGeneration;
+    final meta = {
       'type': 'audio-meta',
-      'data': {
-        'fileName': fileName,
-        'fileSize': bytes.length,
-      },
-    });
+      'data': {'fileName': fileName, 'fileSize': bytes.length},
+    };
+    if (broadcast) {
+      _p2p.broadcastToAll(meta);
+    } else {
+      _p2p.sendToPeer(peerId!, meta);
+    }
 
-    // 청크 단위로 파일 전송 (48KB → Base64로 ~64KB)
-    const chunkSize = 49152;
+    const chunkSize = 32768;
     for (int offset = 0; offset < bytes.length; offset += chunkSize) {
+      if (_sendGeneration != gen) return; // 새 전송이 시작됨 → 중단
       final end = (offset + chunkSize).clamp(0, bytes.length);
       final chunk = bytes.sublist(offset, end);
-      _p2p.broadcastToAll({
+      final msg = {
         'type': 'audio-data',
         'data': {
           'fileName': fileName,
@@ -109,36 +142,71 @@ class AudioSyncService {
           'totalSize': bytes.length,
           'chunk': base64Encode(chunk),
         },
-      });
-      // 소켓 부하 방지를 위한 짧은 딜레이
-      await Future.delayed(const Duration(milliseconds: 10));
+      };
+      if (broadcast) {
+        _p2p.broadcastToAll(msg);
+      } else {
+        _p2p.sendToPeer(peerId!, msg);
+      }
+      await Future.delayed(const Duration(milliseconds: 20));
     }
   }
 
-  /// 호스트: 동기화 재생 명령
+  /// 호스트: 특정 피어에게 현재 오디오 전송
+  Future<void> sendCurrentAudioToPeer(String peerId) async {
+    if (_currentUrl != null) {
+      _p2p.sendToPeer(peerId, {
+        'type': 'audio-url',
+        'data': {'url': _currentUrl},
+      });
+    } else if (_currentFileName != null && _cachedFileBytes != null) {
+      await _sendFileChunks(_currentFileName!, _cachedFileBytes!, broadcast: false, peerId: peerId);
+    }
+  }
+
+  /// 게스트: 호스트에게 현재 오디오 요청
+  void requestCurrentAudio() {
+    _p2p.sendToHost({
+      'type': 'audio-request',
+      'data': {},
+    });
+  }
+
+  /// 호스트: 오디오 요청 처리
+  void _handleAudioRequest(String? fromId) {
+    if (fromId == null) return;
+    sendCurrentAudioToPeer(fromId);
+  }
+
+  /// 호스트: 동기화 재생 명령 (현재 position도 함께 전송)
   Future<void> syncPlay() async {
     final startAt = _sync.nowAsHostTime + _syncDelayMs;
+    final positionMs = _player.position.inMilliseconds;
 
     _p2p.broadcastToAll({
       'type': 'play',
-      'data': {'startAt': startAt},
+      'data': {
+        'startAt': startAt,
+        'positionMs': positionMs,
+      },
     });
 
     // 호스트도 동일하게 예약 재생
-    _schedulePlay(startAt);
+    _schedulePlay(startAt, positionMs: positionMs);
   }
 
-  /// 호스트: 동기화 일시정지 명령
+  /// 호스트: 동기화 일시정지 명령 (현재 position도 함께 전송)
   Future<void> syncPause() async {
-    final pauseAt = _sync.nowAsHostTime;
+    _cancelScheduledPlay();
+    await _player.pause();
+    final positionMs = _player.position.inMilliseconds;
 
     _p2p.broadcastToAll({
       'type': 'pause',
-      'data': {'pauseAt': pauseAt},
+      'data': {
+        'positionMs': positionMs,
+      },
     });
-
-    _cancelScheduledPlay();
-    await _player.pause();
   }
 
   /// 호스트: 동기화 탐색 명령
@@ -177,9 +245,24 @@ class AudioSyncService {
   /// 파일 전송 버퍼: fileName → 누적 바이트
   final Map<String, _FileTransferBuffer> _transferBuffers = {};
 
-  void _handleAudioMeta(Map<String, dynamic> data) {
+  void _handleAudioMeta(Map<String, dynamic> data) async {
     final fileName = data['fileName'] as String;
     final fileSize = data['fileSize'] as int;
+
+    // 새 파일 전송 시작 → 이전 임시 파일 삭제 + 상태 초기화
+    if (_currentFileName != null && _currentFileName != fileName) {
+      final tempDir = await getTemporaryDirectory();
+      final oldFile = File('${tempDir.path}/$_currentFileName');
+      if (await oldFile.exists()) oldFile.delete();
+    }
+    _currentFileName = null;
+    _currentUrl = null;
+    _cancelScheduledPlay();
+    _player.stop();
+    _transferBuffers.clear();
+    _isLoading = true;
+    _loadingController.add(true);
+
     _transferBuffers[fileName] = _FileTransferBuffer(
       fileName: fileName,
       totalSize: fileSize,
@@ -207,17 +290,35 @@ class AudioSyncService {
       _currentUrl = null;
       await _player.setFilePath(tempFile.path);
       _transferBuffers.remove(fileName);
+      _isLoading = false;
+      _loadingController.add(false);
+
+      // 파일 로드 완료 → 호스트에게 현재 상태 요청
+      if (!_isHost) {
+        _p2p.sendToHost({
+          'type': 'state-request',
+          'data': {},
+        });
+      }
     }
   }
 
+  bool get _hasAudioLoaded => _currentFileName != null || _currentUrl != null;
+
   void _handlePlay(Map<String, dynamic> data) {
+    if (!_hasAudioLoaded) return; // 로드 완료 후 state-request로 동기화됨
     final startAt = data['startAt'] as int;
-    _schedulePlay(startAt);
+    final positionMs = data['positionMs'] as int?;
+    _schedulePlay(startAt, positionMs: positionMs);
   }
 
   void _handlePause(Map<String, dynamic> data) {
     _cancelScheduledPlay();
     _player.pause();
+    final positionMs = data['positionMs'] as int?;
+    if (positionMs != null) {
+      _player.seek(Duration(milliseconds: positionMs));
+    }
   }
 
   void _handleSeek(Map<String, dynamic> data) async {
@@ -230,11 +331,50 @@ class AudioSyncService {
     }
   }
 
+  /// 호스트: 상태 요청에 현재 재생 상태 응답
+  void _handleStateRequest(String? fromId) {
+    if (fromId == null) return;
+    _p2p.sendToPeer(fromId, {
+      'type': 'state-response',
+      'data': {
+        'playing': _player.playing,
+        'positionMs': _player.position.inMilliseconds,
+        'hostTime': _sync.nowAsHostTime,
+      },
+    });
+  }
+
+  /// 게스트: 호스트의 현재 상태에 맞춰 동기화
+  void _handleStateResponse(Map<String, dynamic> data) async {
+    final playing = data['playing'] as bool;
+    final positionMs = data['positionMs'] as int;
+    final hostTime = data['hostTime'] as int;
+
+    if (!_hasAudioLoaded) return;
+
+    if (playing) {
+      // 응답이 올 때까지의 지연 보정
+      final elapsed = _sync.nowAsHostTime - hostTime;
+      final adjustedPosition = positionMs + elapsed;
+      await _player.seek(Duration(milliseconds: adjustedPosition));
+      await _player.play();
+    } else {
+      await _player.seek(Duration(milliseconds: positionMs));
+      await _player.pause();
+    }
+  }
+
   // ─── 내부 헬퍼 ───
 
-  /// startAt(호스트 시간)에 맞춰 재생 예약
-  void _schedulePlay(int startAtHostTime) {
+  /// startAt(호스트 시간)에 맞춰 재생 예약 + position 동기화
+  void _schedulePlay(int startAtHostTime, {int? positionMs}) {
     _cancelScheduledPlay();
+
+    // position 먼저 맞추기
+    if (positionMs != null) {
+      _player.seek(Duration(milliseconds: positionMs));
+    }
+
     final localPlayTime = _sync.hostTimeToLocal(startAtHostTime);
     final delayMs = localPlayTime - DateTime.now().millisecondsSinceEpoch;
 
@@ -252,10 +392,34 @@ class AudioSyncService {
     _scheduledPlayTimer = null;
   }
 
+  /// 임시 오디오 파일 삭제
+  Future<void> clearTempFiles() async {
+    _isLoading = false;
+    _loadingController.add(false);
+    _cancelScheduledPlay();
+    _player.stop();
+
+    final tempDir = await getTemporaryDirectory();
+    for (final fileName in _transferBuffers.keys) {
+      final file = File('${tempDir.path}/$fileName');
+      if (await file.exists()) await file.delete();
+    }
+    // 이미 로드 완료된 파일도 삭제
+    if (_currentFileName != null) {
+      final file = File('${tempDir.path}/$_currentFileName');
+      if (await file.exists()) await file.delete();
+    }
+    _currentFileName = null;
+    _currentUrl = null;
+    _cachedFileBytes = null;
+    _transferBuffers.clear();
+  }
+
   Future<void> dispose() async {
     _cancelScheduledPlay();
     _messageSub?.cancel();
     _messageSub = null;
+    _loadingController.close();
     await _player.dispose();
   }
 }

@@ -10,10 +10,12 @@ class P2PService {
 
   ServerSocket? _serverSocket;
   Socket? _hostSocket;
+  String? _roomCode;
   final List<Peer> _peers = [];
   final _messageController = StreamController<Map<String, dynamic>>.broadcast();
   final _peerJoinController = StreamController<Peer>.broadcast();
   final _peerLeaveController = StreamController<String>.broadcast();
+  final _disconnectedController = StreamController<void>.broadcast();
 
   /// 메시지 수신 스트림
   Stream<Map<String, dynamic>> get onMessage => _messageController.stream;
@@ -24,6 +26,9 @@ class P2PService {
   /// 참가자 퇴장 스트림
   Stream<String> get onPeerLeave => _peerLeaveController.stream;
 
+  /// 호스트 연결 끊김 스트림 (게스트용)
+  Stream<void> get onDisconnected => _disconnectedController.stream;
+
   /// 연결된 참가자 목록
   List<Peer> get peers => List.unmodifiable(_peers);
 
@@ -33,12 +38,14 @@ class P2PService {
   /// 4자리 방 코드 생성
   String generateRoomCode() {
     final random = Random();
-    return (1000 + random.nextInt(9000)).toString();
+    _roomCode = (1000 + random.nextInt(9000)).toString();
+    return _roomCode!;
   }
 
   /// 호스트: TCP 서버 시작
   Future<int> startHost() async {
-    _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, defaultPort);
+    await disconnect();
+    _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, defaultPort, shared: true);
 
     _serverSocket!.listen(
       (socket) {
@@ -81,6 +88,7 @@ class P2PService {
           'data': {
             'peerId': peerId,
             'peerCount': _peers.length,
+            'roomCode': _roomCode,
           },
         });
 
@@ -99,24 +107,30 @@ class P2PService {
         'type': 'peer-left',
         'data': {'peerId': peerId},
       });
+    }).catchError((e) {
+      print('Peer socket error: $e');
+      _peers.removeWhere((p) => p.id == peerId);
+      _peerLeaveController.add(peerId);
     });
   }
 
   /// 소켓에서 메시지 수신 리스너
   void _listenToSocket(Socket socket, String sourceId, {Function(Map<String, dynamic>)? onFirstMessage}) {
     bool isFirst = true;
-    String buffer = '';
+    final byteBuffer = <int>[];
+    final newLine = '\n'.codeUnitAt(0);
 
     socket.listen(
       (data) {
-        buffer += utf8.decode(data);
-        // 줄바꿈으로 메시지 구분
-        while (buffer.contains('\n')) {
-          final index = buffer.indexOf('\n');
-          final line = buffer.substring(0, index);
-          buffer = buffer.substring(index + 1);
+        byteBuffer.addAll(data);
+        // 줄바꿈(\n)으로 메시지 구분 - 바이트 단위로 처리
+        while (byteBuffer.contains(newLine)) {
+          final index = byteBuffer.indexOf(newLine);
+          final lineBytes = byteBuffer.sublist(0, index);
+          byteBuffer.removeRange(0, index + 1);
 
           try {
+            final line = utf8.decode(lineBytes);
             final message = jsonDecode(line) as Map<String, dynamic>;
             message['_from'] = sourceId;
             if (isFirst && onFirstMessage != null) {
@@ -135,6 +149,9 @@ class P2PService {
       },
       onDone: () {
         print('Connection closed: $sourceId');
+        if (sourceId == 'host') {
+          _disconnectedController.add(null);
+        }
       },
     );
   }
@@ -168,16 +185,20 @@ class P2PService {
 
   /// 소켓에 JSON 메시지 전송 (줄바꿈 구분)
   void _sendTo(Socket socket, Map<String, dynamic> message) {
-    socket.write('${jsonEncode(message)}\n');
+    try {
+      socket.add(utf8.encode('${jsonEncode(message)}\n'));
+    } catch (e) {
+      print('Send error: $e');
+    }
   }
 
   /// 연결 종료
   Future<void> disconnect() async {
     for (final peer in _peers) {
-      await peer.socket.close();
+      peer.socket.destroy();
     }
     _peers.clear();
-    await _hostSocket?.close();
+    _hostSocket?.destroy();
     _hostSocket = null;
     await _serverSocket?.close();
     _serverSocket = null;
@@ -188,5 +209,6 @@ class P2PService {
     _messageController.close();
     _peerJoinController.close();
     _peerLeaveController.close();
+    _disconnectedController.close();
   }
 }

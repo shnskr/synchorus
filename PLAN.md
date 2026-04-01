@@ -4,12 +4,12 @@
 
 ## 현재 진행 상황
 
-### 완료
+### Phase 1 완료 항목
 - [x] 프로젝트 생성 (Flutter, 패키지명: com.synchorus.synchorus)
 - [x] GitHub 연동 (https://github.com/shnskr/synchorus.git)
 - [x] 개발 환경 세팅 (Flutter SDK, Android Studio, Xcode, CocoaPods)
 - [x] 패키지 구조 생성 (screens, services, models, providers, widgets)
-- [x] P2P 연결 코드 작성 (Phase 1 - 일부)
+- [x] P2P 연결 코드 작성
   - p2p_service.dart: TCP 소켓 통신 (호스트/참가자)
   - discovery_service.dart: UDP 브로드캐스트 (디바이스 발견)
   - home_screen.dart: 홈 화면 (방 만들기/참가)
@@ -22,11 +22,50 @@
 - [x] 오디오 재생/공유 구현
   - audio_service.dart: just_audio 기반 재생, 파일 전송(청크), URL 공유, 동기화 play/pause/seek
   - player_screen.dart: 플레이어 UI (파일 선택, URL 입력, 시크바, 볼륨)
-  - pubspec.yaml에 just_audio, file_picker, path_provider 추가
+
+### 실기기 테스트 및 버그 수정 (진행 중)
+
+테스트 환경: 에뮬레이터(Pixel 6 API 34) + Galaxy S22 (SM-S901N)
+
+#### 완료된 수정사항
+- [x] Android 네트워크 권한 추가 (INTERNET, ACCESS_WIFI_STATE 등 + usesCleartextTraffic)
+- [x] IP 직접 입력으로 방 참가 (에뮬레이터는 UDP 브로드캐스트 불가)
+- [x] TCP 패킷 분할 문제 해결 (UTF-8 문자열 버퍼링 → 바이트 단위 버퍼링)
+- [x] 포트 재사용 에러 해결 (disconnect() 후 startHost, ServerSocket shared: true)
+- [x] 시스템 뒤로가기 지원 (PopScope 적용)
+- [x] 다중 참가 방지 (_isJoining 플래그)
+- [x] 게스트 roomCode 표시 (welcome 메시지에 roomCode 포함)
+- [x] 파일 변경 시 상태 초기화 (_handleAudioMeta에서 이전 상태 클리어)
+- [x] 방 나가기 시 임시 파일 삭제 (clearTempFiles)
+- [x] play/pause에 positionMs 포함 (반복 재생 시 싱크 밀림 방지)
+- [x] state-request/response 프로토콜 (게스트 늦은 입장 시 호스트 상태 동기화)
+- [x] audio.startListening을 RoomScreen으로 이동 (PlayerScreen 열기 전에도 메시지 수신)
+- [x] 5초 앞/뒤 건너뛰기 버튼
+- [x] 파일 수신 중 로딩 인디케이터 (호스트/게스트 모두)
+- [x] 호스트 나가기 확인 팝업 ("모든 참가자의 연결이 끊어집니다")
+- [x] 호스트 연결 끊김 시 게스트 자동 퇴장 (onDisconnected 스트림)
+- [x] socket.close() → socket.destroy() (TCP 종료 핸드셰이크 대기 제거)
+- [x] _sendTo에 try-catch + socket.add() (소켓 에러 시 크래시 방지)
+- [x] socket.done.catchError 추가 (Broken pipe unhandled exception 방지)
+- [x] Navigator.popUntil(route.isFirst) (PlayerScreen 위에서도 홈까지 복귀)
+- [x] 구독 먼저 취소 후 disconnect (cleanup 중 setState 콜백 방지)
+- [x] mounted 체크 (_addLog, _startSync에서 dispose 후 setState 방지)
+- [x] 파일 캐시 + 새 피어 입장 시 오디오 자동 전송 (sendCurrentAudioToPeer)
+- [x] 세대 카운터 (_sendGeneration) - 파일 전송 충돌 시 이전 전송 자동 취소
+- [x] audio-request 방식으로 변경 - 게스트가 sync 완료 후 직접 오디오 요청 (호스트 백그라운드 문제 해결)
+
+#### 알려진 이슈 / 다음에 확인할 것
+- [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (audio-request 방식으로 개선 완료, 추가 테스트 필요)
+- [ ] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정)
+- [ ] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (재현 조건 추적 필요)
+- [ ] 에뮬레이터 ↔ 실기기 간 네트워크 불안정 (실기기 2대 테스트 권장)
 
 ### 다음 할 일
-- [ ] **실기기 테스트** (P2P 연결 + 시간 동기화 + 오디오 동기화 재생 확인)
+- [ ] 위 알려진 이슈 추가 테스트 및 수정
 - [ ] 기본 UI 정리 / UX 개선
+- [ ] git commit (현재 변경사항 커밋 필요)
+- [ ] 백그라운드 재생 (audio_service 패키지)
+- [ ] 연결 끊김 시 자동 재연결
 
 ### 사용 중인 패키지
 ```yaml
