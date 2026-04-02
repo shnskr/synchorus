@@ -56,6 +56,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
     await _audio.loadUrl(url);
+    if (!mounted) return;
     setState(() {});
     FocusScope.of(context).unfocus();
   }
@@ -91,7 +92,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       appBar: AppBar(
         title: const Text('플레이어'),
       ),
-      body: Padding(
+      body: SafeArea(
+        child: Padding(
         padding: const EdgeInsets.all(16.0),
         child: Column(
           children: [
@@ -155,6 +157,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         ),
       ),
+      ),
     );
   }
 
@@ -168,7 +171,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         final url = _audio.currentUrl;
         final title = isLoading
             ? '파일 수신 중...'
-            : fileName ?? url ?? '오디오를 선택하세요';
+            : fileName ?? url ?? (widget.isHost ? '오디오를 선택하세요' : '음악 대기 중');
 
         return Card(
           child: ListTile(
@@ -241,32 +244,62 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         final playing = playerState?.playing ?? false;
         final hasAudio = _audio.currentFileName != null || _audio.currentUrl != null;
 
-        return Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        return Stack(
+          alignment: Alignment.center,
           children: [
-            IconButton(
-              iconSize: 40,
-              onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
-              icon: const Icon(Icons.replay_5),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  iconSize: 40,
+                  onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
+                  icon: const Icon(Icons.replay_5),
+                ),
+                const SizedBox(width: 16),
+                IconButton(
+                  iconSize: 64,
+                  onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
+                  icon: Icon(
+                    playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                IconButton(
+                  iconSize: 40,
+                  onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
+                  icon: const Icon(Icons.forward_5),
+                ),
+              ],
             ),
-            const SizedBox(width: 16),
-            IconButton(
-              iconSize: 64,
-              onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
-              icon: Icon(
-                playing ? Icons.pause_circle_filled : Icons.play_circle_filled,
+            Positioned(
+              left: 0,
+              child: IconButton(
+                iconSize: 28,
+                onPressed: _toggleMute,
+                icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
               ),
-            ),
-            const SizedBox(width: 16),
-            IconButton(
-              iconSize: 40,
-              onPressed: (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
-              icon: const Icon(Icons.forward_5),
             ),
           ],
         );
       },
     );
+  }
+
+  bool _muted = false;
+  double _volumeBeforeMute = 1.0;
+
+  void _toggleMute() {
+    setState(() {
+      if (_muted) {
+        _volume = _volumeBeforeMute;
+        _muted = false;
+      } else {
+        _volumeBeforeMute = _volume;
+        _volume = 0;
+        _muted = true;
+      }
+    });
+    _audio.setVolume(_volume);
   }
 
   Widget _buildVolumeSlider() {
@@ -279,7 +312,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             max: 1,
             value: _volume,
             onChanged: (value) {
-              setState(() => _volume = value);
+              setState(() {
+                _volume = value;
+                _muted = value == 0;
+              });
               _audio.setVolume(value);
             },
           ),

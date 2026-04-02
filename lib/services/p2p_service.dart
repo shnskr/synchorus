@@ -3,14 +3,19 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:flutter/foundation.dart';
+
 import '../models/peer.dart';
 
 class P2PService {
   static const int defaultPort = 41235;
+  static const int _heartbeatIntervalSec = 3;
+  static const int _heartbeatTimeoutMs = 9000;
 
   ServerSocket? _serverSocket;
   Socket? _hostSocket;
   String? _roomCode;
+  Timer? _heartbeatTimer;
   final List<Peer> _peers = [];
   final _messageController = StreamController<Map<String, dynamic>>.broadcast();
   final _peerJoinController = StreamController<Peer>.broadcast();
@@ -52,11 +57,40 @@ class P2PService {
         _handleNewPeer(socket);
       },
       onError: (error) {
-        print('Server error: $error');
+        debugPrint('Server error: $error');
       },
     );
 
+    _startHeartbeat();
     return _serverSocket!.port;
+  }
+
+  /// 호스트: heartbeat 시작 (죽은 피어 감지)
+  void _startHeartbeat() {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = Timer.periodic(
+      Duration(seconds: _heartbeatIntervalSec),
+      (_) {
+        _removeDeadPeers();
+        broadcastToAll({'type': 'heartbeat'});
+      },
+    );
+  }
+
+  /// 호스트: 응답 없는 피어 제거
+  void _removeDeadPeers() {
+    final now = DateTime.now().millisecondsSinceEpoch;
+    final deadPeers = _peers.where((p) => now - p.lastSeen > _heartbeatTimeoutMs).toList();
+    for (final peer in deadPeers) {
+      debugPrint('Heartbeat timeout: ${peer.id}');
+      peer.socket.destroy();
+      _peers.remove(peer);
+      _peerLeaveController.add(peer.id);
+      broadcastToAll({
+        'type': 'peer-left',
+        'data': {'peerId': peer.id},
+      });
+    }
   }
 
   /// 참가자: 호스트에 TCP 연결
@@ -101,6 +135,8 @@ class P2PService {
     });
 
     socket.done.then((_) {
+      // heartbeat에서 이미 제거된 경우 중복 처리 방지
+      if (!_peers.any((p) => p.id == peerId)) return;
       _peers.removeWhere((p) => p.id == peerId);
       _peerLeaveController.add(peerId);
       broadcastToAll({
@@ -108,7 +144,7 @@ class P2PService {
         'data': {'peerId': peerId},
       });
     }).catchError((e) {
-      print('Peer socket error: $e');
+      if (!_peers.any((p) => p.id == peerId)) return;
       _peers.removeWhere((p) => p.id == peerId);
       _peerLeaveController.add(peerId);
     });
@@ -133,6 +169,22 @@ class P2PService {
             final line = utf8.decode(lineBytes);
             final message = jsonDecode(line) as Map<String, dynamic>;
             message['_from'] = sourceId;
+
+            // 게스트: heartbeat 수신 → 자동 응답
+            if (message['type'] == 'heartbeat' && sourceId == 'host') {
+              _sendTo(socket, {'type': 'heartbeat-ack'});
+              continue;
+            }
+            // 호스트: heartbeat-ack 수신 → lastSeen 갱신
+            if (message['type'] == 'heartbeat-ack') {
+              final peer = _peers.cast<Peer?>().firstWhere(
+                (p) => p!.id == sourceId, orElse: () => null);
+              if (peer != null) {
+                peer.lastSeen = DateTime.now().millisecondsSinceEpoch;
+              }
+              continue;
+            }
+
             if (isFirst && onFirstMessage != null) {
               onFirstMessage(message);
               isFirst = false;
@@ -140,15 +192,15 @@ class P2PService {
               _messageController.add(message);
             }
           } catch (e) {
-            print('Parse error: $e');
+            debugPrint('Parse error: $e');
           }
         }
       },
       onError: (error) {
-        print('Socket error from $sourceId: $error');
+        debugPrint('Socket error from $sourceId: $error');
       },
       onDone: () {
-        print('Connection closed: $sourceId');
+        debugPrint('Connection closed: $sourceId');
         if (sourceId == 'host') {
           _disconnectedController.add(null);
         }
@@ -188,12 +240,14 @@ class P2PService {
     try {
       socket.add(utf8.encode('${jsonEncode(message)}\n'));
     } catch (e) {
-      print('Send error: $e');
+      debugPrint('Send error: $e');
     }
   }
 
   /// 연결 종료
   Future<void> disconnect() async {
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
     for (final peer in _peers) {
       peer.socket.destroy();
     }

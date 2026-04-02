@@ -50,32 +50,34 @@ class AudioSyncService {
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen((message) {
       switch (message['type']) {
+        // 게스트 전용: 호스트로부터 수신
         case 'audio-url':
-          _handleAudioUrl(message['data']);
+          if (!_isHost) _handleAudioUrl(message['data']);
           break;
         case 'audio-meta':
-          _handleAudioMeta(message['data']);
+          if (!_isHost) _handleAudioMeta(message['data']);
           break;
         case 'audio-data':
-          _handleAudioData(message['data']);
+          if (!_isHost) _handleAudioData(message['data']);
           break;
         case 'play':
-          _handlePlay(message['data']);
+          if (!_isHost) _handlePlay(message['data']);
           break;
         case 'pause':
-          _handlePause(message['data']);
+          if (!_isHost) _handlePause(message['data']);
           break;
         case 'seek':
-          _handleSeek(message['data']);
+          if (!_isHost) _handleSeek(message['data']);
           break;
+        case 'state-response':
+          if (!_isHost) _handleStateResponse(message['data']);
+          break;
+        // 호스트 전용: 게스트로부터 수신
         case 'audio-request':
           if (_isHost) _handleAudioRequest(message['_from']);
           break;
         case 'state-request':
           if (_isHost) _handleStateRequest(message['_from']);
-          break;
-        case 'state-response':
-          if (!_isHost) _handleStateResponse(message['data']);
           break;
       }
     });
@@ -105,10 +107,14 @@ class AudioSyncService {
     _isLoading = true;
     _loadingController.add(true);
 
-    await _player.setFilePath(file.path);
-
     final bytes = await file.readAsBytes();
     _cachedFileBytes = bytes;
+
+    // file_picker 캐시는 삭제될 수 있으므로 앱 임시 디렉토리에 복사
+    final tempDir = await getTemporaryDirectory();
+    final stableFile = File('${tempDir.path}/$fileName');
+    await stableFile.writeAsBytes(bytes);
+    await _player.setFilePath(stableFile.path);
 
     await _sendFileChunks(fileName, bytes, broadcast: true);
 
@@ -272,7 +278,6 @@ class AudioSyncService {
   void _handleAudioData(Map<String, dynamic> data) async {
     final fileName = data['fileName'] as String;
     final offset = data['offset'] as int;
-    final totalSize = data['totalSize'] as int;
     final chunk = base64Decode(data['chunk'] as String);
 
     final buffer = _transferBuffers[fileName];
@@ -305,8 +310,16 @@ class AudioSyncService {
 
   bool get _hasAudioLoaded => _currentFileName != null || _currentUrl != null;
 
-  void _handlePlay(Map<String, dynamic> data) {
+  void _handlePlay(Map<String, dynamic> data) async {
     if (!_hasAudioLoaded) return; // 로드 완료 후 state-request로 동기화됨
+
+    // 게스트: 재생 전 빠른 재동기화 (클럭 드리프트 보정)
+    if (!_isHost) {
+      try {
+        await _sync.syncWithHost(count: 3);
+      } catch (_) {}
+    }
+
     final startAt = data['startAt'] as int;
     final positionMs = data['positionMs'] as int?;
     _schedulePlay(startAt, positionMs: positionMs);
@@ -379,6 +392,11 @@ class AudioSyncService {
     final delayMs = localPlayTime - DateTime.now().millisecondsSinceEpoch;
 
     if (delayMs <= 0) {
+      // 늦게 도착한 경우: 지연된 만큼 position을 앞으로 보정
+      if (positionMs != null) {
+        final adjustedMs = positionMs + delayMs.abs();
+        _player.seek(Duration(milliseconds: adjustedMs));
+      }
       _player.play();
     } else {
       _scheduledPlayTimer = Timer(Duration(milliseconds: delayMs), () {

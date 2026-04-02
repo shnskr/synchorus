@@ -7,17 +7,18 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 
 import '../providers/app_providers.dart';
-import '../services/audio_service.dart';
 import 'player_screen.dart';
 
 class RoomScreen extends ConsumerStatefulWidget {
   final String roomCode;
   final bool isHost;
+  final int initialPeerCount;
 
   const RoomScreen({
     super.key,
     required this.roomCode,
     required this.isHost,
+    this.initialPeerCount = 0,
   });
 
   @override
@@ -25,7 +26,7 @@ class RoomScreen extends ConsumerStatefulWidget {
 }
 
 class _RoomScreenState extends ConsumerState<RoomScreen> {
-  final List<String> _peerNames = [];
+  final Map<String, String> _peerMap = {}; // peerId → name
   final List<String> _logs = [];
   StreamSubscription? _joinSub;
   StreamSubscription? _leaveSub;
@@ -35,10 +36,12 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   bool _syncing = false;
   bool _syncDone = false;
   String? _hostIp;
+  late int _guestPeerCount;
 
   @override
   void initState() {
     super.initState();
+    _guestPeerCount = widget.initialPeerCount;
     final p2p = ref.read(p2pServiceProvider);
 
     if (widget.isHost) {
@@ -59,13 +62,15 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
       _joinSub = p2p.onPeerJoin.listen((peer) {
         setState(() {
-          _peerNames.add(peer.name);
+          _peerMap[peer.id] = peer.name;
         });
         _addLog('${peer.name} 입장');
       });
 
       _leaveSub = p2p.onPeerLeave.listen((peerId) {
-        _addLog('참가자 퇴장');
+        final name = _peerMap.remove(peerId);
+        if (mounted) setState(() {});
+        _addLog('${name ?? "참가자"} 퇴장');
       });
     } else {
       _addLog('방 참가 완료 (코드: ${widget.roomCode})');
@@ -84,11 +89,15 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       });
     }
 
-    // WiFi 끊김 감지
-    _connectivitySub = Connectivity().onConnectivityChanged.listen((result) {
+    // WiFi 끊김 감지 (stale/일시적 이벤트 필터링)
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((result) async {
       if (!result.contains(ConnectivityResult.wifi)) {
-        _addLog('WiFi 연결이 끊어졌습니다');
-        if (mounted) {
+        // 잠시 대기 후 실제 상태 재확인 (stale/일시적 이벤트 방지)
+        await Future.delayed(const Duration(seconds: 1));
+        if (!mounted) return;
+        final current = await Connectivity().checkConnectivity();
+        if (!current.contains(ConnectivityResult.wifi) && mounted) {
+          _addLog('WiFi 연결이 끊어졌습니다');
           ScaffoldMessenger.of(context).showSnackBar(
             const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 방을 나갑니다.')),
           );
@@ -99,8 +108,21 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     _messageSub = p2p.onMessage.listen((message) {
       final type = message['type'] as String;
+
+      // 게스트: 참가자 입퇴장 추적
+      if (!widget.isHost) {
+        if (type == 'peer-joined') {
+          final name = message['data']?['name'] as String? ?? '참가자';
+          setState(() => _guestPeerCount++);
+          _addLog('$name 입장');
+        } else if (type == 'peer-left') {
+          setState(() => _guestPeerCount = (_guestPeerCount - 1).clamp(0, 999));
+          _addLog('참가자 퇴장');
+        }
+      }
+
       // 대량 메시지는 로그에서 제외
-      const hiddenTypes = {'sync-ping', 'sync-pong', 'audio-data', 'audio-meta', 'audio-request'};
+      const hiddenTypes = {'sync-ping', 'sync-pong', 'audio-data', 'audio-meta', 'audio-request', 'welcome', 'peer-joined', 'peer-left'};
       if (!hiddenTypes.contains(type)) {
         _addLog('메시지: $type');
       }
@@ -266,7 +288,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
             // 접속자 수
             Text(
-              '접속자: ${_peerNames.length + 1}명',
+              '접속자: ${widget.isHost ? _peerMap.length + 1 : _guestPeerCount + 1}명',
               style: const TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
             ),
 

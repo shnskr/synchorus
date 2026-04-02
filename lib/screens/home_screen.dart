@@ -46,6 +46,8 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
       return;
     }
+    _stopDiscovery();
+
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
 
@@ -132,6 +134,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       await p2p.disconnect();
       await p2p.connectToHost(host.ip, host.port, 'Guest');
 
+      int peerCount = 1;
+      try {
+        final welcome = await p2p.onMessage
+            .firstWhere((m) => m['type'] == 'welcome')
+            .timeout(const Duration(seconds: 5));
+        peerCount = welcome['data']?['peerCount'] ?? 1;
+      } catch (_) {}
+
       _discoverySub?.cancel();
       ref.read(discoveryServiceProvider).stop();
 
@@ -139,7 +149,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => RoomScreen(roomCode: host.roomCode, isHost: false),
+            builder: (_) => RoomScreen(roomCode: host.roomCode, isHost: false, initialPeerCount: peerCount),
           ),
         );
       }
@@ -288,20 +298,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       await p2p.disconnect();
       await p2p.connectToHost(ip, P2PService.defaultPort, 'Guest');
 
-      // welcome 메시지에서 roomCode 받기
+      // welcome 메시지에서 roomCode, peerCount 받기
       String roomCode = '----';
+      int peerCount = 1;
       try {
         final welcome = await p2p.onMessage
             .firstWhere((m) => m['type'] == 'welcome')
             .timeout(const Duration(seconds: 5));
         roomCode = welcome['data']?['roomCode'] ?? '----';
+        peerCount = welcome['data']?['peerCount'] ?? 1;
       } catch (_) {}
 
       if (mounted) {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => RoomScreen(roomCode: roomCode, isHost: false),
+            builder: (_) => RoomScreen(roomCode: roomCode, isHost: false, initialPeerCount: peerCount),
           ),
         );
       }

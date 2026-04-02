@@ -60,17 +60,31 @@
 - [x] 참가 시 로딩 표시 (IP 입력, 방 목록 모두)
 - [x] 연결 실패 시 "같은 WiFi 확인" 안내 메시지
 - [x] permission_handler 패키지 및 불필요 권한 제거 (위치 권한 불필요)
+- [x] WiFi 재연결 후 방 생성 시 stale 이벤트 방지 (1초 대기 + checkConnectivity 재확인)
+- [x] Heartbeat 메커니즘 추가 (3초 간격 ping/ack, 9초 타임아웃으로 죽은 피어 감지)
+- [x] 피어 퇴장 시 접속자 수 즉시 반영 (_peerNames → _peerMap으로 변경)
+- [x] 중복 퇴장 이벤트 방지 (heartbeat 제거 후 socket.done 중복 발화 차단)
+- [x] 게스트 접속자 수 표시 (welcome peerCount + peer-joined/peer-left 추적)
+- [x] 재생 시 재동기화 (게스트가 play 수신 시 3회 빠른 re-sync)
+- [x] 지연 초과 시 position 보정 (delayMs <= 0이면 늦은 만큼 position 앞으로 조정)
+- [x] 호스트 메시지 핸들러 가드 추가 (play/pause/seek/audio-meta 등 게스트 전용 메시지 차단)
+- [x] file_picker 캐시 삭제 문제 해결 (앱 임시 디렉토리에 복사 후 플레이어 로드)
+- [x] 음소거 버튼 추가 (컨트롤 영역 왼쪽, 이전 볼륨 복원)
+- [x] SafeArea 적용 (하단 네비게이션 바 영역 겹침 방지)
+- [x] 게스트 안내 문구 개선 ("음악 대기 중")
+- [x] 방 만들기/참가 시 검색 모드 자동 중지
+- [x] print → debugPrint 마이그레이션 (avoid_print 경고 해결)
+- [x] 기존 lint 이슈 전체 해결 (use_build_context_synchronously, unused_import, unused_local_variable)
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (audio-request 방식으로 개선 완료, 추가 테스트 필요)
-- [ ] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정)
-- [ ] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (재현 조건 추적 필요)
-- [ ] 에뮬레이터 ↔ 실기기 간 네트워크 불가 (에뮬레이터 가상 네트워크 10.0.2.x → WiFi 192.168.x.x 접근 불가, 실기기 2대 테스트 필요)
+- [x] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정, 20MB 테스트 통과)
+- [x] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (원인: file_picker 캐시 삭제 → 앱 임시 디렉토리에 복사하여 해결)
+- [x] 에뮬레이터 ↔ 실기기 간 네트워크 (UDP 브로드캐스트 불가 → IP 직접 입력으로 연결 가능)
 
 ### 다음 할 일
 - [ ] 위 알려진 이슈 추가 테스트 및 수정 (실기기 2대)
-- [ ] 기본 UI 정리 / UX 개선
-- [ ] 백그라운드 재생 (audio_service 패키지)
+- [ ] 알림바/잠금화면 재생 컨트롤 (audio_service 패키지, 백그라운드 재생 자체는 동작 확인)
 - [ ] 연결 끊김 시 자동 재연결
 
 ### 사용 중인 패키지
