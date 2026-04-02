@@ -53,25 +53,31 @@
 - [x] 파일 캐시 + 새 피어 입장 시 오디오 자동 전송 (sendCurrentAudioToPeer)
 - [x] 세대 카운터 (_sendGeneration) - 파일 전송 충돌 시 이전 전송 자동 취소
 - [x] audio-request 방식으로 변경 - 게스트가 sync 완료 후 직접 오디오 요청 (호스트 백그라운드 문제 해결)
+- [x] 호스트 IP 표시 및 복사 기능 (RoomScreen 카드에 IP 표시 + 복사 버튼)
+- [x] WiFi 연결 체크 (connectivity_plus) - 방 만들기/참가/검색 시 WiFi 미연결 차단
+- [x] WiFi 끊김 감지 시 자동 퇴장 (onConnectivityChanged)
+- [x] TCP 연결 타임아웃 5초 추가 (Socket.connect timeout)
+- [x] 참가 시 로딩 표시 (IP 입력, 방 목록 모두)
+- [x] 연결 실패 시 "같은 WiFi 확인" 안내 메시지
+- [x] permission_handler 패키지 및 불필요 권한 제거 (위치 권한 불필요)
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (audio-request 방식으로 개선 완료, 추가 테스트 필요)
 - [ ] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정)
 - [ ] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (재현 조건 추적 필요)
-- [ ] 에뮬레이터 ↔ 실기기 간 네트워크 불안정 (실기기 2대 테스트 권장)
+- [ ] 에뮬레이터 ↔ 실기기 간 네트워크 불가 (에뮬레이터 가상 네트워크 10.0.2.x → WiFi 192.168.x.x 접근 불가, 실기기 2대 테스트 필요)
 
 ### 다음 할 일
-- [ ] 위 알려진 이슈 추가 테스트 및 수정
+- [ ] 위 알려진 이슈 추가 테스트 및 수정 (실기기 2대)
 - [ ] 기본 UI 정리 / UX 개선
-- [ ] git commit (현재 변경사항 커밋 필요)
 - [ ] 백그라운드 재생 (audio_service 패키지)
 - [ ] 연결 끊김 시 자동 재연결
 
 ### 사용 중인 패키지
 ```yaml
 flutter_riverpod: ^2.6.1      # 상태 관리/DI
-network_info_plus: ^6.1.1     # WiFi IP 확인
-permission_handler: ^11.4.0   # 권한 관리
+network_info_plus: ^6.1.1     # WiFi IP 확인 (호스트 IP 표시용)
+connectivity_plus: ^7.1.0     # WiFi 연결 여부 확인
 just_audio: ^0.9.43           # 오디오 재생
 file_picker: ^8.1.7           # 파일 선택
 path_provider: ^2.1.5         # 임시 파일 저장 경로
