@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -29,8 +30,22 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     super.dispose();
   }
 
+  /// WiFi 연결 확인 (connectivity_plus)
+  Future<bool> _isWifiConnected() async {
+    final result = await Connectivity().checkConnectivity();
+    return result.contains(ConnectivityResult.wifi);
+  }
+
   /// 방 만들기 (호스트)
   Future<void> _createRoom() async {
+    if (!await _isWifiConnected()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi에 연결해주세요. 같은 WiFi에서만 사용할 수 있습니다.')),
+        );
+      }
+      return;
+    }
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
 
@@ -65,7 +80,15 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   }
 
   /// 주변 방 검색
-  void _startDiscovery() {
+  Future<void> _startDiscovery() async {
+    if (!await _isWifiConnected()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi에 연결해주세요. 같은 WiFi에서만 사용할 수 있습니다.')),
+        );
+      }
+      return;
+    }
     setState(() {
       _isSearching = true;
       _discoveredHosts = [];
@@ -94,22 +117,40 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 방 참가 (코드 입력 or 자동 감지)
   Future<void> _joinRoom(DiscoveredHost host) async {
     if (_isJoining) return;
+    if (!await _isWifiConnected()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi에 연결해주세요. 같은 WiFi에서만 사용할 수 있습니다.')),
+        );
+      }
+      return;
+    }
     setState(() => _isJoining = true);
 
-    final p2p = ref.read(p2pServiceProvider);
-    await p2p.disconnect();
-    await p2p.connectToHost(host.ip, host.port, 'Guest');
+    try {
+      final p2p = ref.read(p2pServiceProvider);
+      await p2p.disconnect();
+      await p2p.connectToHost(host.ip, host.port, 'Guest');
 
-    _discoverySub?.cancel();
-    ref.read(discoveryServiceProvider).stop();
+      _discoverySub?.cancel();
+      ref.read(discoveryServiceProvider).stop();
 
-    if (mounted) {
-      Navigator.push(
-        context,
-        MaterialPageRoute(
-          builder: (_) => RoomScreen(roomCode: host.roomCode, isHost: false),
-        ),
-      );
+      if (mounted) {
+        Navigator.push(
+          context,
+          MaterialPageRoute(
+            builder: (_) => RoomScreen(roomCode: host.roomCode, isHost: false),
+          ),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('연결 실패: 같은 WiFi에 연결되어 있는지 확인해주세요')),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isJoining = false);
     }
   }
 
@@ -182,8 +223,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 leading: const Icon(Icons.wifi),
                 title: Text('방 코드: ${host.roomCode}'),
                 subtitle: Text('${host.name} (${host.ip})'),
-                trailing: const Icon(Icons.arrow_forward),
-                onTap: () => _joinRoom(host),
+                trailing: _isJoining
+                    ? const SizedBox(
+                        width: 20, height: 20,
+                        child: CircularProgressIndicator(strokeWidth: 2),
+                      )
+                    : const Icon(Icons.arrow_forward),
+                onTap: _isJoining ? null : () => _joinRoom(host),
               ),
             )),
 
@@ -208,8 +254,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 ),
                 const SizedBox(width: 8),
                 ElevatedButton(
-                  onPressed: () => _joinByIp(),
-                  child: const Text('참가'),
+                  onPressed: _isJoining ? null : () => _joinByIp(),
+                  child: _isJoining
+                      ? const SizedBox(
+                          width: 20, height: 20,
+                          child: CircularProgressIndicator(strokeWidth: 2),
+                        )
+                      : const Text('참가'),
                 ),
               ],
             ),
@@ -222,7 +273,14 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   Future<void> _joinByIp() async {
     final ip = _codeController.text.trim();
     if (ip.isEmpty || _isJoining) return;
-
+    if (!await _isWifiConnected()) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi에 연결해주세요. 같은 WiFi에서만 사용할 수 있습니다.')),
+        );
+      }
+      return;
+    }
     setState(() => _isJoining = true);
 
     try {
@@ -250,7 +308,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } catch (e) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('연결 실패: $e')),
+          SnackBar(content: Text('연결 실패: 같은 WiFi에 연결되어 있는지 확인해주세요')),
         );
       }
     } finally {

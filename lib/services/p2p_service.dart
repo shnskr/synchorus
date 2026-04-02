@@ -61,7 +61,7 @@ class P2PService {
 
   /// 참가자: 호스트에 TCP 연결
   Future<void> connectToHost(String ip, int port, String myName) async {
-    _hostSocket = await Socket.connect(ip, port);
+    _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
 
     // 입장 메시지 전송
     _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': myName}});

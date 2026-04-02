@@ -1,7 +1,10 @@
 import 'dart:async';
 
+import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:network_info_plus/network_info_plus.dart';
 
 import '../providers/app_providers.dart';
 import '../services/audio_service.dart';
@@ -28,13 +31,19 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   StreamSubscription? _leaveSub;
   StreamSubscription? _messageSub;
   StreamSubscription? _disconnectSub;
+  StreamSubscription? _connectivitySub;
   bool _syncing = false;
   bool _syncDone = false;
+  String? _hostIp;
 
   @override
   void initState() {
     super.initState();
     final p2p = ref.read(p2pServiceProvider);
+
+    if (widget.isHost) {
+      _loadHostIp();
+    }
     final sync = ref.read(syncServiceProvider);
 
     final audio = ref.read(audioSyncServiceProvider);
@@ -75,6 +84,19 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       });
     }
 
+    // WiFi 끊김 감지
+    _connectivitySub = Connectivity().onConnectivityChanged.listen((result) {
+      if (!result.contains(ConnectivityResult.wifi)) {
+        _addLog('WiFi 연결이 끊어졌습니다');
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 방을 나갑니다.')),
+          );
+          _leaveRoom();
+        }
+      }
+    });
+
     _messageSub = p2p.onMessage.listen((message) {
       final type = message['type'] as String;
       // 대량 메시지는 로그에서 제외
@@ -83,6 +105,15 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
         _addLog('메시지: $type');
       }
     });
+  }
+
+  Future<void> _loadHostIp() async {
+    try {
+      final ip = await NetworkInfo().getWifiIP();
+      if (mounted && ip != null) {
+        setState(() => _hostIp = ip);
+      }
+    } catch (_) {}
   }
 
   /// 참가자: 시간 동기화 수행
@@ -157,6 +188,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _leaveSub?.cancel();
     _messageSub?.cancel();
     _disconnectSub?.cancel();
+    _connectivitySub?.cancel();
 
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
@@ -178,6 +210,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _leaveSub?.cancel();
     _messageSub?.cancel();
     _disconnectSub?.cancel();
+    _connectivitySub?.cancel();
     super.dispose();
   }
 
@@ -209,7 +242,23 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
                   color: widget.isHost ? Colors.amber : Colors.blue,
                 ),
                 title: Text(widget.isHost ? '호스트' : '참가자'),
-                subtitle: Text('방 코드: ${widget.roomCode}'),
+                subtitle: Text(
+                  widget.isHost && _hostIp != null
+                      ? '방 코드: ${widget.roomCode}  |  IP: $_hostIp'
+                      : '방 코드: ${widget.roomCode}',
+                ),
+                trailing: widget.isHost && _hostIp != null
+                    ? IconButton(
+                        icon: const Icon(Icons.copy, size: 20),
+                        tooltip: 'IP 복사',
+                        onPressed: () {
+                          Clipboard.setData(ClipboardData(text: _hostIp!));
+                          ScaffoldMessenger.of(context).showSnackBar(
+                            const SnackBar(content: Text('IP가 복사되었습니다'), duration: Duration(seconds: 1)),
+                          );
+                        },
+                      )
+                    : null,
               ),
             ),
 
