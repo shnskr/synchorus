@@ -14,6 +14,7 @@ class P2PService {
 
   ServerSocket? _serverSocket;
   Socket? _hostSocket;
+  String? _connectedHostIp;
   String? _roomCode;
   Timer? _heartbeatTimer;
   final List<Peer> _peers = [];
@@ -39,6 +40,7 @@ class P2PService {
 
   /// 호스트인지 여부
   bool get isHost => _serverSocket != null;
+  String? get connectedHostIp => _connectedHostIp;
 
   /// 4자리 방 코드 생성
   String generateRoomCode() {
@@ -96,6 +98,7 @@ class P2PService {
   /// 참가자: 호스트에 TCP 연결
   Future<void> connectToHost(String ip, int port, String myName) async {
     _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+    _connectedHostIp = ip;
 
     // 입장 메시지 전송
     _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': myName}});
@@ -175,6 +178,21 @@ class P2PService {
               _sendTo(socket, {'type': 'heartbeat-ack'});
               continue;
             }
+            // 호스트: 게스트 leave 수신 → 즉시 퇴장 처리
+            if (message['type'] == 'leave' && sourceId != 'host') {
+              final peer = _peers.cast<Peer?>().firstWhere(
+                (p) => p!.id == sourceId, orElse: () => null);
+              if (peer != null) {
+                peer.socket.destroy();
+                _peers.remove(peer);
+                _peerLeaveController.add(peer.id);
+                broadcastToAll({
+                  'type': 'peer-left',
+                  'data': {'peerId': peer.id},
+                });
+              }
+              continue;
+            }
             // 호스트: heartbeat-ack 수신 → lastSeen 갱신
             if (message['type'] == 'heartbeat-ack') {
               final peer = _peers.cast<Peer?>().firstWhere(
@@ -248,12 +266,19 @@ class P2PService {
   Future<void> disconnect() async {
     _heartbeatTimer?.cancel();
     _heartbeatTimer = null;
+
+    // 게스트: 호스트에게 leave 메시지 전송 후 소켓 종료
+    if (_hostSocket != null) {
+      _sendTo(_hostSocket!, {'type': 'leave'});
+    }
+
     for (final peer in _peers) {
       peer.socket.destroy();
     }
     _peers.clear();
     _hostSocket?.destroy();
     _hostSocket = null;
+    _connectedHostIp = null;
     await _serverSocket?.close();
     _serverSocket = null;
   }

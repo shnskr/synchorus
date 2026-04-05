@@ -24,11 +24,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   AudioSyncService get _audio => ref.read(audioSyncServiceProvider);
 
   @override
-  void initState() {
-    super.initState();
-  }
-
-  @override
   void dispose() {
     _urlController.dispose();
     super.dispose();
@@ -209,8 +204,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               children: [
                 Slider(
                   min: 0,
-                  max: duration.inMilliseconds.toDouble().clamp(1, double.infinity),
-                  value: position.inMilliseconds.toDouble().clamp(0, duration.inMilliseconds.toDouble().clamp(1, double.infinity)),
+                  max: duration.inMilliseconds.toDouble().clamp(1, double.maxFinite),
+                  value: position.inMilliseconds.toDouble().clamp(0, duration.inMilliseconds.toDouble().clamp(1, double.maxFinite)),
                   onChanged: widget.isHost ? (value) {} : null,
                   onChangeEnd: widget.isHost
                       ? (value) {

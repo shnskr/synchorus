@@ -1,5 +1,7 @@
 import 'dart:async';
 
+import 'package:flutter/foundation.dart';
+
 import 'p2p_service.dart';
 
 class SyncResult {
@@ -23,15 +25,17 @@ class SyncService {
   bool _synced = false;
 
   int get offsetMs => _offsetMs;
+  int get bestRtt => _bestRtt;
   bool get isSynced => _synced;
 
   StreamSubscription? _messageSub;
+  Timer? _periodicSyncTimer;
 
   SyncService(this._p2p);
 
   /// 참가자: 호스트와 시간 동기화 시작
   /// ping을 [count]회 보내서 가장 RTT가 작은 샘플로 offset 확정
-  Future<SyncResult> syncWithHost({int count = 7}) async {
+  Future<SyncResult> syncWithHost({int count = 10}) async {
     final completer = Completer<SyncResult>();
     int completed = 0;
 
@@ -93,6 +97,25 @@ class SyncService {
     );
   }
 
+  /// 참가자: 백그라운드 주기적 재동기화 시작
+  void startPeriodicSync({Duration interval = const Duration(seconds: 30)}) {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = Timer.periodic(interval, (_) async {
+      try {
+        final result = await syncWithHost();
+        debugPrint('Periodic sync: offset=${result.offsetMs}ms, RTT=${result.rttMs}ms');
+      } catch (e) {
+        debugPrint('Periodic sync failed: $e');
+      }
+    });
+  }
+
+  /// 참가자: 주기적 재동기화 중지
+  void stopPeriodicSync() {
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
+  }
+
   /// 호스트: sync-ping 메시지를 처리하여 pong 응답
   void startHostHandler() {
     _synced = true; // 호스트는 기준 시간이므로 항상 synced
@@ -134,5 +157,7 @@ class SyncService {
   void dispose() {
     _messageSub?.cancel();
     _messageSub = null;
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
   }
 }

@@ -122,7 +122,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       }
 
       // 대량 메시지는 로그에서 제외
-      const hiddenTypes = {'sync-ping', 'sync-pong', 'audio-data', 'audio-meta', 'audio-request', 'welcome', 'peer-joined', 'peer-left'};
+      const hiddenTypes = {'sync-ping', 'sync-pong', 'sync-position', 'audio-request', 'welcome', 'peer-joined', 'peer-left'};
       if (!hiddenTypes.contains(type)) {
         _addLog('메시지: $type');
       }
@@ -153,8 +153,16 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
         _syncing = false;
         _syncDone = true;
       });
-      // 동기화 완료 후 호스트에게 현재 오디오 요청
+
+      // 주기적 재동기화 시작 (클럭 드리프트 보정)
+      sync.startPeriodicSync();
+
+      // 엔진 레이턴시 측정
       final audio = ref.read(audioSyncServiceProvider);
+      final latency = await audio.measureEngineLatency();
+      _addLog('엔진 레이턴시: ${latency}ms');
+
+      // 동기화 완료 후 호스트에게 현재 오디오 요청
       audio.requestCurrentAudio();
     } catch (e) {
       _addLog('동기화 실패: $e');
@@ -215,8 +223,10 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
     final audio = ref.read(audioSyncServiceProvider);
+    final sync = ref.read(syncServiceProvider);
 
     // 정리 완료 후 이동 (구독 취소했으므로 블로킹 없음)
+    sync.stopPeriodicSync();
     discovery.stop();
     await p2p.disconnect();
     await audio.clearTempFiles();
@@ -233,6 +243,11 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _messageSub?.cancel();
     _disconnectSub?.cancel();
     _connectivitySub?.cancel();
+
+    // 앱 종료/화면 파괴 시 오디오 서비스 정리
+    final audio = ref.read(audioSyncServiceProvider);
+    audio.clearTempFiles();
+
     super.dispose();
   }
 
@@ -327,14 +342,17 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
                   color: Colors.grey[900],
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: ListView.builder(
-                  itemCount: _logs.length,
-                  itemBuilder: (_, index) => Text(
-                    _logs[index],
-                    style: const TextStyle(
-                      color: Colors.greenAccent,
-                      fontFamily: 'monospace',
-                      fontSize: 13,
+                child: ScrollConfiguration(
+                  behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
+                  child: ListView.builder(
+                    itemCount: _logs.length,
+                    itemBuilder: (_, index) => Text(
+                      _logs[index],
+                      style: const TextStyle(
+                        color: Colors.greenAccent,
+                        fontFamily: 'monospace',
+                        fontSize: 13,
+                      ),
                     ),
                   ),
                 ),

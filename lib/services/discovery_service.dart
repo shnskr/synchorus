@@ -54,10 +54,12 @@ class DiscoveryService {
         final parts = message.split(':');
 
         if (parts.length == 4 && parts[0] == prefix) {
+          final port = int.tryParse(parts[2]);
+          if (port == null) continue;
           yield DiscoveredHost(
             name: parts[1],
             ip: datagram.address.address,
-            port: int.parse(parts[2]),
+            port: port,
             roomCode: parts[3],
           );
         }
