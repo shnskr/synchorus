@@ -28,6 +28,8 @@ class RoomScreen extends ConsumerStatefulWidget {
 class _RoomScreenState extends ConsumerState<RoomScreen> {
   final Map<String, String> _peerMap = {}; // peerId → name
   final List<String> _logs = [];
+  final ScrollController _logScrollController = ScrollController();
+  bool _autoScroll = true;
   StreamSubscription? _joinSub;
   StreamSubscription? _leaveSub;
   StreamSubscription? _messageSub;
@@ -197,12 +199,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       // 주기적 재동기화 시작 (클럭 드리프트 보정)
       sync.startPeriodicSync();
 
-      // 엔진 레이턴시 측정
-      final audio = ref.read(audioSyncServiceProvider);
-      final latency = await audio.measureEngineLatency();
-      _addLog('엔진 레이턴시: ${latency}ms');
-
       // 동기화 완료 후 호스트에게 현재 오디오 요청
+      final audio = ref.read(audioSyncServiceProvider);
       audio.requestCurrentAudio();
     } catch (e) {
       _addLog('동기화 실패: $e');
@@ -290,6 +288,13 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     setState(() {
       _logs.add('[${DateTime.now().toString().substring(11, 19)}] $message');
     });
+    if (_autoScroll) {
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (_logScrollController.hasClients) {
+          _logScrollController.jumpTo(_logScrollController.position.maxScrollExtent);
+        }
+      });
+    }
   }
 
   void _goToPlayer() {
@@ -359,6 +364,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _disconnectSub?.cancel();
     _connectivitySub?.cancel();
     _audioErrorSub?.cancel();
+
+    _logScrollController.dispose();
 
     // 앱 종료/화면 파괴 시 동기적 정리 (dispose는 sync라 await 불가)
     final audio = ref.read(audioSyncServiceProvider);
@@ -464,16 +471,26 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
                   color: Colors.grey[900],
                   borderRadius: BorderRadius.circular(8),
                 ),
-                child: ScrollConfiguration(
-                  behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
-                  child: ListView.builder(
-                    itemCount: _logs.length,
-                    itemBuilder: (_, index) => Text(
-                      _logs[index],
-                      style: const TextStyle(
-                        color: Colors.greenAccent,
-                        fontFamily: 'monospace',
-                        fontSize: 13,
+                child: NotificationListener<ScrollNotification>(
+                  onNotification: (notification) {
+                    if (notification is UserScrollNotification) {
+                      final pos = _logScrollController.position;
+                      _autoScroll = pos.pixels >= pos.maxScrollExtent - 30;
+                    }
+                    return false;
+                  },
+                  child: ScrollConfiguration(
+                    behavior: ScrollConfiguration.of(context).copyWith(overscroll: false),
+                    child: ListView.builder(
+                      controller: _logScrollController,
+                      itemCount: _logs.length,
+                      itemBuilder: (_, index) => Text(
+                        _logs[index],
+                        style: const TextStyle(
+                          color: Colors.greenAccent,
+                          fontFamily: 'monospace',
+                          fontSize: 13,
+                        ),
                       ),
                     ),
                   ),

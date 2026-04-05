@@ -125,14 +125,39 @@
 - [x] 게스트 오디오 URL 로드 실패 시 2초 후 자동 재시도 + 실패 시 `errorStream`으로 UI 알림
 - [x] `const` 누락 수정 (home_screen SnackBar)
 
+#### 2026-04-06 작업 내역
+
+**싱크 보정 로직 대폭 개선**
+- [x] 임계값 20ms → 30ms로 변경 (30ms 미만 무시, 30ms 이상 seek)
+- [x] 속도 조절(1.05/0.95) 재시도 후 최종 제거 — 에뮬레이터에서 `setSpeed(1.05)` 시 오히려 차이 증가 확인
+- [x] `_commandSeq` 패턴 도입 — 빠른 재생/정지 반복 시 stale async 무효화
+- [x] `_syncSeeking` 플래그 — sync-position 보정 중 재진입 방지
+- [x] 버퍼링 복구 2초 쿨다운 — seek 후 버퍼링→ready 전환 감지, 연쇄 반응 방지
+- [x] pause는 동기 처리 (await 안 함) — 즉시 정지 보장
+
+**엔진 출력 레이턴시 보정**
+- [x] 플랫폼 채널로 엔진 레이턴시 측정 (Android: AudioManager, iOS: AVAudioSession)
+- [x] 호스트가 play/sync-position/seek 메시지에 `engineLatencyMs` 포함
+- [x] 게스트가 `(myLatency - hostLatency)` 만큼 position 보정
+- [x] S22: ~4ms, 에뮬레이터: ~22ms → 게스트가 18ms 앞서서 재생하여 스피커 출력 시점 맞춤
+
+**오디오 에러 복구**
+- [x] seek 중 404 에러 시 자동 오디오 재로드 (`_reloadAudio`)
+- [x] play 시 플레이어 idle/에러 상태 감지 → 자동 재로드
+- [x] 재로드 실패 시 호스트에게 `audio-request` 재요청
+
+**UX 개선**
+- [x] 로그 자동 스크롤 (새 로그 추가 시 맨 아래로, 수동 스크롤 시 자동 스크롤 중지, 다시 아래로 내리면 재개)
+
 #### 알려진 이슈 / 다음에 확인할 것
-- [ ] 에뮬레이터 싱크 ~100ms 차이 — 에뮬레이터 오디오 가상화 한계, 실기기 2대 테스트 필요
-- [ ] 엔진 레이턴시 측정이 부정확 (내부 클럭 시작 측정, 실제 스피커 출력 시점 아님)
-- [ ] 초기 재생 시 seek→play→오디오 파이프라인 지연으로 완벽한 동시 시작 불가 (seek 후 보정으로 대응)
+- [ ] 엔진 레이턴시 보정값이 실제와 약간 차이 (에뮬 기준 ~10ms 오차) — 수동 보정 슬라이더 추가 예정
+- [ ] 호스트 백그라운드 진입 시 파일 서버 연결 끊김 → 게스트 seek 시 404 (자동 재로드로 대응)
+- [ ] 디버그 모드에서 호스트 플레이어 간헐적 스터터 (position이 실시간보다 느리게 진행)
 - [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (추가 테스트 필요)
 - [x] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정, 20MB 테스트 통과)
 - [x] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (원인: file_picker 캐시 삭제 → 앱 임시 디렉토리에 복사하여 해결)
 - [x] 에뮬레이터 ↔ 실기기 간 네트워크 (UDP 브로드캐스트 불가 → IP 직접 입력으로 연결 가능)
+- [x] 에뮬레이터 싱크 ~100ms 차이 — 엔진 레이턴시 보정으로 해결 (diff 10~20ms 수준으로 개선)
 
 ### 사용 중인 패키지
 ```yaml
@@ -250,15 +275,17 @@ class WebRtcConnection implements ConnectionService { ... }  // Phase 4
 - **늦게 입장한 게스트도 동일한 로직** (별도 state-request 불필요)
 
 **오디오 엔진 레이턴시 보정**:
-- 방 입장 시 무음 play() 테스트 → engineLatency 측정
-- play() 호출부터 position이 움직이기 시작하는 시점까지의 시간
-- 같은 기기에서는 일정하므로 한 번 측정 후 재사용
-- 재생 스케줄링 시 engineLatency만큼 보정
+- 플랫폼 채널(`com.synchorus/audio_latency`)로 OS에서 직접 측정
+  - Android: `AudioManager.getProperty(OUTPUT_LATENCY)` + buffer 레이턴시
+  - iOS: `AVAudioSession.outputLatency` + `ioBufferDuration`
+- 호스트/게스트 모두 `startListening` 시 측정, 메시지에 포함하여 전송
+- 게스트가 `(myLatency - hostLatency)` 만큼 position을 앞으로 조정
+- 실제 스피커 출력 시점 차이를 보정 (소프트웨어 position 일치 ≠ 소리 일치)
 
 **게스트 방 입장 시 초기화 순서**:
 ```
 1. 핑퐁 10회 → offset 계산
-2. 무음 play() → engineLatency 측정
+2. 엔진 레이턴시 측정 (플랫폼 채널)
 3. 오디오 로드 (HTTP 스트리밍)
 4. 모두 완료 → play 신호 대기 or 이미 재생 중이면 바로 진입
 ```
@@ -267,24 +294,30 @@ class WebRtcConnection implements ConnectionService { ... }  // Phase 4
 
 offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위치 차이.
 
-**호스트 → 게스트 position 전송**: 5초마다 `{ hostTime, positionMs }` 전송
+**호스트 → 게스트 position 전송**: 5초마다 `{ hostTime, positionMs, engineLatencyMs }` 전송
 
 **게스트 보정 로직**:
 ```
-호스트 position 추정 = positionMs + 경과시간
-내 position과 비교 → 차이 계산
+엔진 레이턴시 보정 = 내 엔진 레이턴시 - 호스트 엔진 레이턴시
+호스트 position 추정 = positionMs + 경과시간 + 엔진 레이턴시 보정
+내 position과 비교 → 차이 계산 (절대값 기준)
 
-차이 < 20ms   → 무시 (충분히 정확)
-차이 >= 20ms  → seek로 즉시 보정
+차이 < 30ms   → 무시 (충분히 정확)
+차이 >= 30ms  → seek로 즉시 보정
 ```
 
-**seek 쿨다운**: seek 후 1초간 추가 보정 스킵 (seek 안정화 대기, 버퍼링 복구와 충돌 방지)
+**seek 안전장치**:
+- `_syncSeeking` 플래그: seek 진행 중 다음 sync-position이 와도 무시
+- `_lastBufferingRecovery`: seek 직후 버퍼링 복구 2초 쿨다운
+- `_commandSeq`: 빠른 재생/정지 반복 시 진행 중인 async 작업 무효화
 
-**참고**: 속도 조절(1.05/0.95) 방식은 수렴이 느리고 불안정하여 제거됨
+**속도 조절 제거 이유**: `setSpeed(1.05)` 시 에뮬레이터에서 오히려 차이 증가 (1.05x 유지 못함). 실기기에서도 보장 불가하므로 seek 단일 방식으로 통일.
 
-**버퍼링 복구**: 5초 대기하지 않고 just_audio 버퍼링 종료 이벤트 감지 → 즉시 position 비교 → seek
+**버퍼링 복구**: seek 후 just_audio 버퍼링→ready 전환 감지 → 즉시 position 재계산 → seek. 2초 쿨다운으로 연쇄 반응 방지.
 
-**블루투스 레이턴시**: 수동 조절 슬라이더로 대응 (향후 추가)
+**에러 복구**: seek 중 404 등 소스 에러 발생 시 자동 오디오 재로드 (`_reloadAudio`). 재로드 실패 시 호스트에게 `audio-request` 재요청.
+
+**블루투스/수동 레이턴시 보정**: 수동 조절 슬라이더로 대응 (향후 추가)
 
 ## 아키텍처: 하이브리드 (P2P + 클라우드)
 
@@ -363,10 +396,10 @@ offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위
 | `sync-ping` | 참가->호스트 | `{ t1 }` | 시간 동기화 ping |
 | `sync-pong` | 호스트->참가 | `{ t1, hostTime }` | 시간 동기화 pong |
 | `audio-url` | 호스트->전체 | `{ url }` | 오디오 URL 공유 (HTTP 서버 URL 또는 외부 URL) |
-| `play` | 호스트->전체 | `{ hostTime, positionMs }` | 재생 (호스트 시간 + position) |
+| `play` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 재생 (호스트 시간 + position + 엔진 레이턴시) |
 | `pause` | 호스트->전체 | `{ positionMs }` | 일시정지 |
-| `seek` | 호스트->전체 | `{ hostTime, positionMs }` | 탐색 |
-| `sync-position` | 호스트->전체 | `{ hostTime, positionMs }` | 재생 중 position 동기화 (5초마다) |
+| `seek` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 탐색 |
+| `sync-position` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 재생 중 position 동기화 (5초마다) |
 | `volume` | 로컬 전용 | - | 각 디바이스 개별 볼륨 (전송 불필요) |
 
 ### 제거된 이벤트 (v2에서 불필요)
@@ -375,7 +408,7 @@ offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위
 |--------|----------|
 | `audio-meta` | HTTP 서버 방식으로 전환, 파일 메타 전송 불필요 |
 | `audio-transfer` | HTTP 서버 방식으로 전환, 청크 전송 불필요 |
-| `audio-request` | HTTP URL 공유로 대체 |
+| `audio-request` | ~~HTTP URL 공유로 대체~~ → 다시 활용 (게스트 동기화 완료 후 현재 오디오 요청, 에러 복구 시 재요청) |
 | `state-request/response` | play 메시지의 hostTime+position으로 통합 |
 
 ## 화면 구성
@@ -449,7 +482,7 @@ Phase 4:   확장 기능 추가
 - [x] offset 계산 개선 (10회 핑퐁 + 백그라운드 주기적 재계산)
 - [x] 동기화 재생 개선 (2초 딜레이 제거 → 즉시 재생 + 경과 시간 계산)
 - [x] 재생 중 싱크 보정 (5초마다 position 비교 + seek 보정)
-- [x] engineLatency 측정 및 보정
+- [x] engineLatency 측정 및 보정 (플랫폼 채널 + 호스트-게스트 차이 보정)
 - [x] 백그라운드 재생 (audio_service + 알림바/잠금화면 컨트롤)
 - [ ] 연결 계층 추상화 (향후 WebRTC 전환 대비, Phase 4에서 진행)
 - [x] 연결 끊김 시 자동 재연결

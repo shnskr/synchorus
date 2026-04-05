@@ -50,6 +50,10 @@ class SyncService {
     final completer = Completer<SyncResult>();
     int completed = 0;
 
+    // 매 라운드마다 리셋 (클럭 드리프트 보정을 위해)
+    int roundBestRtt = 999999;
+    int roundOffset = _offsetMs;
+
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen((message) {
       if (message['type'] == 'sync-pong') {
@@ -60,13 +64,15 @@ class SyncService {
         final rtt = now - t1;
         final offset = hostTime - (t1 + rtt ~/ 2);
 
-        if (rtt < _bestRtt) {
-          _bestRtt = rtt;
-          _offsetMs = offset;
+        if (rtt < roundBestRtt) {
+          roundBestRtt = rtt;
+          roundOffset = offset;
         }
 
         completed++;
         if (completed >= count) {
+          _offsetMs = roundOffset;
+          _bestRtt = roundBestRtt;
           _synced = true;
           _messageSub?.cancel();
           _messageSub = null;
@@ -96,6 +102,8 @@ class SyncService {
         _messageSub?.cancel();
         _messageSub = null;
         if (completed > 0) {
+          _offsetMs = roundOffset;
+          _bestRtt = roundBestRtt;
           _synced = true;
           return SyncResult(
             offsetMs: _offsetMs,

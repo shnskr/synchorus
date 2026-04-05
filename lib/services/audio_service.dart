@@ -3,6 +3,7 @@ import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:flutter/foundation.dart';
+import 'package:flutter/services.dart';
 import 'package:just_audio/just_audio.dart';
 import 'package:network_info_plus/network_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
@@ -29,9 +30,13 @@ class AudioSyncService {
   bool _audioReady = false;
   Map<String, dynamic>? _pendingPlay;
 
+  // 명령 직렬화: 빠른 재생/정지 반복 시 꼬임 방지
+  int _commandSeq = 0;
+
+  // 엔진 출력 레이턴시 보정
   int _engineLatencyMs = 0;
-  int _lastSeekTime = 0; // seek 쿨다운용
-  int get engineLatencyMs => _engineLatencyMs;
+  int _hostEngineLatencyMs = 0;
+  int get _latencyCompensation => _engineLatencyMs - _hostEngineLatencyMs;
 
   // 마지막 수신한 sync-position (버퍼링 복구용)
   int? _lastSyncHostTime;
@@ -65,11 +70,26 @@ class AudioSyncService {
     _messageSub = _p2p.onMessage.listen(_onMessage);
 
     await _initAudioHandler();
+    await _measureEngineLatency();
 
     if (isHost) {
       _startPositionBroadcast();
     } else {
       _startBufferingWatch();
+    }
+  }
+
+  Future<void> _measureEngineLatency() async {
+    try {
+      const channel = MethodChannel('com.synchorus/audio_latency');
+      final result = await channel.invokeMethod<Map>('getOutputLatency');
+      if (result != null) {
+        _engineLatencyMs = (result['totalMs'] as int?) ?? 0;
+        debugPrint('Engine latency: ${_engineLatencyMs}ms');
+      }
+    } catch (e) {
+      debugPrint('Engine latency measurement failed: $e');
+      _engineLatencyMs = 0;
     }
   }
 
@@ -112,16 +132,16 @@ class AudioSyncService {
           if (!_isHost) await _handleAudioUrl(message['data']);
           break;
         case 'play':
-          if (!_isHost) await _handlePlay(message['data']);
+          if (!_isHost) _handlePlay(message['data']);
           break;
         case 'pause':
-          if (!_isHost) await _handlePause(message['data']);
+          if (!_isHost) _handlePause(message['data']);
           break;
         case 'seek':
-          if (!_isHost) await _handleSeek(message['data']);
+          if (!_isHost) _handleSeek(message['data']);
           break;
         case 'sync-position':
-          if (!_isHost) await _handleSyncPosition(message['data']);
+          if (!_isHost) _handleSyncPosition(message['data']);
           break;
         case 'audio-request':
           if (_isHost) _handleAudioRequest(message['_from']);
@@ -223,10 +243,10 @@ class AudioSyncService {
       'data': {
         'hostTime': hostTime,
         'positionMs': positionMs,
+        'engineLatencyMs': _engineLatencyMs,
       },
     });
 
-    // 호스트: 즉시 재생
     await _player.play();
   }
 
@@ -249,6 +269,7 @@ class AudioSyncService {
       'data': {
         'positionMs': position.inMilliseconds,
         'hostTime': wasPlaying ? _sync.nowAsHostTime : null,
+        'engineLatencyMs': _engineLatencyMs,
       },
     });
   }
@@ -271,6 +292,7 @@ class AudioSyncService {
         'data': {
           'hostTime': _sync.nowAsHostTime,
           'positionMs': _player.position.inMilliseconds,
+          'engineLatencyMs': _engineLatencyMs,
         },
       });
     }
@@ -292,6 +314,7 @@ class AudioSyncService {
           'data': {
             'hostTime': _sync.nowAsHostTime,
             'positionMs': _player.position.inMilliseconds,
+            'engineLatencyMs': _engineLatencyMs,
           },
         });
       }
@@ -306,11 +329,9 @@ class AudioSyncService {
     // 게스트: URL의 호스트를 실제 연결한 IP로 치환 (에뮬레이터 등 네트워크 경로가 다른 경우)
     final connectedIp = _p2p.connectedHostIp;
     if (connectedIp != null) {
-      final uri = Uri.parse(url);
-      if (uri.host != connectedIp) {
-        url = uri.replace(host: connectedIp).toString();
-        debugPrint('Audio URL rewritten: $url');
-      }
+      // 정규식으로 호스트 부분만 치환 (Uri.parse 이중 인코딩 방지)
+      url = url.replaceFirst(RegExp(r'http://[^:/]+'), 'http://$connectedIp');
+      debugPrint('Audio URL rewritten: $url');
     }
 
     await _player.stop();
@@ -318,10 +339,13 @@ class AudioSyncService {
     _audioReady = false;
 
     _currentUrl = url;
-    final decoded = Uri.decodeComponent(
-      Uri.parse(url).pathSegments.lastOrNull ?? '',
-    );
-    _currentFileName = decoded.isNotEmpty ? decoded : null;
+    try {
+      final pathPart = url.split('/').last;
+      final decoded = Uri.decodeComponent(pathPart);
+      _currentFileName = decoded.isNotEmpty ? decoded : null;
+    } catch (_) {
+      _currentFileName = url.split('/').last;
+    }
 
     _isLoading = true;
     _loadingController.add(true);
@@ -360,79 +384,122 @@ class AudioSyncService {
       return;
     }
 
+    final seq = ++_commandSeq;
+
     final hostTime = data['hostTime'] as int;
     final positionMs = data['positionMs'] as int;
+    _hostEngineLatencyMs = (data['engineLatencyMs'] as int?) ?? 0;
 
     final elapsed = _sync.nowAsHostTime - hostTime;
-    final targetPosition = positionMs + elapsed + _engineLatencyMs;
+    final targetPosition = positionMs + elapsed + _latencyCompensation;
     final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
 
+    debugPrint('SYNC_PLAY: hostTime=$hostTime, positionMs=$positionMs, '
+        'elapsed=$elapsed, target=$targetPosition, '
+        'engineComp=$_latencyCompensation (my=$_engineLatencyMs, host=$_hostEngineLatencyMs)');
+
+    // 에러 상태면 오디오 재로드
+    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
+      debugPrint('Player in error/idle state, reloading audio...');
+      await _reloadAudio();
+      if (seq != _commandSeq || !_audioReady) return;
+    }
+
+    _lastBufferingRecovery = DateTime.now();
     await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
-    _lastSeekTime = DateTime.now().millisecondsSinceEpoch;
+    if (seq != _commandSeq) return;
+
     if (!_player.playing) {
       await _player.play();
     }
   }
 
-  Future<void> _handlePause(Map<String, dynamic> data) async {
-    await _player.pause();
+  void _handlePause(Map<String, dynamic> data) {
+    ++_commandSeq;
+    _player.pause();
     final positionMs = data['positionMs'] as int?;
     if (positionMs != null) {
-      await _player.seek(Duration(milliseconds: positionMs));
+      _player.seek(Duration(milliseconds: positionMs));
     }
   }
 
   Future<void> _handleSeek(Map<String, dynamic> data) async {
+    final seq = ++_commandSeq;
     final positionMs = data['positionMs'] as int;
     final hostTime = data['hostTime'];
+    final hostLatency = (data['engineLatencyMs'] as int?) ?? _hostEngineLatencyMs;
+    if (hostLatency > 0) _hostEngineLatencyMs = hostLatency;
 
     if (hostTime != null) {
-      // seek while playing
       final elapsed = _sync.nowAsHostTime - (hostTime as int);
-      final targetPosition = positionMs + elapsed;
+      final targetPosition = positionMs + elapsed + _latencyCompensation;
       final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
       await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
+      if (seq != _commandSeq) return;
       if (!_player.playing) {
         await _player.play();
       }
     } else {
-      // seek while paused
       await _player.seek(Duration(milliseconds: positionMs));
     }
   }
 
   // ─── 게스트: 재생 중 싱크 보정 ───
 
+  bool _syncSeeking = false;
+
   Future<void> _handleSyncPosition(Map<String, dynamic> data) async {
     final hostTime = data['hostTime'] as int;
     final hostPositionMs = data['positionMs'] as int;
+    final hostLatency = (data['engineLatencyMs'] as int?) ?? _hostEngineLatencyMs;
+    if (hostLatency > 0) _hostEngineLatencyMs = hostLatency;
 
-    // 버퍼링 복구용으로 저장
     _lastSyncHostTime = hostTime;
     _lastSyncPositionMs = hostPositionMs;
 
     if (!_player.playing) return;
+    if (_player.processingState != ProcessingState.ready) return;
+    if (_syncSeeking) return;
 
-    // seek 후 1초간 보정 스킵 (seek 안정화 대기)
-    final now = DateTime.now().millisecondsSinceEpoch;
-    if (now - _lastSeekTime < 1000) return;
-
-    // 호스트의 현재 position 추정
     final elapsed = _sync.nowAsHostTime - hostTime;
-    final expectedPosition = hostPositionMs + elapsed;
+    final expectedPosition = hostPositionMs + elapsed + _latencyCompensation;
     final myPosition = _player.position.inMilliseconds;
-    final diff = expectedPosition - myPosition; // 양수 = 내가 뒤처짐
+    final diff = expectedPosition - myPosition;
 
-    if (diff.abs() < 20) return; // 20ms 미만은 무시
+    debugPrint('SYNC_POS: expected=$expectedPosition, my=$myPosition, diff=$diff');
 
-    // seek로 즉시 보정
+    if (diff.abs() < 30) return; // 30ms 미만: 무시
+
+    // 30ms 이상: seek로 보정
+    _syncSeeking = true;
+    _lastBufferingRecovery = DateTime.now();
     final nowElapsed = _sync.nowAsHostTime - hostTime;
-    final adjustedPosition = hostPositionMs + nowElapsed;
+    final adjustedPosition = hostPositionMs + nowElapsed + _latencyCompensation;
     final maxPosition = _player.duration?.inMilliseconds ?? adjustedPosition;
-    await _player.seek(Duration(milliseconds: adjustedPosition.clamp(0, maxPosition)));
-    _lastSeekTime = DateTime.now().millisecondsSinceEpoch;
+    try {
+      await _player.seek(Duration(milliseconds: adjustedPosition.clamp(0, maxPosition)));
+    } catch (e) {
+      debugPrint('Sync seek error: $e, reloading audio...');
+      await _reloadAudio();
+    }
+    _syncSeeking = false;
 
     debugPrint('Sync: ${diff}ms → seek to ${adjustedPosition}ms');
+  }
+
+  // ─── 게스트: 오디오 에러 시 재로드 ───
+
+  Future<void> _reloadAudio() async {
+    if (_currentUrl == null) return;
+    debugPrint('Reloading audio from $_currentUrl');
+    try {
+      await _player.setUrl(_currentUrl!);
+      _audioReady = true;
+    } catch (e) {
+      debugPrint('Audio reload failed: $e');
+      // 호스트에게 다시 요청
+      requestCurrentAudio();
+    }
   }
 
   // ─── 게스트: 버퍼링 복구 감지 ───
@@ -448,7 +515,6 @@ class AudioSyncService {
           state == ProcessingState.ready &&
           _player.playing &&
           _lastSyncHostTime != null) {
-        // 2초 이내 반복 복구 방지 (무한 루프 차단)
         final now = DateTime.now();
         if (_lastBufferingRecovery != null &&
             now.difference(_lastBufferingRecovery!).inMilliseconds < 2000) {
@@ -459,88 +525,14 @@ class AudioSyncService {
         _lastBufferingRecovery = now;
 
         final elapsed = _sync.nowAsHostTime - _lastSyncHostTime!;
-        final expectedPosition = _lastSyncPositionMs! + elapsed;
+        final expectedPosition = _lastSyncPositionMs! + elapsed + _latencyCompensation;
         final maxPosition = _player.duration?.inMilliseconds ?? expectedPosition;
         _player.seek(Duration(milliseconds: expectedPosition.clamp(0, maxPosition)));
-        _lastSeekTime = DateTime.now().millisecondsSinceEpoch;
+
         debugPrint('Buffering recovery: seek to ${expectedPosition}ms');
       }
       _lastProcessingState = state;
     });
-  }
-
-  // ─── 엔진 레이턴시 측정 ───
-
-  Future<int> measureEngineLatency({int samples = 5}) async {
-    try {
-      final tempDir = await getTemporaryDirectory();
-      final silentFile = File('${tempDir.path}/_silent_test.wav');
-      await silentFile.writeAsBytes(_generateSilentWav());
-
-      final results = <int>[];
-      for (int i = 0; i < samples; i++) {
-        final testPlayer = AudioPlayer();
-        try {
-          await testPlayer.setFilePath(silentFile.path);
-          await testPlayer.setVolume(0);
-
-          final stopwatch = Stopwatch()..start();
-          testPlayer.play();
-
-          await testPlayer.positionStream
-              .firstWhere((pos) => pos > Duration.zero)
-              .timeout(const Duration(seconds: 2));
-          stopwatch.stop();
-
-          results.add(stopwatch.elapsedMilliseconds);
-        } finally {
-          await testPlayer.stop();
-          await testPlayer.dispose();
-        }
-      }
-
-      if (await silentFile.exists()) await silentFile.delete();
-
-      // 중앙값 사용
-      results.sort();
-      _engineLatencyMs = results[results.length ~/ 2];
-
-      debugPrint('Engine latency: ${_engineLatencyMs}ms (samples: $results)');
-      return _engineLatencyMs;
-    } catch (e) {
-      debugPrint('Engine latency measurement failed: $e');
-      _engineLatencyMs = 0;
-      return 0;
-    }
-  }
-
-  static Uint8List _generateSilentWav() {
-    const sampleRate = 44100;
-    const numSamples = 4410; // 100ms
-    const dataSize = numSamples * 2;
-
-    final bytes = ByteData(44 + dataSize);
-
-    final riff = 'RIFF'.codeUnits;
-    final wave = 'WAVE'.codeUnits;
-    final fmt = 'fmt '.codeUnits;
-    final dataTag = 'data'.codeUnits;
-
-    for (int i = 0; i < 4; i++) { bytes.setUint8(i, riff[i]); }
-    bytes.setUint32(4, 36 + dataSize, Endian.little);
-    for (int i = 0; i < 4; i++) { bytes.setUint8(8 + i, wave[i]); }
-    for (int i = 0; i < 4; i++) { bytes.setUint8(12 + i, fmt[i]); }
-    bytes.setUint32(16, 16, Endian.little);
-    bytes.setUint16(20, 1, Endian.little); // PCM
-    bytes.setUint16(22, 1, Endian.little); // mono
-    bytes.setUint32(24, sampleRate, Endian.little);
-    bytes.setUint32(28, sampleRate * 2, Endian.little);
-    bytes.setUint16(32, 2, Endian.little);
-    bytes.setUint16(34, 16, Endian.little);
-    for (int i = 0; i < 4; i++) { bytes.setUint8(36 + i, dataTag[i]); }
-    bytes.setUint32(40, dataSize, Endian.little);
-
-    return bytes.buffer.asUint8List();
   }
 
   // ─── 게스트: 오디오 요청 ───
