@@ -76,8 +76,60 @@
 - [x] print → debugPrint 마이그레이션 (avoid_print 경고 해결)
 - [x] 기존 lint 이슈 전체 해결 (use_build_context_synchronously, unused_import, unused_local_variable)
 
+#### 2026-04-05 작업 내역
+
+**백그라운드 오디오 구현 (audio_service 패키지)**
+- [x] `audio_handler.dart` 신규 생성 — `BaseAudioHandler` 구현, 알림바/잠금화면 재생 컨트롤
+- [x] AndroidManifest에 FOREGROUND_SERVICE, AudioService, MediaButtonReceiver 등록
+- [x] iOS Info.plist에 백그라운드 오디오 모드 추가
+- [x] MainActivity를 FlutterFragmentActivity로 변경
+- [x] `pipe()` → `listen()` 변경 (super.stop() 충돌 해결, 방 나가기 시 ANR 수정)
+- [x] 앱 종료 시 알림 안 사라지는 문제 수정 (room_screen dispose에서 clearTempFiles 호출)
+
+**싱크 보정 로직 변경**
+- [x] speed 보정(1.05/0.95) 전체 제거 → seek만 사용으로 변경 (speed 보정이 수렴 안 됨)
+- [x] 임계값: 20ms 미만 무시, 20ms 이상 즉시 seek
+- [x] seek 후 1초 쿨다운 추가 (버퍼링 복구/sync-position 충돌 방지)
+- [x] 500ms 후 post-play 보정 제거 (5초마다 sync-position으로 충분)
+
+**게스트 즉시 퇴장 감지**
+- [x] 게스트 disconnect 시 `leave` 메시지 전송 → 호스트가 즉시 peer 제거
+
+**코드 품질**
+- [x] discovery_service: `int.parse` → `int.tryParse` null 안전 처리
+- [x] player_screen: `double.infinity` → `double.maxFinite`, 빈 initState 제거
+- [x] sync_service: periodic sync 에러 로깅 추가
+- [x] audio_service 내부 플레이어 호출에 await 추가 (race condition 방지)
+- [x] `_onMessage` async + try-catch 래핑
+
+**문서**
+- [x] TEST_SCENARIOS.md 신규 작성 (10개 테스트 시나리오)
+
+#### 2026-04-05 코드 리뷰 및 Phase 2 안정화
+
+**코드 리뷰 버그 수정**
+- [x] welcome 메시지 소실 방지 (broadcast stream을 connect 전에 먼저 listen)
+- [x] SyncService 상태 초기화 (`reset()` 추가, 방 나가기 시 offset/RTT/synced 클리어)
+- [x] join 아닌 첫 메시지 수신 시 소켓 즉시 끊기 (잘못된 클라이언트 방어)
+- [x] discovery_service socket 누수 방지 (startBroadcast/discoverHosts 호출 시 기존 소켓 먼저 정리)
+- [x] room_screen dispose에서 `cleanupSync()` 사용 (async 누락 문제 해결)
+
+**자동 재연결**
+- [x] 게스트 연결 끊김 시 자동 재연결 3회 시도 (1/2/3초 간격)
+- [x] 재연결 후 재동기화 + 오디오 상태 복원 (`_reconnectSync` — 엔진 레이턴시 재측정 스킵)
+- [x] WiFi 끊김 시 게스트 15초간 복구 대기 (3초 간격 체크) → WiFi 복구 시 자동 재연결
+
+**에러 처리 + UX 개선**
+- [x] 동기화 실패 시 "동기화 재시도" 버튼 표시
+- [x] 호스트 URL 로드 실패 시 SnackBar 에러 메시지
+- [x] 게스트 오디오 URL 로드 실패 시 2초 후 자동 재시도 + 실패 시 `errorStream`으로 UI 알림
+- [x] `const` 누락 수정 (home_screen SnackBar)
+
 #### 알려진 이슈 / 다음에 확인할 것
-- [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (audio-request 방식으로 개선 완료, 추가 테스트 필요)
+- [ ] 에뮬레이터 싱크 ~100ms 차이 — 에뮬레이터 오디오 가상화 한계, 실기기 2대 테스트 필요
+- [ ] 엔진 레이턴시 측정이 부정확 (내부 클럭 시작 측정, 실제 스피커 출력 시점 아님)
+- [ ] 초기 재생 시 seek→play→오디오 파이프라인 지연으로 완벽한 동시 시작 불가 (seek 후 보정으로 대응)
+- [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (추가 테스트 필요)
 - [x] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정, 20MB 테스트 통과)
 - [x] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (원인: file_picker 캐시 삭제 → 앱 임시 디렉토리에 복사하여 해결)
 - [x] 에뮬레이터 ↔ 실기기 간 네트워크 (UDP 브로드캐스트 불가 → IP 직접 입력으로 연결 가능)
@@ -223,15 +275,12 @@ offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위
 내 position과 비교 → 차이 계산
 
 차이 < 20ms   → 무시 (충분히 정확)
-차이 20~100ms → 재생 속도 조절로 서서히 보정
-차이 > 100ms  → seek로 즉시 보정
+차이 >= 20ms  → seek로 즉시 보정
 ```
 
-**재생 속도 조절**:
-- 뒤처짐: 1.02x로 재생 (초당 20ms 따라잡음)
-- 앞서감: 0.98x로 재생 (초당 20ms 늦춤)
-- 필요한 만큼만 조절 후 1.0x 복귀 (예: 50ms 뒤처짐 → 2.5초간 1.02x → 복귀)
-- 2% 속도 변화는 사람이 인지 불가
+**seek 쿨다운**: seek 후 1초간 추가 보정 스킵 (seek 안정화 대기, 버퍼링 복구와 충돌 방지)
+
+**참고**: 속도 조절(1.05/0.95) 방식은 수렴이 느리고 불안정하여 제거됨
 
 **버퍼링 복구**: 5초 대기하지 않고 just_audio 버퍼링 종료 이벤트 감지 → 즉시 position 비교 → seek
 
@@ -396,15 +445,15 @@ Phase 4:   확장 기능 추가
 - [x] 기본 UI (홈 + 플레이어)
 
 ### Phase 2: 안정화 + 핵심 기술 개선 (Flutter 앱만, 서버 없음) → 업데이트
-- [ ] 오디오 공유 방식 변경 (Base64 청크 → 로컬 HTTP 서버)
-- [ ] offset 계산 개선 (10회 핑퐁 + 백그라운드 주기적 재계산)
-- [ ] 동기화 재생 개선 (2초 딜레이 제거 → 즉시 재생 + 경과 시간 계산)
-- [ ] 재생 중 싱크 보정 (5초마다 position 비교 + 속도 조절/seek)
-- [ ] engineLatency 측정 및 보정
-- [ ] 연결 계층 추상화 (향후 WebRTC 전환 대비)
-- [ ] 백그라운드 재생
-- [ ] 연결 끊김 시 자동 재연결
-- [ ] 에러 처리 + UX 개선
+- [x] 오디오 공유 방식 변경 (Base64 청크 → 로컬 HTTP 서버)
+- [x] offset 계산 개선 (10회 핑퐁 + 백그라운드 주기적 재계산)
+- [x] 동기화 재생 개선 (2초 딜레이 제거 → 즉시 재생 + 경과 시간 계산)
+- [x] 재생 중 싱크 보정 (5초마다 position 비교 + seek 보정)
+- [x] engineLatency 측정 및 보정
+- [x] 백그라운드 재생 (audio_service + 알림바/잠금화면 컨트롤)
+- [ ] 연결 계층 추상화 (향후 WebRTC 전환 대비, Phase 4에서 진행)
+- [x] 연결 끊김 시 자동 재연결
+- [x] 에러 처리 + UX 개선
 
 ### Phase 3: 수익화 (Firebase 연동 시작)
 - [ ] Firebase 인증 + 결제 연동

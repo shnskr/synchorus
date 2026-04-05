@@ -132,13 +132,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final p2p = ref.read(p2pServiceProvider);
       await p2p.disconnect();
+
+      // welcome 메시지를 먼저 listen한 후 연결 (broadcast stream 소실 방지)
+      final welcomeFuture = p2p.onMessage
+          .firstWhere((m) => m['type'] == 'welcome')
+          .timeout(const Duration(seconds: 5));
+
       await p2p.connectToHost(host.ip, host.port, 'Guest');
 
       int peerCount = 1;
       try {
-        final welcome = await p2p.onMessage
-            .firstWhere((m) => m['type'] == 'welcome')
-            .timeout(const Duration(seconds: 5));
+        final welcome = await welcomeFuture;
         peerCount = welcome['data']?['peerCount'] ?? 1;
       } catch (_) {}
 
@@ -296,15 +300,18 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     try {
       final p2p = ref.read(p2pServiceProvider);
       await p2p.disconnect();
+
+      // welcome 메시지를 먼저 listen한 후 연결 (broadcast stream 소실 방지)
+      final welcomeFuture = p2p.onMessage
+          .firstWhere((m) => m['type'] == 'welcome')
+          .timeout(const Duration(seconds: 5));
+
       await p2p.connectToHost(ip, P2PService.defaultPort, 'Guest');
 
-      // welcome 메시지에서 roomCode, peerCount 받기
       String roomCode = '----';
       int peerCount = 1;
       try {
-        final welcome = await p2p.onMessage
-            .firstWhere((m) => m['type'] == 'welcome')
-            .timeout(const Duration(seconds: 5));
+        final welcome = await welcomeFuture;
         roomCode = welcome['data']?['roomCode'] ?? '----';
         peerCount = welcome['data']?['peerCount'] ?? 1;
       } catch (_) {}

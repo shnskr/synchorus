@@ -33,8 +33,10 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   StreamSubscription? _messageSub;
   StreamSubscription? _disconnectSub;
   StreamSubscription? _connectivitySub;
+  StreamSubscription? _audioErrorSub;
   bool _syncing = false;
   bool _syncDone = false;
+  bool _syncFailed = false;
   String? _hostIp;
   late int _guestPeerCount;
 
@@ -77,12 +79,30 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       audio.startListening(isHost: false);
       _startSync();
 
-      // 게스트: 호스트 연결 끊김 감지
-      _disconnectSub = p2p.onDisconnected.listen((_) {
-        _addLog('호스트와 연결이 끊어졌습니다');
-        if (mounted) {
+      // 게스트: 호스트 연결 끊김 감지 → 자동 재연결 시도
+      _disconnectSub = p2p.onDisconnected.listen((_) async {
+        if (!mounted) return;
+        _addLog('호스트와 연결이 끊어졌습니다. 재연결 시도 중...');
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('연결이 끊어졌습니다. 재연결 시도 중...')),
+        );
+
+        final reconnected = await p2p.reconnectToHost();
+        if (!mounted) return;
+
+        if (reconnected) {
+          _addLog('재연결 성공!');
           ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('호스트가 방을 나갔습니다')),
+            const SnackBar(content: Text('재연결되었습니다')),
+          );
+          // 재동기화 (엔진 레이턴시는 이미 측정했으므로 스킵)
+          final sync = ref.read(syncServiceProvider);
+          sync.reset();
+          await _reconnectSync();
+        } else {
+          _addLog('재연결 실패. 방을 나갑니다.');
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('호스트에 재연결할 수 없습니다')),
           );
           _leaveRoom();
         }
@@ -97,12 +117,32 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
         if (!mounted) return;
         final current = await Connectivity().checkConnectivity();
         if (!current.contains(ConnectivityResult.wifi) && mounted) {
-          _addLog('WiFi 연결이 끊어졌습니다');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 방을 나갑니다.')),
-          );
-          _leaveRoom();
+          if (widget.isHost) {
+            // 호스트: WiFi 끊기면 방 유지 불가
+            _addLog('WiFi 연결이 끊어졌습니다');
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 방을 나갑니다.')),
+            );
+            _leaveRoom();
+          } else {
+            // 게스트: WiFi 복구 대기 후 재연결 시도
+            _addLog('WiFi 연결이 끊어졌습니다. 복구 대기 중...');
+            ScaffoldMessenger.of(context).showSnackBar(
+              const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 복구 대기 중...')),
+            );
+            await _waitForWifiAndReconnect();
+          }
         }
+      }
+    });
+
+    // 오디오 에러 알림
+    _audioErrorSub = audio.errorStream.listen((error) {
+      if (mounted) {
+        _addLog('오디오 에러: $error');
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text(error)),
+        );
       }
     });
 
@@ -167,8 +207,82 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     } catch (e) {
       _addLog('동기화 실패: $e');
       if (!mounted) return;
-      setState(() => _syncing = false);
+      setState(() {
+        _syncing = false;
+        _syncFailed = true;
+      });
     }
+  }
+
+  /// 게스트: WiFi 복구 대기 (최대 15초) 후 재연결
+  Future<void> _waitForWifiAndReconnect() async {
+    // 최대 15초간 WiFi 복구 대기 (3초 간격 체크)
+    for (int i = 0; i < 5; i++) {
+      await Future.delayed(const Duration(seconds: 3));
+      if (!mounted) return;
+      final current = await Connectivity().checkConnectivity();
+      if (current.contains(ConnectivityResult.wifi)) {
+        _addLog('WiFi 복구됨. 재연결 시도 중...');
+        final p2p = ref.read(p2pServiceProvider);
+        final reconnected = await p2p.reconnectToHost();
+        if (!mounted) return;
+
+        if (reconnected) {
+          _addLog('재연결 성공!');
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('재연결되었습니다')),
+          );
+          final sync = ref.read(syncServiceProvider);
+          sync.reset();
+          await _reconnectSync();
+          return;
+        }
+        break; // WiFi는 복구됐지만 호스트 연결 실패
+      }
+    }
+
+    if (!mounted) return;
+    _addLog('재연결 실패. 방을 나갑니다.');
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text('재연결할 수 없습니다')),
+    );
+    _leaveRoom();
+  }
+
+  /// 재연결 후 동기화 (엔진 레이턴시 측정 스킵, 오디오 상태 복원)
+  Future<void> _reconnectSync() async {
+    if (!mounted) return;
+    setState(() => _syncing = true);
+    _addLog('재동기화 중...');
+
+    try {
+      final sync = ref.read(syncServiceProvider);
+      final result = await sync.syncWithHost();
+      _addLog('재동기화 완료! offset: ${result.offsetMs}ms, RTT: ${result.rttMs}ms');
+      if (!mounted) return;
+      setState(() {
+        _syncing = false;
+        _syncDone = true;
+      });
+
+      sync.startPeriodicSync();
+
+      // 호스트에게 현재 오디오+재생 상태 요청 → 자동 복원
+      final audio = ref.read(audioSyncServiceProvider);
+      audio.requestCurrentAudio();
+    } catch (e) {
+      _addLog('재동기화 실패: $e');
+      if (!mounted) return;
+      setState(() {
+        _syncing = false;
+        _syncFailed = true;
+      });
+    }
+  }
+
+  void _retrySync() {
+    setState(() => _syncFailed = false);
+    _startSync();
   }
 
   void _addLog(String message) {
@@ -219,6 +333,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _messageSub?.cancel();
     _disconnectSub?.cancel();
     _connectivitySub?.cancel();
+    _audioErrorSub?.cancel();
 
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
@@ -226,7 +341,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     final sync = ref.read(syncServiceProvider);
 
     // 정리 완료 후 이동 (구독 취소했으므로 블로킹 없음)
-    sync.stopPeriodicSync();
+    sync.reset();
     discovery.stop();
     await p2p.disconnect();
     await audio.clearTempFiles();
@@ -243,10 +358,11 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _messageSub?.cancel();
     _disconnectSub?.cancel();
     _connectivitySub?.cancel();
+    _audioErrorSub?.cancel();
 
-    // 앱 종료/화면 파괴 시 오디오 서비스 정리
+    // 앱 종료/화면 파괴 시 동기적 정리 (dispose는 sync라 await 불가)
     final audio = ref.read(audioSyncServiceProvider);
-    audio.clearTempFiles();
+    audio.cleanupSync();
 
     super.dispose();
   }
@@ -313,13 +429,19 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
             SizedBox(
               width: double.infinity,
               child: ElevatedButton.icon(
-                onPressed: _syncDone ? _goToPlayer : null,
-                icon: const Icon(Icons.play_arrow),
+                onPressed: _syncDone
+                    ? _goToPlayer
+                    : _syncFailed
+                        ? _retrySync
+                        : null,
+                icon: Icon(_syncFailed ? Icons.refresh : Icons.play_arrow),
                 label: Text(_syncing
                     ? '동기화 중...'
                     : _syncDone
                         ? '플레이어 열기'
-                        : '동기화 대기 중'),
+                        : _syncFailed
+                            ? '동기화 재시도'
+                            : '동기화 대기 중'),
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 14),
                   textStyle: const TextStyle(fontSize: 16),

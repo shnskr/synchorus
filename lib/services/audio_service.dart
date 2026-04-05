@@ -42,6 +42,9 @@ class AudioSyncService {
   bool _isLoading = false;
   bool get isLoading => _isLoading;
 
+  final _errorController = StreamController<String>.broadcast();
+  Stream<String> get errorStream => _errorController.stream;
+
   AudioPlayer get player => _player;
   String? get currentFileName => _currentFileName;
   String? get currentUrl => _currentUrl;
@@ -329,6 +332,17 @@ class AudioSyncService {
       _updateMediaItem();
     } catch (e) {
       debugPrint('Audio URL load error: $e');
+      // 로드 실패 시 2초 후 한 번 재시도
+      await Future.delayed(const Duration(seconds: 2));
+      try {
+        await _player.setUrl(url);
+        _audioReady = true;
+        _updateMediaItem();
+        debugPrint('Audio URL retry succeeded');
+      } catch (e2) {
+        debugPrint('Audio URL retry failed: $e2');
+        _errorController.add('오디오를 불러올 수 없습니다');
+      }
     }
 
     _isLoading = false;
@@ -562,12 +576,25 @@ class AudioSyncService {
     _lastSyncPositionMs = null;
   }
 
-  Future<void> dispose() async {
-    _messageSub?.cancel();
-    _messageSub = null;
+  /// 동기적으로 가능한 정리만 수행 (dispose에서 호출용)
+  void cleanupSync() {
+    _isLoading = false;
+    _audioReady = false;
+    _pendingPlay = null;
     _syncPositionTimer?.cancel();
     _bufferingSub?.cancel();
+    _messageSub?.cancel();
+    _messageSub = null;
+    _currentFileName = null;
+    _currentUrl = null;
+    _lastSyncHostTime = null;
+    _lastSyncPositionMs = null;
+  }
+
+  Future<void> dispose() async {
+    cleanupSync();
     _loadingController.close();
+    _errorController.close();
     await _stopFileServer();
     await _player.dispose();
   }

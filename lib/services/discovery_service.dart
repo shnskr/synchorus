@@ -29,6 +29,7 @@ class DiscoveryService {
     required int tcpPort,
     required String roomCode,
   }) async {
+    stop(); // 기존 소켓/타이머 정리
     _socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, 0);
     _socket!.broadcastEnabled = true;
 
@@ -42,6 +43,7 @@ class DiscoveryService {
 
   /// 참가자: UDP 브로드캐스트를 수신하여 호스트 발견
   Stream<DiscoveredHost> discoverHosts() async* {
+    stop(); // 기존 소켓/타이머 정리
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, udpPort);
     _socket = socket;
 

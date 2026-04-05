@@ -50,7 +50,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Future<void> _loadUrl() async {
     final url = _urlController.text.trim();
     if (url.isEmpty) return;
-    await _audio.loadUrl(url);
+    try {
+      await _audio.loadUrl(url);
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('URL 로드 실패: 올바른 오디오 URL인지 확인해주세요')),
+        );
+      }
+    }
     if (!mounted) return;
     setState(() {});
     FocusScope.of(context).unfocus();

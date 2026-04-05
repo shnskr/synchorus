@@ -33,6 +33,17 @@ class SyncService {
 
   SyncService(this._p2p);
 
+  /// 상태 초기화 (방 나가기 시 호출)
+  void reset() {
+    _offsetMs = 0;
+    _bestRtt = 999999;
+    _synced = false;
+    _messageSub?.cancel();
+    _messageSub = null;
+    _periodicSyncTimer?.cancel();
+    _periodicSyncTimer = null;
+  }
+
   /// 참가자: 호스트와 시간 동기화 시작
   /// ping을 [count]회 보내서 가장 RTT가 작은 샘플로 offset 확정
   Future<SyncResult> syncWithHost({int count = 10}) async {

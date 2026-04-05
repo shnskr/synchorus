@@ -95,10 +95,15 @@ class P2PService {
     }
   }
 
+  int? _lastHostPort;
+  String? _lastMyName;
+
   /// 참가자: 호스트에 TCP 연결
   Future<void> connectToHost(String ip, int port, String myName) async {
     _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
     _connectedHostIp = ip;
+    _lastHostPort = port;
+    _lastMyName = myName;
 
     // 입장 메시지 전송
     _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': myName}});
@@ -107,34 +112,66 @@ class P2PService {
     _listenToSocket(_hostSocket!, 'host');
   }
 
+  /// 참가자: 호스트에 재연결 시도 (최대 retries회)
+  Future<bool> reconnectToHost({int retries = 3}) async {
+    final ip = _connectedHostIp;
+    final port = _lastHostPort;
+    final name = _lastMyName;
+    if (ip == null || port == null || name == null) return false;
+
+    _hostSocket?.destroy();
+    _hostSocket = null;
+
+    for (int i = 0; i < retries; i++) {
+      try {
+        debugPrint('Reconnect attempt ${i + 1}/$retries to $ip:$port');
+        await Future.delayed(Duration(seconds: i + 1)); // 1, 2, 3초 대기
+        _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+        _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': name}});
+        _listenToSocket(_hostSocket!, 'host');
+        debugPrint('Reconnected successfully');
+        return true;
+      } catch (e) {
+        debugPrint('Reconnect attempt ${i + 1} failed: $e');
+        _hostSocket?.destroy();
+        _hostSocket = null;
+      }
+    }
+    return false;
+  }
+
   /// 호스트: 새 참가자 처리
   void _handleNewPeer(Socket socket) {
     final peerId = '${socket.remoteAddress.address}:${socket.remotePort}';
     String peerName = 'Unknown';
 
     _listenToSocket(socket, peerId, onFirstMessage: (message) {
-      if (message['type'] == 'join') {
-        peerName = message['data']['name'] ?? 'Unknown';
-        final peer = Peer(id: peerId, name: peerName, socket: socket);
-        _peers.add(peer);
-        _peerJoinController.add(peer);
-
-        // 입장 승인
-        _sendTo(socket, {
-          'type': 'welcome',
-          'data': {
-            'peerId': peerId,
-            'peerCount': _peers.length,
-            'roomCode': _roomCode,
-          },
-        });
-
-        // 다른 참가자들에게 알림
-        broadcastToAll({
-          'type': 'peer-joined',
-          'data': {'peerId': peerId, 'name': peerName},
-        }, exclude: peerId);
+      if (message['type'] != 'join') {
+        debugPrint('Invalid first message from $peerId: ${message['type']}');
+        socket.destroy();
+        return;
       }
+
+      peerName = message['data']['name'] ?? 'Unknown';
+      final peer = Peer(id: peerId, name: peerName, socket: socket);
+      _peers.add(peer);
+      _peerJoinController.add(peer);
+
+      // 입장 승인
+      _sendTo(socket, {
+        'type': 'welcome',
+        'data': {
+          'peerId': peerId,
+          'peerCount': _peers.length,
+          'roomCode': _roomCode,
+        },
+      });
+
+      // 다른 참가자들에게 알림
+      broadcastToAll({
+        'type': 'peer-joined',
+        'data': {'peerId': peerId, 'name': peerName},
+      }, exclude: peerId);
     });
 
     socket.done.then((_) {
