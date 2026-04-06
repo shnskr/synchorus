@@ -163,6 +163,17 @@
 **UX 개선**
 - [x] 로그 자동 스크롤 (새 로그 추가 시 맨 아래로, 수동 스크롤 시 자동 스크롤 중지, 다시 아래로 내리면 재개)
 
+**버퍼링 복구 state-request 전환**
+- [x] 버퍼링 복구 시 캐시 데이터(`_lastSyncPositionMs`) 기반 seek → `state-request`로 변경
+  - 기존 문제: 호스트가 버퍼링 도중 seek/pause/play 시 캐시가 stale → 틀린 위치로 복구
+  - 수정: 버퍼링 복구 시 호스트에게 최신 상태 요청 → 정확한 위치로 seek
+- [x] `_lastSyncHostTime`, `_lastSyncPositionMs` 캐시 변수 제거 (더 이상 사용하지 않음)
+
+**syncSeek 순서 수정**
+- [x] `syncSeek()`에서 seek → broadcast 순서를 broadcast → seek으로 변경
+  - 기존 문제: 호스트가 seek 완료 후 시간을 찍으므로, seek 소요시간만큼 게스트와 비대칭
+  - `syncPlay()`는 이미 올바른 순서(broadcast 먼저)였으나 `syncSeek()`만 반대였음
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 엔진 레이턴시 보정값이 실제와 약간 차이 (에뮬 기준 ~10ms 오차) — 수동 보정 슬라이더 추가 예정
 - [ ] 호스트 백그라운드 진입 시 파일 서버 연결 끊김 → 게스트 seek 시 404 (자동 재로드로 대응)
@@ -317,7 +328,7 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 
 **Play**: seek(현재position) → play() → 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }`
 **Pause**: pause() → 메시지 전송 `{ positionMs }`
-**Seek**: seek(position) → 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }`
+**Seek**: 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }` → seek(position)
 **5초마다**: sync-position 브로드캐스트 `{ hostTime, positionMs, engineLatencyMs }`
 **sync-ping 수신**: sync-pong 응답
 **state-request 수신**: 현재 상태 응답 `{ hostTime, positionMs, playing, engineLatencyMs }`
@@ -448,7 +459,7 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 
 **안전장치**:
 - `_syncSeeking`: seek 진행 중 다음 sync-position 무시
-- `_lastBufferingRecovery`: seek 후 2초 쿨다운
+- `_lastBufferingRecovery`: 버퍼링 복구/seek 후 2초 쿨다운
 - `_commandSeq`: 빠른 재생/정지 반복 시 stale async 무효화
 
 ##### 케이스 7: 재생 중 버퍼링 발생 후 복구 [C-2]
@@ -458,7 +469,7 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 ```
 버퍼링 발생 → 재생 멈춤
 버퍼 채워짐 → ready 전환 감지
-  마지막 sync-position 기준으로 position 재계산 → seek
+  state-request → 호스트가 최신 상태 응답 → seek(보정position)
   (2초 쿨다운: 연쇄 반응 방지)
 ```
 
@@ -516,7 +527,7 @@ seek 중 에러 발생
         ↓
 [위치 보정 계층]       5초마다 sync-position → 30ms 이상 차이 시 seek
         ↓
-[버퍼링/에러 복구]     버퍼링 복구 시 position 재계산, 에러 시 재로드
+[버퍼링/에러 복구]     버퍼링 복구 시 state-request로 최신 상태 수신, 에러 시 재로드
 ```
 
 #### 3-9. 게스트 방 입장 시 초기화 순서
@@ -540,6 +551,8 @@ seek 중 에러 발생
 | 호스트도 seek → play | seek 소요시간을 측정하지 않고도 양쪽 상쇄로 해결 |
 | 준비 미완료 시 state-request | pendingPlay의 오래된 hostTime 대신 최신 값을 받아 elapsed 최소화 |
 | _hostPlaying 플래그 | 준비 미완료 중 play/pause 상태를 추적, 준비 완료 후 적절히 대응 |
+| 버퍼링 복구 시 state-request | 캐시 데이터는 호스트 seek/pause 시 stale → 항상 최신 상태 요청 |
+| syncSeek도 broadcast 먼저 | syncPlay와 동일하게 시간 찍고 메시지 먼저 → seek (seek 비용 대칭화) |
 | 임계값 30ms | 20ms에서 상향 — 너무 민감하면 불필요한 seek 빈발 |
 | sync-position 5초 간격 | 드리프트/지터를 주기적으로 잡되, 너무 잦으면 seek 과다 |
 | bestRtt는 로그 전용 | offset 선택 기준으로만 사용, 이후 계산에 미사용 |

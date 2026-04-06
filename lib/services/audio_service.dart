@@ -40,10 +40,6 @@ class AudioSyncService {
   int _hostEngineLatencyMs = 0;
   int get _latencyCompensation => _engineLatencyMs - _hostEngineLatencyMs;
 
-  // 마지막 수신한 sync-position (버퍼링 복구용)
-  int? _lastSyncHostTime;
-  int? _lastSyncPositionMs;
-
   final _loadingController = StreamController<bool>.broadcast();
   Stream<bool> get loadingStream => _loadingController.stream;
   bool _isLoading = false;
@@ -281,16 +277,18 @@ class AudioSyncService {
 
   Future<void> syncSeek(Duration position) async {
     final wasPlaying = _player.playing;
-    await _player.seek(position);
+    final hostTime = wasPlaying ? _sync.nowAsHostTime : null;
 
     _p2p.broadcastToAll({
       'type': 'seek',
       'data': {
         'positionMs': position.inMilliseconds,
-        'hostTime': wasPlaying ? _sync.nowAsHostTime : null,
+        'hostTime': hostTime,
         'engineLatencyMs': _engineLatencyMs,
       },
     });
+
+    await _player.seek(position);
   }
 
   Future<void> setVolume(double volume) async {
@@ -493,9 +491,6 @@ class AudioSyncService {
     final hostLatency = (data['engineLatencyMs'] as int?) ?? _hostEngineLatencyMs;
     if (hostLatency > 0) _hostEngineLatencyMs = hostLatency;
 
-    _lastSyncHostTime = hostTime;
-    _lastSyncPositionMs = hostPositionMs;
-
     if (!_player.playing) return;
     if (_player.processingState != ProcessingState.ready) return;
     if (_syncSeeking) return;
@@ -552,8 +547,7 @@ class AudioSyncService {
     _bufferingSub = _player.processingStateStream.listen((state) {
       if (_lastProcessingState == ProcessingState.buffering &&
           state == ProcessingState.ready &&
-          _player.playing &&
-          _lastSyncHostTime != null) {
+          _player.playing) {
         final now = DateTime.now();
         if (_lastBufferingRecovery != null &&
             now.difference(_lastBufferingRecovery!).inMilliseconds < 2000) {
@@ -563,12 +557,8 @@ class AudioSyncService {
         }
         _lastBufferingRecovery = now;
 
-        final elapsed = _sync.nowAsHostTime - _lastSyncHostTime!;
-        final expectedPosition = _lastSyncPositionMs! + elapsed + _latencyCompensation;
-        final maxPosition = _player.duration?.inMilliseconds ?? expectedPosition;
-        _player.seek(Duration(milliseconds: expectedPosition.clamp(0, maxPosition)));
-
-        debugPrint('Buffering recovery: seek to ${expectedPosition}ms');
+        debugPrint('Buffering recovery: requesting host state');
+        _requestHostState();
       }
       _lastProcessingState = state;
     });
@@ -646,8 +636,6 @@ class AudioSyncService {
     }
     _currentFileName = null;
     _currentUrl = null;
-    _lastSyncHostTime = null;
-    _lastSyncPositionMs = null;
   }
 
   /// 동기적으로 가능한 정리만 수행 (dispose에서 호출용)
@@ -661,8 +649,6 @@ class AudioSyncService {
     _messageSub = null;
     _currentFileName = null;
     _currentUrl = null;
-    _lastSyncHostTime = null;
-    _lastSyncPositionMs = null;
   }
 
   Future<void> dispose() async {
