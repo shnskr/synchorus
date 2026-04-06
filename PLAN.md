@@ -168,6 +168,11 @@
   - 기존 문제: 호스트가 버퍼링 도중 seek/pause/play 시 캐시가 stale → 틀린 위치로 복구
   - 수정: 버퍼링 복구 시 호스트에게 최신 상태 요청 → 정확한 위치로 seek
 - [x] `_lastSyncHostTime`, `_lastSyncPositionMs` 캐시 변수 제거 (더 이상 사용하지 않음)
+- [x] 2초 쿨다운(`_lastBufferingRecovery`) → `_awaitingStateResponse` 플래그로 변경
+  - 기존: 2초간 무조건 차단 → 정상 복구도 막혀서 최대 5초 drift
+  - 수정: 응답 대기 중만 차단, 응답 오면 즉시 해제 → RTT만큼만 대기
+  - `_handleStateResponse` 최상단에서 플래그 해제 (early return 전)
+  - `cleanupSync()`에서 플래그 초기화 (연결 끊김 시 영구 차단 방지)
 
 **syncSeek 순서 수정**
 - [x] `syncSeek()`에서 seek → broadcast 순서를 broadcast → seek으로 변경
@@ -459,7 +464,7 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 
 **안전장치**:
 - `_syncSeeking`: seek 진행 중 다음 sync-position 무시
-- `_lastBufferingRecovery`: 버퍼링 복구/seek 후 2초 쿨다운
+- `_awaitingStateResponse`: 버퍼링 복구 시 state-request 중복 방지 (응답 오면 해제)
 - `_commandSeq`: 빠른 재생/정지 반복 시 stale async 무효화
 
 ##### 케이스 7: 재생 중 버퍼링 발생 후 복구 [C-2]
@@ -470,7 +475,7 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 버퍼링 발생 → 재생 멈춤
 버퍼 채워짐 → ready 전환 감지
   state-request → 호스트가 최신 상태 응답 → seek(보정position)
-  (2초 쿨다운: 연쇄 반응 방지)
+  (_awaitingStateResponse: 응답 대기 중 중복 요청 방지)
 ```
 
 ##### 케이스 8: 재생 중 오디오 에러 (404 등) [C-2]
@@ -552,6 +557,7 @@ seek 중 에러 발생
 | 준비 미완료 시 state-request | pendingPlay의 오래된 hostTime 대신 최신 값을 받아 elapsed 최소화 |
 | _hostPlaying 플래그 | 준비 미완료 중 play/pause 상태를 추적, 준비 완료 후 적절히 대응 |
 | 버퍼링 복구 시 state-request | 캐시 데이터는 호스트 seek/pause 시 stale → 항상 최신 상태 요청 |
+| 쿨다운 → _awaitingStateResponse | 2초 쿨다운은 정상 복구도 차단 → 응답 대기 플래그로 자연 스로틀링 |
 | syncSeek도 broadcast 먼저 | syncPlay와 동일하게 시간 찍고 메시지 먼저 → seek (seek 비용 대칭화) |
 | 임계값 30ms | 20ms에서 상향 — 너무 민감하면 불필요한 seek 빈발 |
 | sync-position 5초 간격 | 드리프트/지터를 주기적으로 잡되, 너무 잦으면 seek 과다 |

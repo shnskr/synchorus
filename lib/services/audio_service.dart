@@ -437,7 +437,6 @@ class AudioSyncService {
       if (seq != _commandSeq || !_audioReady) return;
     }
 
-    _lastBufferingRecovery = DateTime.now();
     await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
     if (seq != _commandSeq) return;
 
@@ -506,7 +505,6 @@ class AudioSyncService {
 
     // 30ms 이상: seek로 보정
     _syncSeeking = true;
-    _lastBufferingRecovery = DateTime.now();
     final nowElapsed = _sync.nowAsHostTime - hostTime;
     final adjustedPosition = hostPositionMs + nowElapsed + _latencyCompensation;
     final maxPosition = _player.duration?.inMilliseconds ?? adjustedPosition;
@@ -540,7 +538,7 @@ class AudioSyncService {
 
   ProcessingState? _lastProcessingState;
 
-  DateTime? _lastBufferingRecovery;
+  bool _awaitingStateResponse = false;
 
   void _startBufferingWatch() {
     _bufferingSub?.cancel();
@@ -548,14 +546,12 @@ class AudioSyncService {
       if (_lastProcessingState == ProcessingState.buffering &&
           state == ProcessingState.ready &&
           _player.playing) {
-        final now = DateTime.now();
-        if (_lastBufferingRecovery != null &&
-            now.difference(_lastBufferingRecovery!).inMilliseconds < 2000) {
-          debugPrint('Buffering recovery: skipped (too soon)');
+        if (_awaitingStateResponse) {
+          debugPrint('Buffering recovery: skipped (awaiting state-response)');
           _lastProcessingState = state;
           return;
         }
-        _lastBufferingRecovery = now;
+        _awaitingStateResponse = true;
 
         debugPrint('Buffering recovery: requesting host state');
         _requestHostState();
@@ -567,6 +563,8 @@ class AudioSyncService {
   // ─── 게스트: state-response 처리 ───
 
   Future<void> _handleStateResponse(Map<String, dynamic> data) async {
+    _awaitingStateResponse = false;
+
     final playing = data['playing'] as bool? ?? false;
     if (!playing || !_audioReady) return;
 
@@ -589,7 +587,6 @@ class AudioSyncService {
       if (seq != _commandSeq || !_audioReady) return;
     }
 
-    _lastBufferingRecovery = DateTime.now();
     await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
     if (seq != _commandSeq) return;
 
@@ -643,6 +640,7 @@ class AudioSyncService {
     _isLoading = false;
     _audioReady = false;
     _hostPlaying = false;
+    _awaitingStateResponse = false;
     _syncPositionTimer?.cancel();
     _bufferingSub?.cancel();
     _messageSub?.cancel();
