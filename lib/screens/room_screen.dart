@@ -164,7 +164,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       }
 
       // 대량 메시지는 로그에서 제외
-      const hiddenTypes = {'sync-ping', 'sync-pong', 'sync-position', 'audio-request', 'welcome', 'peer-joined', 'peer-left'};
+      const hiddenTypes = {'sync-ping', 'sync-pong', 'sync-position', 'audio-request', 'state-request', 'state-response', 'welcome', 'peer-joined', 'peer-left'};
       if (!hiddenTypes.contains(type)) {
         _addLog('메시지: $type');
       }

@@ -141,6 +141,20 @@
 - [x] 게스트가 `(myLatency - hostLatency)` 만큼 position 보정
 - [x] S22: ~4ms, 에뮬레이터: ~22ms → 게스트가 18ms 앞서서 재생하여 스피커 출력 시점 맞춤
 
+**seek 레이턴시 대칭화**
+- [x] 호스트 `syncPlay()`에서 `seek(현재position) → play()` 순서로 변경
+- [x] 호스트/게스트 모두 동일한 seek → play 경로를 타서 seek 소요시간 상쇄
+
+**state-request 방식으로 전환**
+- [x] `_pendingPlay` 제거 → `_hostPlaying` 플래그로 교체
+- [x] 게스트 준비 미완료 시 play/pause → 플래그만 저장, 시간 값 무시
+- [x] 게스트 준비 완료 시 `_hostPlaying == true`면 `state-request` → 호스트가 최신 상태 응답
+- [x] `state-request` / `state-response` 프로토콜 추가
+- [x] 모든 `audio-url` 메시지에 `playing` 상태 포함 (최초 입장 시 `_hostPlaying` 설정)
+- [x] `_handleSeek`, `_handlePause`에 `_audioReady` 가드 추가
+- [x] `_handleStateResponse`에 idle 상태 체크 + 오디오 재로드 추가
+- [x] `sendCurrentAudioToPeer`에서 play 메시지 직접 전송 제거 (게스트가 알아서 요청)
+
 **오디오 에러 복구**
 - [x] seek 중 404 에러 시 자동 오디오 재로드 (`_reloadAudio`)
 - [x] play 시 플레이어 idle/에러 상태 감지 → 자동 재로드
@@ -229,9 +243,49 @@ class WebRtcConnection implements ConnectionService { ... }  // Phase 4
 
 → 결국 둘 다 **"URL을 공유한다"**로 통일
 
-### 3. Offset 계산 (시간 동기화)
+### 3. 핵심 로직: 동기화 재생
 
-**원리**: 게스트가 호스트와의 시계 차이(offset)를 계산하여 시간 변환
+여러 기기에서 같은 음악을 **동시에** 들리게 하는 것이 이 앱의 핵심.
+"소프트웨어상 같은 position" ≠ "실제로 같은 타이밍에 소리가 남". 이 차이를 줄이는 게 전부.
+
+#### 3-1. 동기화에 관여하는 모든 지연시간
+
+호스트가 Play를 누른 순간부터 게스트 스피커에서 소리가 나기까지의 전체 경로:
+
+```
+호스트 Play 누름
+  │
+  ├─ [1] JSON 직렬화 + TCP 송신 버퍼      ─┐
+  ├─ [2] WiFi 네트워크 전송                 ├─ 메시지 전달 구간
+  ├─ [3] TCP 수신 버퍼 + JSON 역직렬화      ─┘
+  │
+  ├─ [4] seek 처리 (디코더 재위치, 버퍼 flush/refill)
+  ├─ [5] play() → 오디오 엔진 디코딩
+  ├─ [6] 오디오 출력 버퍼 (ringbuffer)      ─┐
+  ├─ [7] DAC 출력 레이턴시                   ├─ engineLatency
+  └─ [8] 스피커 물리적 지연 (~무시 가능)      ─┘
+```
+
+#### 3-2. 보정 현황
+
+| 지연 요소 | 보정 방법 | 상태 |
+|---|---|---|
+| **시계 차이 (clock offset)** | RTT/2 기반 핑퐁 10회, best RTT 채택 | **보정됨** |
+| **메시지 전달 지연 [1][2][3]** | `elapsed = nowAsHostTime - hostTime` | **보정됨** |
+| **기기 간 engineLatency 차이 [6][7]** | `내 engineLatency - 호스트 engineLatency` | **보정됨** |
+| **seek 비용 비대칭 [4]** | 호스트도 동일하게 seek → play 경로 (양쪽 상쇄) | **보정됨** |
+| 오디오 엔진 디코딩 [5] | API로 측정 불가, 기기마다 비슷하므로 양쪽 상쇄 | 측정 불가 |
+| 네트워크 비대칭 (업/다운 속도 차이) | RTT/2가 정확하지 않은 원인, 통계적으로만 줄일 수 있음 | 측정 불가 |
+| 클럭 드리프트 | 30초 주기 재동기화 + 5초마다 sync-position 보정 | 간접 대응 |
+| GC / 스레드 스케줄링 지터 | OS 레벨, 제어 불가 | 간접 대응 |
+| 백그라운드 throttling | foreground service로 대응 | 간접 대응 |
+| 블루투스 출력 레이턴시 | 수동 보정 슬라이더 (향후 추가) | 미구현 |
+
+**핵심 원칙**: 측정 가능한 것은 계산으로 보정하고, 측정 불가능한 것은 호스트/게스트가 동일한 경로를 타게 하여 상쇄시킨다.
+
+#### 3-3. 시계 동기화 (clock offset)
+
+게스트가 호스트와의 시계 차이를 계산하여, 이후 모든 시간 계산의 기반이 됨.
 
 ```
 게스트                          호스트
@@ -243,81 +297,253 @@ class WebRtcConnection implements ConnectionService { ... }  // Phase 4
   → guestTime + offset = hostTime
 ```
 
-**초기 계산**: 방 입장 시 핑퐁 10회, best RTT 기준으로 offset 확정
+- **초기 계산**: 방 입장 시 핑퐁 10회, best RTT 기준으로 offset 확정
+- **offset 유지**: 백그라운드에서 주기적으로 핑퐁 10회 재계산 (클럭 드리프트 보정)
+- **한계**: RTT/2는 네트워크 대칭을 가정. 업/다운 속도가 다르면 오차 발생 (측정 불가)
 
-**offset 유지**: 백그라운드에서 주기적으로 핑퐁 10회 재계산 (클럭 드리프트 보정)
-- 네트워크 안정적 (RTT < 3ms): 간격 늘림 (60초)
-- 네트워크 불안정: 간격 줄임 (10초)
-- offset 급변 시: 즉시 집중 재계산
-- 원격 확장 시 적응형 주기 조절이 더 중요해짐
+#### 3-4. 엔진 레이턴시 측정
 
-**play 시점에 핑퐁 안 함**: 이미 유지 중인 offset으로 즉시 재생 시점 계산
+play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS API로 측정.
 
-### 4. 같은 타이밍에 재생
+- Android: `AudioManager.getProperty(OUTPUT_LATENCY)` + `framesPerBuffer / sampleRate`
+- iOS: `AVAudioSession.outputLatency` + `ioBufferDuration`
 
-**기존 방식 (제거)**: 고정 2초 딜레이 + play 시마다 핑퐁 3회
+**포함**: 오디오 출력 버퍼 + DAC 변환 대기
+**미포함**: 오디오 엔진 디코딩 시간 (API 없음, 측정 불가 → 양쪽 상쇄로 대응)
 
-**새 방식: 즉시 재생 + 경과 시간 계산**
+#### 3-5. 호스트 동작
 
+호스트는 시간의 기준. 계산 없이 실행하고 알려주기만 함.
+
+**Play**: seek(현재position) → play() → 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }`
+**Pause**: pause() → 메시지 전송 `{ positionMs }`
+**Seek**: seek(position) → 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }`
+**5초마다**: sync-position 브로드캐스트 `{ hostTime, positionMs, engineLatencyMs }`
+**sync-ping 수신**: sync-pong 응답
+**state-request 수신**: 현재 상태 응답 `{ hostTime, positionMs, playing, engineLatencyMs }`
+
+#### 3-6. 게스트 동작 — 상태별 케이스
+
+모든 계산은 게스트에서 일어남. 게스트 상태에 따라 처리가 달라짐.
+
+**게스트 상태 정의**:
 ```
-호스트: play 버튼 → 즉시 재생 → { hostTime, positionMs } 전송
+준비 단계:
+  [A] TCP 연결만 됨 (offset 미계산, 오디오 미로드)
+  [B] offset 계산 완료, 오디오 미로드 또는 로드 중
+  [C] 모두 준비 완료 (offset 계산 + 오디오 로드 완료)
 
-게스트: 수신 → 조건 체크
-  ├── offset 계산 완료?
-  ├── 오디오 로드 완료?
-  └── 둘 다 완료 →
-        경과시간 = (내 시간 + offset) - hostTime
-        seek(positionMs + 경과시간) → play
-```
-
-- 고정 딜레이 없음, 호스트는 즉시 재생
-- 게스트 준비 안 됐으면 준비 완료 후 같은 로직으로 진입
-- **늦게 입장한 게스트도 동일한 로직** (별도 state-request 불필요)
-
-**오디오 엔진 레이턴시 보정**:
-- 플랫폼 채널(`com.synchorus/audio_latency`)로 OS에서 직접 측정
-  - Android: `AudioManager.getProperty(OUTPUT_LATENCY)` + buffer 레이턴시
-  - iOS: `AVAudioSession.outputLatency` + `ioBufferDuration`
-- 호스트/게스트 모두 `startListening` 시 측정, 메시지에 포함하여 전송
-- 게스트가 `(myLatency - hostLatency)` 만큼 position을 앞으로 조정
-- 실제 스피커 출력 시점 차이를 보정 (소프트웨어 position 일치 ≠ 소리 일치)
-
-**게스트 방 입장 시 초기화 순서**:
-```
-1. 핑퐁 10회 → offset 계산
-2. 엔진 레이턴시 측정 (플랫폼 채널)
-3. 오디오 로드 (HTTP 스트리밍)
-4. 모두 완료 → play 신호 대기 or 이미 재생 중이면 바로 진입
+재생 상태:
+  [C-1] 준비 완료, 정지 중
+  [C-2] 준비 완료, 재생 중
 ```
 
-### 5. 재생 중 싱크 보정
+**게스트 플래그**: `_hostPlaying` — 호스트가 재생 중인지 여부
+- play 수신 → `_hostPlaying = true`
+- pause 수신 → `_hostPlaying = false`
 
-offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위치 차이.
+---
 
-**호스트 → 게스트 position 전송**: 5초마다 `{ hostTime, positionMs, engineLatencyMs }` 전송
+##### 케이스 1: 준비 완료 상태에서 play 수신 [C-1 → C-2]
 
-**게스트 보정 로직**:
+가장 정확한 케이스. elapsed가 네트워크 지연 수준으로 최소.
+
 ```
-엔진 레이턴시 보정 = 내 엔진 레이턴시 - 호스트 엔진 레이턴시
-호스트 position 추정 = positionMs + 경과시간 + 엔진 레이턴시 보정
-내 position과 비교 → 차이 계산 (절대값 기준)
-
-차이 < 30ms   → 무시 (충분히 정확)
-차이 >= 30ms  → seek로 즉시 보정
+호스트: play 전송 (hostTime, positionMs, engineLatencyMs)
+게스트: 수신
+  _hostPlaying = true
+  elapsed = nowAsHostTime - hostTime              ← 네트워크 지연만 (~20ms)
+  latencyCompensation = 내 engineLatency - 호스트 engineLatency
+  targetPosition = positionMs + elapsed + latencyCompensation
+  seek(targetPosition) → play()
 ```
 
-**seek 안전장치**:
-- `_syncSeeking` 플래그: seek 진행 중 다음 sync-position이 와도 무시
-- `_lastBufferingRecovery`: seek 직후 버퍼링 복구 2초 쿨다운
-- `_commandSeq`: 빠른 재생/정지 반복 시 진행 중인 async 작업 무효화
+**타임라인 예시** (offset=-10ms, 네트워크 20ms, seek 15ms, 호스트 engineLatency 15ms, 게스트 10ms):
+```
+호스트:
+  10:00:00.000  Play 누름, 메시지 전송, seek(5000ms)  15ms
+  10:00:00.015  play(), engineLatency                  15ms
+  10:00:00.030  소리 출력 (position ~5030ms)
 
-**속도 조절 제거 이유**: `setSpeed(1.05)` 시 에뮬레이터에서 오히려 차이 증가 (1.05x 유지 못함). 실기기에서도 보장 불가하므로 seek 단일 방식으로 통일.
+게스트:
+  10:00:00.020  메시지 수신, elapsed=20ms, target=5015ms
+                seek(5015ms)                           15ms
+  10:00:00.035  play(), engineLatency                  10ms
+  10:00:00.045  소리 출력 (position ~5025ms)
 
-**버퍼링 복구**: seek 후 just_audio 버퍼링→ready 전환 감지 → 즉시 position 재계산 → seek. 2초 쿨다운으로 연쇄 반응 방지.
+결과: 5030ms vs 5025ms = ~5ms 차이 (측정 불가능한 영역)
+```
 
-**에러 복구**: seek 중 404 등 소스 에러 발생 시 자동 오디오 재로드 (`_reloadAudio`). 재로드 실패 시 호스트에게 `audio-request` 재요청.
+##### 케이스 2: 준비 미완료 중 play 수신 [A/B → 나중에 C]
 
-**블루투스/수동 레이턴시 보정**: 수동 조절 슬라이더로 대응 (향후 추가)
+게스트가 아직 준비 중일 때 호스트가 play를 보낸 경우. **시간 값은 무시하고 상태만 기억**.
+
+```
+호스트: play 전송
+게스트: 준비 안 됨
+  _hostPlaying = true                   ← 상태만 저장, hostTime/positionMs 무시
+  (offset 계산 중... 오디오 로드 중...)
+  
+  준비 완료!
+  _hostPlaying == true → 호스트에게 state-request 전송
+  호스트: 응답 (hostTime=지금, positionMs=지금position, playing=true, engineLatencyMs)
+  게스트: elapsed = 네트워크 지연만 (~20ms) ← 오래된 값이 아니라 최신 값!
+  targetPosition = positionMs + elapsed + latencyCompensation
+  seek(targetPosition) → play()
+```
+
+**기존 방식과의 차이**:
+```
+기존: play 수신 → pendingPlay에 저장 → 준비 완료 후 오래된 hostTime으로 계산
+      elapsed = 네트워크 지연 + 대기 시간 (수초~수십초) → 부정확
+
+새 방식: play 수신 → 플래그만 저장 → 준비 완료 후 최신 상태 요청
+         elapsed = 네트워크 지연만 (~20ms) → 항상 정확
+```
+
+##### 케이스 3: 준비 완료 상태에서 pause 수신 [C-2 → C-1]
+
+```
+호스트: pause 전송 (positionMs)
+게스트:
+  _hostPlaying = false
+  pause()
+  seek(positionMs)     ← 호스트와 같은 위치로 맞춤
+```
+
+##### 케이스 4: 준비 미완료 중 pause 수신 [A/B]
+
+```
+호스트: pause 전송
+게스트: _hostPlaying = false     ← 상태만 저장
+  준비 완료 후 _hostPlaying == false → 아무것도 안 함 (대기)
+```
+
+##### 케이스 5: 준비 완료, 재생 중 seek 수신 [C-2]
+
+```
+호스트: seek 전송 (hostTime, positionMs, engineLatencyMs)
+게스트:
+  재생 중이면:
+    elapsed = nowAsHostTime - hostTime
+    targetPosition = positionMs + elapsed + latencyCompensation
+    seek(targetPosition) → play()
+  정지 중이면:
+    seek(positionMs)    ← 단순 위치 이동만
+```
+
+##### 케이스 6: 재생 중 sync-position 수신 [C-2]
+
+5초마다 호스트가 보내는 위치 보정 신호.
+
+```
+호스트: sync-position (hostTime, positionMs, engineLatencyMs)
+게스트:
+  expectedPosition = positionMs + elapsed + latencyCompensation
+  diff = expectedPosition - 내 position
+
+  diff < 30ms   → 무시
+  diff >= 30ms  → seek(expectedPosition)
+```
+
+**안전장치**:
+- `_syncSeeking`: seek 진행 중 다음 sync-position 무시
+- `_lastBufferingRecovery`: seek 후 2초 쿨다운
+- `_commandSeq`: 빠른 재생/정지 반복 시 stale async 무효화
+
+##### 케이스 7: 재생 중 버퍼링 발생 후 복구 [C-2]
+
+네트워크 지연으로 HTTP 스트리밍 버퍼가 비어서 재생이 멈췄다가 복구된 경우.
+
+```
+버퍼링 발생 → 재생 멈춤
+버퍼 채워짐 → ready 전환 감지
+  마지막 sync-position 기준으로 position 재계산 → seek
+  (2초 쿨다운: 연쇄 반응 방지)
+```
+
+##### 케이스 8: 재생 중 오디오 에러 (404 등) [C-2]
+
+호스트 백그라운드 진입 등으로 HTTP 서버 연결이 끊긴 경우.
+
+```
+seek 중 에러 발생
+  → _reloadAudio() (URL 다시 로드 시도)
+  → 실패 시 호스트에게 audio-request 재요청
+  → URL 수신 → 로드 → state-request → seek → play
+```
+
+##### 케이스 9: 재생 중 네트워크 끊김 → 재연결 [C-2 → A → C]
+
+```
+네트워크 끊김 감지
+  → 자동 재연결 3회 시도 (1/2/3초 간격)
+  → WiFi 끊김이면 15초간 복구 대기
+  → 재연결 성공
+  → 핑퐁 10회 재동기화
+  → state-request → 최신 상태 수신 → seek → play
+```
+
+##### 케이스 10: 늦은 입장 (호스트 이미 재생 중) [A → B → C]
+
+별도 처리 없음. 케이스 2와 동일한 흐름.
+
+```
+게스트 입장 → offset 계산 → 오디오 로드
+준비 완료 → _hostPlaying == true → state-request → seek → play
+```
+
+#### 3-7. Play 신호 타임라인 — 정리
+
+```
+호스트 Play 누름
+  │
+  ├─ 호스트: seek(position) → play() → 메시지 전송
+  │
+  ├─ 게스트 (준비 완료):
+  │    메시지 수신 → elapsed 계산 → seek(보정position) → play()
+  │
+  └─ 게스트 (준비 미완료):
+       _hostPlaying = true (상태만 저장)
+       ... 준비 완료 ...
+       state-request → 최신 상태 수신 → seek(보정position) → play()
+```
+
+#### 3-8. 재생 중 싱크 유지 구조
+
+```
+[시계 동기화 계층]     30초마다 핑퐁 10회 → offset 갱신
+        ↓
+[위치 보정 계층]       5초마다 sync-position → 30ms 이상 차이 시 seek
+        ↓
+[버퍼링/에러 복구]     버퍼링 복구 시 position 재계산, 에러 시 재로드
+```
+
+#### 3-9. 게스트 방 입장 시 초기화 순서
+
+```
+1. TCP 연결
+2. 핑퐁 10회 → clock offset 계산
+3. 엔진 레이턴시 측정 (플랫폼 채널)
+4. 호스트에게 audio-request → URL 수신 → 오디오 로드 (HTTP 스트리밍, 메타+초기 버퍼)
+5. 준비 완료 → _hostPlaying 확인
+   ├── true  → state-request → 최신 상태 수신 → seek → play
+   └── false → 대기
+```
+
+#### 3-10. 설계 결정 기록
+
+| 결정 | 이유 |
+|---|---|
+| 속도 조절(1.05x/0.95x) 제거 | 에뮬레이터에서 setSpeed(1.05) 시 오히려 차이 증가, 실기기에서도 보장 불가 |
+| seek 단일 보정 방식 | 속도 조절보다 예측 가능하고 즉시 반영됨 |
+| 호스트도 seek → play | seek 소요시간을 측정하지 않고도 양쪽 상쇄로 해결 |
+| 준비 미완료 시 state-request | pendingPlay의 오래된 hostTime 대신 최신 값을 받아 elapsed 최소화 |
+| _hostPlaying 플래그 | 준비 미완료 중 play/pause 상태를 추적, 준비 완료 후 적절히 대응 |
+| 임계값 30ms | 20ms에서 상향 — 너무 민감하면 불필요한 seek 빈발 |
+| sync-position 5초 간격 | 드리프트/지터를 주기적으로 잡되, 너무 잦으면 seek 과다 |
+| bestRtt는 로그 전용 | offset 선택 기준으로만 사용, 이후 계산에 미사용 |
+| 블루투스 레이턴시 | engineLatency에 미포함, 수동 슬라이더로 대응 예정 |
 
 ## 아키텍처: 하이브리드 (P2P + 클라우드)
 
@@ -395,11 +621,13 @@ offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위
 | `peer-left` | 호스트->전체 | `{ peerId }` | 참가자 퇴장 알림 |
 | `sync-ping` | 참가->호스트 | `{ t1 }` | 시간 동기화 ping |
 | `sync-pong` | 호스트->참가 | `{ t1, hostTime }` | 시간 동기화 pong |
-| `audio-url` | 호스트->전체 | `{ url }` | 오디오 URL 공유 (HTTP 서버 URL 또는 외부 URL) |
+| `audio-url` | 호스트->전체 | `{ url, playing }` | 오디오 URL 공유 + 현재 재생 상태 |
 | `play` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 재생 (호스트 시간 + position + 엔진 레이턴시) |
 | `pause` | 호스트->전체 | `{ positionMs }` | 일시정지 |
 | `seek` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 탐색 |
 | `sync-position` | 호스트->전체 | `{ hostTime, positionMs, engineLatencyMs }` | 재생 중 position 동기화 (5초마다) |
+| `state-request` | 참가->호스트 | `{}` | 게스트가 준비 완료 후 호스트의 최신 상태 요청 |
+| `state-response` | 호스트->참가 | `{ hostTime, positionMs, playing, engineLatencyMs }` | 호스트의 현재 재생 상태 응답 |
 | `volume` | 로컬 전용 | - | 각 디바이스 개별 볼륨 (전송 불필요) |
 
 ### 제거된 이벤트 (v2에서 불필요)
@@ -409,7 +637,7 @@ offset 보정(3번)과 별개 계층. offset은 시계 차이, 이건 재생 위
 | `audio-meta` | HTTP 서버 방식으로 전환, 파일 메타 전송 불필요 |
 | `audio-transfer` | HTTP 서버 방식으로 전환, 청크 전송 불필요 |
 | `audio-request` | ~~HTTP URL 공유로 대체~~ → 다시 활용 (게스트 동기화 완료 후 현재 오디오 요청, 에러 복구 시 재요청) |
-| `state-request/response` | play 메시지의 hostTime+position으로 통합 |
+| `state-request/response` | ~~play 메시지의 hostTime+position으로 통합~~ → 다시 활용 (게스트 준비 완료 후 최신 상태 요청, pendingPlay 대체) |
 
 ## 화면 구성
 

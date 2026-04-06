@@ -28,7 +28,9 @@ class AudioSyncService {
   String? _currentFileName;
   String? _currentUrl;
   bool _audioReady = false;
-  Map<String, dynamic>? _pendingPlay;
+
+  // 호스트 재생 상태 추적 (게스트 전용)
+  bool _hostPlaying = false;
 
   // 명령 직렬화: 빠른 재생/정지 반복 시 꼬임 방지
   int _commandSeq = 0;
@@ -146,6 +148,12 @@ class AudioSyncService {
         case 'audio-request':
           if (_isHost) _handleAudioRequest(message['_from']);
           break;
+        case 'state-request':
+          if (_isHost) _handleStateRequest(message['_from']);
+          break;
+        case 'state-response':
+          if (!_isHost) _handleStateResponse(message['data']);
+          break;
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -187,7 +195,7 @@ class AudioSyncService {
 
     _p2p.broadcastToAll({
       'type': 'audio-url',
-      'data': {'url': url},
+      'data': {'url': url, 'playing': _player.playing},
     });
   }
 
@@ -225,7 +233,7 @@ class AudioSyncService {
     // 게스트에게 URL 전달
     _p2p.broadcastToAll({
       'type': 'audio-url',
-      'data': {'url': httpUrl},
+      'data': {'url': httpUrl, 'playing': _player.playing},
     });
 
     _isLoading = false;
@@ -247,6 +255,8 @@ class AudioSyncService {
       },
     });
 
+    // 호스트도 seek → play 경로를 타서 게스트와 seek 비용을 대칭으로 맞춤
+    await _player.seek(_player.position);
     await _player.play();
   }
 
@@ -284,23 +294,32 @@ class AudioSyncService {
     if (_currentUrl == null) return;
     _p2p.sendToPeer(peerId, {
       'type': 'audio-url',
-      'data': {'url': _currentUrl},
+      'data': {
+        'url': _currentUrl,
+        'playing': _player.playing,
+      },
     });
-    if (_player.playing) {
-      _p2p.sendToPeer(peerId, {
-        'type': 'play',
-        'data': {
-          'hostTime': _sync.nowAsHostTime,
-          'positionMs': _player.position.inMilliseconds,
-          'engineLatencyMs': _engineLatencyMs,
-        },
-      });
-    }
+    // 게스트가 오디오 로드 완료 후 _hostPlaying 체크 → state-request로 최신 상태 요청
   }
 
   void _handleAudioRequest(String? fromId) {
     if (fromId == null) return;
     sendCurrentAudioToPeer(fromId);
+  }
+
+  // ─── 호스트: state-request 처리 ───
+
+  void _handleStateRequest(String? fromId) {
+    if (fromId == null) return;
+    _p2p.sendToPeer(fromId, {
+      'type': 'state-response',
+      'data': {
+        'hostTime': _sync.nowAsHostTime,
+        'positionMs': _player.position.inMilliseconds,
+        'playing': _player.playing,
+        'engineLatencyMs': _engineLatencyMs,
+      },
+    });
   }
 
   // ─── 호스트: 5초마다 position 브로드캐스트 ───
@@ -326,6 +345,10 @@ class AudioSyncService {
   Future<void> _handleAudioUrl(Map<String, dynamic> data) async {
     var url = data['url'] as String;
 
+    // audio-url에 재생 상태가 포함되어 있으면 _hostPlaying 업데이트
+    final playing = data['playing'] as bool?;
+    if (playing != null) _hostPlaying = playing;
+
     // 게스트: URL의 호스트를 실제 연결한 IP로 치환 (에뮬레이터 등 네트워크 경로가 다른 경우)
     final connectedIp = _p2p.connectedHostIp;
     if (connectedIp != null) {
@@ -335,7 +358,6 @@ class AudioSyncService {
     }
 
     await _player.stop();
-    _pendingPlay = null;
     _audioReady = false;
 
     _currentUrl = url;
@@ -372,15 +394,18 @@ class AudioSyncService {
     _isLoading = false;
     _loadingController.add(false);
 
-    if (_pendingPlay != null && _audioReady) {
-      await _handlePlay(_pendingPlay!);
-      _pendingPlay = null;
+    // 오디오 로드 완료 + 호스트가 재생 중이면 최신 상태 요청
+    if (_audioReady && _hostPlaying) {
+      _requestHostState();
     }
   }
 
   Future<void> _handlePlay(Map<String, dynamic> data) async {
+    _hostPlaying = true;
+
     if (!_audioReady) {
-      _pendingPlay = data;
+      // 준비 안 됨 → 플래그만 저장, 준비 완료 후 state-request로 최신 상태 받음
+      debugPrint('SYNC_PLAY: not ready, flagging _hostPlaying=true');
       return;
     }
 
@@ -415,7 +440,11 @@ class AudioSyncService {
   }
 
   void _handlePause(Map<String, dynamic> data) {
+    _hostPlaying = false;
     ++_commandSeq;
+
+    if (!_audioReady) return;
+
     _player.pause();
     final positionMs = data['positionMs'] as int?;
     if (positionMs != null) {
@@ -424,6 +453,7 @@ class AudioSyncService {
   }
 
   Future<void> _handleSeek(Map<String, dynamic> data) async {
+    if (!_audioReady) return;
     final seq = ++_commandSeq;
     final positionMs = data['positionMs'] as int;
     final hostTime = data['hostTime'];
@@ -535,6 +565,49 @@ class AudioSyncService {
     });
   }
 
+  // ─── 게스트: state-response 처리 ───
+
+  Future<void> _handleStateResponse(Map<String, dynamic> data) async {
+    final playing = data['playing'] as bool? ?? false;
+    if (!playing || !_audioReady) return;
+
+    final seq = ++_commandSeq;
+
+    final hostTime = data['hostTime'] as int;
+    final positionMs = data['positionMs'] as int;
+    _hostEngineLatencyMs = (data['engineLatencyMs'] as int?) ?? 0;
+
+    final elapsed = _sync.nowAsHostTime - hostTime;
+    final targetPosition = positionMs + elapsed + _latencyCompensation;
+    final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
+
+    debugPrint('STATE_RESPONSE: hostTime=$hostTime, positionMs=$positionMs, '
+        'elapsed=$elapsed, target=$targetPosition');
+
+    // 에러 상태면 오디오 재로드
+    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
+      await _reloadAudio();
+      if (seq != _commandSeq || !_audioReady) return;
+    }
+
+    _lastBufferingRecovery = DateTime.now();
+    await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
+    if (seq != _commandSeq) return;
+
+    if (!_player.playing) {
+      await _player.play();
+    }
+  }
+
+  // ─── 게스트: 상태 요청 ───
+
+  void _requestHostState() {
+    _p2p.sendToHost({
+      'type': 'state-request',
+      'data': {},
+    });
+  }
+
   // ─── 게스트: 오디오 요청 ───
 
   void requestCurrentAudio() {
@@ -550,7 +623,7 @@ class AudioSyncService {
     _isLoading = false;
     _loadingController.add(false);
     _audioReady = false;
-    _pendingPlay = null;
+    _hostPlaying = false;
     await _audioHandler?.stop();
     await _player.stop();
     _syncPositionTimer?.cancel();
@@ -572,7 +645,7 @@ class AudioSyncService {
   void cleanupSync() {
     _isLoading = false;
     _audioReady = false;
-    _pendingPlay = null;
+    _hostPlaying = false;
     _syncPositionTimer?.cancel();
     _bufferingSub?.cancel();
     _messageSub?.cancel();
