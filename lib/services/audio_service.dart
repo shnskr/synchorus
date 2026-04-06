@@ -134,16 +134,16 @@ class AudioSyncService {
           if (!_isHost) await _handleAudioUrl(message['data']);
           break;
         case 'play':
-          if (!_isHost) _handlePlay(message['data']);
+          if (!_isHost) await _handlePlay(message['data']);
           break;
         case 'pause':
           if (!_isHost) _handlePause(message['data']);
           break;
         case 'seek':
-          if (!_isHost) _handleSeek(message['data']);
+          if (!_isHost) await _handleSeek(message['data']);
           break;
         case 'sync-position':
-          if (!_isHost) _handleSyncPosition(message['data']);
+          if (!_isHost) await _handleSyncPosition(message['data']);
           break;
         case 'audio-request':
           if (_isHost) _handleAudioRequest(message['_from']);
@@ -152,7 +152,7 @@ class AudioSyncService {
           if (_isHost) _handleStateRequest(message['_from']);
           break;
         case 'state-response':
-          if (!_isHost) _handleStateResponse(message['data']);
+          if (!_isHost) await _handleStateResponse(message['data']);
           break;
       }
     } catch (e) {
@@ -172,7 +172,10 @@ class AudioSyncService {
       _httpServer = await shelf_io.serve(handler, InternetAddress.anyIPv4, 0);
     }
     final ip = await NetworkInfo().getWifiIP();
-    if (ip == null) return null;
+    if (ip == null) {
+      await _stopFileServer();
+      return null;
+    }
     final encodedName = Uri.encodeComponent(fileName);
     return 'http://$ip:${_httpServer!.port}/$encodedName';
   }
@@ -189,7 +192,13 @@ class AudioSyncService {
     _currentFileName = null;
     _audioReady = false;
     await _stopFileServer();
-    await _player.setUrl(url);
+    try {
+      await _player.setUrl(url);
+    } catch (e) {
+      debugPrint('loadUrl failed: $e');
+      _errorController.add('URL을 불러올 수 없습니다');
+      return;
+    }
     _audioReady = true;
     _updateMediaItem();
 
