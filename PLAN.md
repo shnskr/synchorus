@@ -173,6 +173,9 @@
   - 수정: 응답 대기 중만 차단, 응답 오면 즉시 해제 → RTT만큼만 대기
   - `_handleStateResponse` 최상단에서 플래그 해제 (early return 전)
   - `cleanupSync()`에서 플래그 초기화 (연결 끊김 시 영구 차단 방지)
+- [x] `_handleStateResponse`에 `_hostPlaying` 가드 추가
+  - 버퍼링 복구 중 pause 도착 → stale state-response(playing=true)가 재생 재개하는 경합 수정
+  - stale 응답의 position도 pause 이전 값이므로 seek 포함 전부 무시가 정확
 
 **syncSeek 순서 수정**
 - [x] `syncSeek()`에서 seek → broadcast 순서를 broadcast → seek으로 변경

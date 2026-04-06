@@ -566,7 +566,7 @@ class AudioSyncService {
     _awaitingStateResponse = false;
 
     final playing = data['playing'] as bool? ?? false;
-    if (!playing || !_audioReady) return;
+    if (!playing || !_audioReady || !_hostPlaying) return;
 
     final seq = ++_commandSeq;
 
