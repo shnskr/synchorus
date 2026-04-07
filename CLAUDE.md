@@ -20,7 +20,8 @@ lib/
     ├── p2p_service.dart       # TCP 소켓 통신 (호스트/참가자)
     ├── discovery_service.dart # UDP 브로드캐스트 (디바이스 발견)
     ├── sync_service.dart      # 시간 동기화 (ping/pong offset)
-    └── audio_service.dart     # 오디오 재생/공유/동기화
+    ├── audio_service.dart     # 오디오 재생/공유/동기화
+    └── audio_handler.dart     # 백그라운드 재생 (audio_service 패키지)
 ```
 
 ## 핵심 아키텍처
@@ -28,8 +29,8 @@ lib/
 - **호스트**: TCP 서버 오픈 (포트 41235), 방 코드 생성, 오디오 소스 관리, 재생 명령 전송
 - **게스트**: 호스트에 TCP 연결, 시간 동기화 후 오디오 수신, 호스트 명령에 따라 재생
 - **메시지 형식**: JSON over TCP, 줄바꿈(\n) 구분, 바이트 단위 버퍼링
-- **파일 전송**: Base64 인코딩된 32KB 청크, 세대 카운터로 동시 전송 충돌 방지
-- **동기화**: 호스트 시간 기준 2초 후 예약 재생 (_syncDelayMs = 2000)
+- **파일 전송**: HTTP 파일 서버 (shelf_static, 포트 41236) — 호스트가 임시 디렉토리에서 서빙, 게스트가 URL로 스트리밍
+- **동기화**: 호스트 시간 기준 즉시 재생 + elapsed 보정 + 엔진 레이턴시 보정
 
 ## P2P 메시지 타입
 
@@ -37,7 +38,7 @@ lib/
 |------|------|------|
 | join/welcome | 게스트↔호스트 | 입장/승인 |
 | sync-ping/sync-pong | 게스트↔호스트 | 시간 동기화 |
-| audio-meta/audio-data | 호스트→게스트 | 파일 전송 (청크) |
+| sync-position | 호스트→게스트 | 5초 주기 position 브로드캐스트 (drift 보정) |
 | audio-url | 호스트→게스트 | URL 공유 |
 | audio-request | 게스트→호스트 | 현재 오디오 요청 (늦은 입장 시) |
 | play/pause/seek | 호스트→게스트 | 재생 제어 |
@@ -60,6 +61,7 @@ lib/
 
 - socket.write() 대신 socket.add() + try-catch 사용 (Broken pipe 방지)
 - socket.close() 대신 socket.destroy() 사용 (TCP 핸드셰이크 대기 방지)
-- 파일 전송 시 _sendGeneration 카운터로 이전 전송 자동 취소
+- 빠른 재생/정지 반복 시 _commandSeq 패턴으로 stale async 무효화
 - 호스트 백그라운드 시 대량 데이터 전송 금지 (게스트가 audio-request로 직접 요청)
 - setState 호출 전 mounted 체크 필수
+- syncWithHost() 동시 호출 방지: _activeSyncSub 로컬 변수 패턴 사용

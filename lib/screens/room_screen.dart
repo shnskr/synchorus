@@ -153,7 +153,12 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
       // 게스트: 참가자 입퇴장 추적
       if (!widget.isHost) {
-        if (type == 'peer-joined') {
+        if (type == 'welcome') {
+          final peerCount = message['data']?['peerCount'] as int?;
+          if (peerCount != null) {
+            setState(() => _guestPeerCount = peerCount);
+          }
+        } else if (type == 'peer-joined') {
           final name = message['data']?['name'] as String? ?? '참가자';
           setState(() => _guestPeerCount++);
           _addLog('$name 입장');
@@ -283,10 +288,15 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     _startSync();
   }
 
+  static const int _maxLogLines = 500;
+
   void _addLog(String message) {
     if (!mounted) return;
     setState(() {
       _logs.add('[${DateTime.now().toString().substring(11, 19)}] $message');
+      if (_logs.length > _maxLogLines) {
+        _logs.removeRange(0, _logs.length - _maxLogLines);
+      }
     });
     if (_autoScroll) {
       WidgetsBinding.instance.addPostFrameCallback((_) {

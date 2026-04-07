@@ -182,6 +182,20 @@
   - 기존 문제: 호스트가 seek 완료 후 시간을 찍으므로, seek 소요시간만큼 게스트와 비대칭
   - `syncPlay()`는 이미 올바른 순서(broadcast 먼저)였으나 `syncSeek()`만 반대였음
 
+#### 2026-04-07 코드 리뷰 및 버그 수정
+
+**syncWithHost 경합 버그 수정**
+- [x] `syncWithHost()` 동시 호출 시 공유 `_messageSub`의 timeout 핸들러가 새 호출의 listener를 파괴하는 버그
+  - periodic sync와 reconnect sync가 겹치면 양쪽 모두 실패할 수 있었음
+  - `_activeSyncSub` 로컬 변수 패턴으로 변경: 각 호출이 자신의 listener만 관리
+  - 새 호출 시 이전 호출의 listener를 취소하고, timeout은 자신의 listener만 정리
+  - for 루프에서 취소 감지 시 불필요한 ping 전송 중단
+
+**개선사항**
+- [x] 로그 상한 추가 (`_maxLogLines = 500`) — 장시간 사용 시 메모리 무한 증가 방지
+- [x] 시간 포맷 1시간+ 지원 — 60분 이상 오디오에서 `H:MM:SS` 형식으로 표시
+- [x] 게스트 피어 카운트 보정 — reconnect 시 welcome 메시지의 `peerCount`로 동기화 (증감 방식 드리프트 방지)
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 엔진 레이턴시 보정값이 실제와 약간 차이 (에뮬 기준 ~10ms 오차) — 수동 보정 슬라이더 추가 예정
 - [ ] 호스트 백그라운드 진입 시 파일 서버 연결 끊김 → 게스트 seek 시 404 (자동 재로드로 대응)

@@ -31,6 +31,9 @@ class SyncService {
   StreamSubscription? _messageSub;
   Timer? _periodicSyncTimer;
 
+  /// 진행 중인 syncWithHost 호출의 로컬 listener (경합 방지)
+  StreamSubscription? _activeSyncSub;
+
   SyncService(this._p2p);
 
   /// 상태 초기화 (방 나가기 시 호출)
@@ -40,6 +43,8 @@ class SyncService {
     _synced = false;
     _messageSub?.cancel();
     _messageSub = null;
+    _activeSyncSub?.cancel();
+    _activeSyncSub = null;
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
   }
@@ -47,6 +52,10 @@ class SyncService {
   /// 참가자: 호스트와 시간 동기화 시작
   /// ping을 [count]회 보내서 가장 RTT가 작은 샘플로 offset 확정
   Future<SyncResult> syncWithHost({int count = 10}) async {
+    // 이전 진행 중인 sync가 있으면 취소
+    _activeSyncSub?.cancel();
+    _activeSyncSub = null;
+
     final completer = Completer<SyncResult>();
     int completed = 0;
 
@@ -54,8 +63,8 @@ class SyncService {
     int roundBestRtt = 999999;
     int roundOffset = _offsetMs;
 
-    _messageSub?.cancel();
-    _messageSub = _p2p.onMessage.listen((message) {
+    // 로컬 변수로 listener를 관리하여 다른 호출과의 경합 방지
+    final sub = _p2p.onMessage.listen((message) {
       if (message['type'] == 'sync-pong') {
         final t1 = message['data']['t1'] as int;
         final hostTime = message['data']['hostTime'] as int;
@@ -70,12 +79,12 @@ class SyncService {
         }
 
         completed++;
-        if (completed >= count) {
+        if (completed >= count && !completer.isCompleted) {
           _offsetMs = roundOffset;
           _bestRtt = roundBestRtt;
           _synced = true;
-          _messageSub?.cancel();
-          _messageSub = null;
+          sub.cancel();
+          if (_activeSyncSub == sub) _activeSyncSub = null;
           completer.complete(SyncResult(
             offsetMs: _offsetMs,
             rttMs: _bestRtt,
@@ -84,9 +93,12 @@ class SyncService {
         }
       }
     });
+    _activeSyncSub = sub;
 
     // ping을 간격을 두고 전송
     for (int i = 0; i < count; i++) {
+      // 이 sync가 취소되었으면 중단
+      if (_activeSyncSub != sub) break;
       _p2p.sendToHost({
         'type': 'sync-ping',
         'data': {'t1': DateTime.now().millisecondsSinceEpoch},
@@ -99,8 +111,8 @@ class SyncService {
     return completer.future.timeout(
       const Duration(seconds: 5),
       onTimeout: () {
-        _messageSub?.cancel();
-        _messageSub = null;
+        sub.cancel();
+        if (_activeSyncSub == sub) _activeSyncSub = null;
         if (completed > 0) {
           _offsetMs = roundOffset;
           _bestRtt = roundBestRtt;
@@ -176,6 +188,8 @@ class SyncService {
   void dispose() {
     _messageSub?.cancel();
     _messageSub = null;
+    _activeSyncSub?.cancel();
+    _activeSyncSub = null;
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
   }
