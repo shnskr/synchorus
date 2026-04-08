@@ -68,6 +68,28 @@ public:
         return true;
     }
 
+    // Phase 1: Flutter 측 100ms 주기 폴링용.
+    // 반환 false = 스트림 미시작 / HAL이 아직 timestamp 제공 불가 상태.
+    bool getLatestTimestamp(int64_t* outFramePos, int64_t* outTimeNs) {
+        std::lock_guard<std::mutex> lock(mLock);
+        if (!mStream) {
+            *outFramePos = -1;
+            *outTimeNs = -1;
+            return false;
+        }
+        int64_t framePos = 0;
+        int64_t timeNs = 0;
+        oboe::Result result = mStream->getTimestamp(CLOCK_MONOTONIC, &framePos, &timeNs);
+        if (result != oboe::Result::OK) {
+            *outFramePos = -1;
+            *outTimeNs = -1;
+            return false;
+        }
+        *outFramePos = framePos;
+        *outTimeNs = timeNs;
+        return true;
+    }
+
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* stream,
         void* audioData,
@@ -111,6 +133,20 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeStop(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().stop() ? JNI_TRUE : JNI_FALSE;
+}
+
+// Phase 1: Flutter가 100ms 주기로 polling.
+// 반환 배열: [framePos, timeNs, ok(1|0)]
+JNIEXPORT jlongArray JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeGetTimestamp(
+    JNIEnv* env, jobject /*thiz*/) {
+    int64_t framePos = -1;
+    int64_t timeNs = -1;
+    const bool ok = engine().getLatestTimestamp(&framePos, &timeNs);
+    jlongArray arr = env->NewLongArray(3);
+    const jlong values[3] = { framePos, timeNs, ok ? 1L : 0L };
+    env->SetLongArrayRegion(arr, 0, 3, values);
+    return arr;
 }
 
 }

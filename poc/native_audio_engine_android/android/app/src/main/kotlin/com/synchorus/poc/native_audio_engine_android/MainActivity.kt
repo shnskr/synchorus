@@ -14,6 +14,16 @@ class MainActivity : FlutterActivity() {
                 when (call.method) {
                     "start" -> result.success(NativeAudio.nativeStart())
                     "stop" -> result.success(NativeAudio.nativeStop())
+                    "getTimestamp" -> {
+                        val arr = NativeAudio.nativeGetTimestamp()
+                        result.success(
+                            mapOf(
+                                "framePos" to arr[0],
+                                "timeNs" to arr[1],
+                                "ok" to (arr[2] == 1L),
+                            )
+                        )
+                    }
                     else -> result.notImplemented()
                 }
             }

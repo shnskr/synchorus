@@ -11,4 +11,7 @@ object NativeAudio {
 
     external fun nativeStart(): Boolean
     external fun nativeStop(): Boolean
+
+    /** [0]=framePos, [1]=timeNanoseconds (CLOCK_MONOTONIC), [2]=ok (1|0) */
+    external fun nativeGetTimestamp(): LongArray
 }
