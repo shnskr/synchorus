@@ -245,6 +245,39 @@
 **문서**
 - [x] `CLAUDE.md` 주의사항에 "기능적 코드 수정 후 `pubspec.yaml` patch 자리 1 올리기" 규칙 추가
 
+#### 2026-04-08 v3 설계 + Android PoC Phase 0~1
+
+**v3 폐루프 리아키텍처 설계 문서화**
+- [x] `PLAN.md` 섹션 6 (PoC 플랜) + 섹션 7 (v3 설계 결정 기록) + 섹션 8 (새 P2P 메시지) 신규 작성
+- [x] `CLAUDE.md`에 v3 방향 참조 지점 추가
+- 커밋: `8b8b2cc` v3 폐루프 리아키텍처 설계 문서화 (PoC 진입 전 단일 참조 지점)
+
+**Android PoC 프로젝트 격리 생성**
+- [x] `poc/native_audio_engine_android/` 독립 Flutter 앱 생성 (본 앱 audio_service 세션과 충돌 방지)
+- [x] Oboe 1.9.0 prefab 의존성 + CMake + NDK (arm64-v8a, armeabi-v7a) 설정
+- [x] MethodChannel `com.synchorus.poc/native_audio` (start/stop/getTimestamp)
+
+**Phase 0: Oboe 래퍼 + 단순 재생**
+- [x] `oboe_engine.cpp`: `LowLatency + Exclusive + Float + Stereo`, 440Hz sine 생성, thread-safe start/stop
+- [x] `NativeAudio.kt` JNI 래퍼 + `MainActivity.kt` MethodChannel 핸들러
+- [x] S22 실기기에서 톤 정상 출력 확인
+- 커밋: `c373302` PoC Phase 0: Oboe 래퍼 + 단순 sine wave 재생
+
+**Phase 1: getTimestamp 폴링 + 시계열**
+- [x] `OboeEngine::getLatestTimestamp(CLOCK_MONOTONIC)` → JNI `nativeGetTimestamp` (`[framePos, timeNs, ok]`)
+- [x] Flutter `Timer.periodic(100ms)` 폴링, 1000 샘플 rolling window
+- [x] 통계: 유효율 / 평균 간격 / frames/ms / framePos·timeNs 단조 증가 검증
+- [x] S22 실측: **frames/ms = 48.00 (48kHz 정확 일치)**, 단조 ✓✓, 유효율 ~100%
+- 커밋: `3ed267a` PoC Phase 1: Oboe getTimestamp 폴링 + 시계열 확보
+
+**다음 작업 (Phase 2~6)**
+- [ ] **Phase 2**: P2P `audio-obs` 송수신 — 두 번째 기기 필요 (에뮬레이터 or 실기기)
+- [ ] Phase 3: drift 계산 (선형 보간)
+- [ ] Phase 4: seek 보정 + drift-report
+- [ ] Phase 5: 정적 noise floor 측정
+- [ ] Phase 6: S22 30분 stress + 네트워크 블립
+- [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
   - iPhone buffer 21ms ≈ 1024 frames @ 48kHz (Apple 표준 IO buffer), S22 192 frames @ 48kHz
@@ -946,17 +979,26 @@ class AudioError {
 
 #### 6-3. 단계별 진행
 
-| 단계 | 내용 | 출력/통과 기준 |
-|---|---|---|
-| 0 | Oboe 래퍼 + 단순 재생 | "소리 나옴" 확인 |
-| 1 | getTimestamp 폴링 + 파일 로그 | (framePos, ns) 시계열 확보 |
-| 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 |
-| 3 | drift 계산 (선형 보간) | drift 시계열 로그 |
-| 4 | seek 보정 + drift-report | 보정 전/후 비교 |
-| 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor |
-| 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 |
+| 단계 | 내용 | 출력/통과 기준 | 상태 |
+|---|---|---|---|
+| 0 | Oboe 래퍼 + 단순 재생 | "소리 나옴" 확인 | ✅ 2026-04-08 S22 통과 |
+| 1 | getTimestamp 폴링 + 파일 로그 | (framePos, ns) 시계열 확보 | ✅ 2026-04-08 S22 통과 |
+| 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 | **다음** (2번째 기기 필요) |
+| 3 | drift 계산 (선형 보간) | drift 시계열 로그 | 대기 |
+| 4 | seek 보정 + drift-report | 보정 전/후 비교 | 대기 |
+| 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor | 대기 |
+| 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 | 대기 |
 
 각 단계 끝에 로그 분석으로 통과 판정. 다음 단계 가기 전 측정값 확인.
+
+**Phase 0~1 실측 결과 (2026-04-08, S22 SM-S901N, Android 16 API 36 arm64)**
+- Oboe 설정: `LowLatency + Exclusive + Float + Stereo` → `sampleRate = 48000 Hz`
+- `frames/ms = 48.00` — 48000/1000 정확 일치. HAL이 Flutter 레이어까지 내부 일관된 타임스탬프를 전달함
+- `framePos` 단조 ✓ / `timeNs` (CLOCK_MONOTONIC) 단조 ✓
+- `Timer.periodic(100ms)` + MethodChannel 폴링, ok 유효율 거의 100%
+→ **PoC 6-1의 질문 1번 (네이티브 엔진 정밀도 sub-ms)에 긍정 답**. `(framePos, deviceTimeNs)` pair가 JNI→Kotlin→MethodChannel→Dart 경로를 거쳐 손상 없이 도달 확인.
+
+코드: `poc/native_audio_engine_android/` (독립 Flutter 프로젝트, 본 앱과 세션 충돌 방지 위해 격리)
 
 #### 6-4. 성공 기준
 
