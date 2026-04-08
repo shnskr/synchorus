@@ -57,11 +57,34 @@ lib/
 - 실기기 테스트 및 버그 수정 진행 중
 - 상세 진행 상황은 PLAN.md 참조
 
+## 작업 전 필수 확인 (매우 중요)
+
+**어떤 코드든 수정/리뷰하기 전에 반드시 PLAN.md와 CLAUDE.md를 먼저 읽고 시작할 것.**
+
+- 이 프로젝트의 많은 코드는 "이상해 보이지만 의도적인" 결정이 들어있다. 특히 동기화 로직.
+- "버그처럼 보이는" 패턴을 발견하면 먼저 `git log -p -- <파일>` / `git blame`으로 도입 의도부터 확인.
+- 주석에 "대칭화", "의도적", "방지", "stale", "race", "경합" 같은 키워드가 있으면 그 줄을 함부로 되돌리지 말 것.
+- PLAN.md `3-10. 설계 결정 기록` 섹션이 모든 비직관적 결정의 근거. 수정 전 반드시 일치 여부 확인.
+- 같은 실수를 반복하면 신뢰가 깨진다. 측정 후 한 번에 정확히 고치는 것이 원칙.
+
+## 동기화 핵심 규칙 (절대 뒤집지 말 것)
+
+- **호스트 syncPlay/syncSeek 모두 broadcast → seek/play 순서**. 시간 찍고 메시지 먼저 보내야 호스트와 게스트가 seek 비용을 대칭으로 치름. 뒤집으면 싱크 깨짐 (commit c6123b6).
+- **`_handlePlay` / `_handleStateResponse`에서 idle 시 reload 먼저**, 그 후 elapsed 재계산. reload 시간이 elapsed에 누락되면 안 됨.
+- **준비 미완료 시 hostTime/positionMs는 무시**, `_hostPlaying` 플래그만 저장. 준비 완료 후 state-request로 최신 상태 받기.
+- **버퍼링 복구 시 캐시 데이터 사용 금지**, 항상 state-request로 최신 상태 요청.
+- 게스트의 모든 seek는 `_internalSeek()` 래퍼로. `_player.seek()` 직접 호출 금지 (buffering watch가 recovery 루프 돌게 됨).
+
 ## 주의사항
 
 - socket.write() 대신 socket.add() + try-catch 사용 (Broken pipe 방지)
 - socket.close() 대신 socket.destroy() 사용 (TCP 핸드셰이크 대기 방지)
-- 빠른 재생/정지 반복 시 _commandSeq 패턴으로 stale async 무효화
+- 빠른 재생/정지 반복 시 `_commandSeq` 패턴으로 stale async 무효화
 - 호스트 백그라운드 시 대량 데이터 전송 금지 (게스트가 audio-request로 직접 요청)
 - setState 호출 전 mounted 체크 필수
-- syncWithHost() 동시 호출 방지: _activeSyncSub 로컬 변수 패턴 사용
+- syncWithHost() 동시 호출 방지: `_activeSyncSub` 로컬 변수 패턴 사용
+- 파일명은 `_safeFileName()`으로 ASCII-safe 해시화 후 디스크/HTTP 서빙 (iOS AVPlayer 호환). UI 표시는 `_currentFileName`(원본), 디스크 키는 `_storedSafeName`(해시) — 두 변수를 절대 합치지 말 것.
+- audio-url 게스트 처리 시 URL에 `?v=timestamp` 캐시 무효화 쿼리가 붙어 있음. `Uri.decodeComponent` 전에 `?` 제거 필요.
+- iOS `AVAudioSession`의 `setCategory`/`setActive`는 audio_service 플러그인이 관리. AppDelegate.swift의 MethodChannel에서 직접 호출 금지.
+- 사용자가 "이전에도 같은 얘기 했다"고 하면 즉시 작업 멈추고 git log 확인부터.
+- **기능적인 코드 수정 후에는 반드시 `pubspec.yaml`의 version patch 자리를 1 올릴 것** (예: `0.0.4+1` → `0.0.5+1`). 빌드/설치 전에 올리기. 단순 lint/주석/포맷 변경은 제외.

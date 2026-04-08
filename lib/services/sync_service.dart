@@ -24,6 +24,9 @@ class SyncService {
   int _bestRtt = 999999;
   bool _synced = false;
 
+  /// 호출별 고유 sync request id (#12): periodic/manual 동시 호출 시 pong 매칭
+  int _syncRequestSeq = 0;
+
   int get offsetMs => _offsetMs;
   int get bestRtt => _bestRtt;
   bool get isSynced => _synced;
@@ -56,6 +59,9 @@ class SyncService {
     _activeSyncSub?.cancel();
     _activeSyncSub = null;
 
+    // 이번 호출의 고유 id (pong 필터링용)
+    final requestId = ++_syncRequestSeq;
+
     final completer = Completer<SyncResult>();
     int completed = 0;
 
@@ -64,33 +70,37 @@ class SyncService {
     int roundOffset = _offsetMs;
 
     // 로컬 변수로 listener를 관리하여 다른 호출과의 경합 방지
-    final sub = _p2p.onMessage.listen((message) {
-      if (message['type'] == 'sync-pong') {
-        final t1 = message['data']['t1'] as int;
-        final hostTime = message['data']['hostTime'] as int;
-        final now = DateTime.now().millisecondsSinceEpoch;
+    late final StreamSubscription sub;
+    sub = _p2p.onMessage.listen((message) {
+      if (message['type'] != 'sync-pong') return;
+      // requestId 불일치 (다른 호출의 pong 또는 stale) → 무시
+      final pongRid = message['data']?['rid'] as int?;
+      if (pongRid != requestId) return;
 
-        final rtt = now - t1;
-        final offset = hostTime - (t1 + rtt ~/ 2);
+      final t1 = message['data']['t1'] as int;
+      final hostTime = message['data']['hostTime'] as int;
+      final now = DateTime.now().millisecondsSinceEpoch;
 
-        if (rtt < roundBestRtt) {
-          roundBestRtt = rtt;
-          roundOffset = offset;
-        }
+      final rtt = now - t1;
+      final offset = hostTime - (t1 + rtt ~/ 2);
 
-        completed++;
-        if (completed >= count && !completer.isCompleted) {
-          _offsetMs = roundOffset;
-          _bestRtt = roundBestRtt;
-          _synced = true;
-          sub.cancel();
-          if (_activeSyncSub == sub) _activeSyncSub = null;
-          completer.complete(SyncResult(
-            offsetMs: _offsetMs,
-            rttMs: _bestRtt,
-            sampleCount: completed,
-          ));
-        }
+      if (rtt < roundBestRtt) {
+        roundBestRtt = rtt;
+        roundOffset = offset;
+      }
+
+      completed++;
+      if (completed >= count && !completer.isCompleted) {
+        _offsetMs = roundOffset;
+        _bestRtt = roundBestRtt;
+        _synced = true;
+        sub.cancel();
+        if (_activeSyncSub == sub) _activeSyncSub = null;
+        completer.complete(SyncResult(
+          offsetMs: _offsetMs,
+          rttMs: _bestRtt,
+          sampleCount: completed,
+        ));
       }
     });
     _activeSyncSub = sub;
@@ -101,7 +111,10 @@ class SyncService {
       if (_activeSyncSub != sub) break;
       _p2p.sendToHost({
         'type': 'sync-ping',
-        'data': {'t1': DateTime.now().millisecondsSinceEpoch},
+        'data': {
+          't1': DateTime.now().millisecondsSinceEpoch,
+          'rid': requestId,
+        },
       });
       if (i < count - 1) {
         await Future.delayed(const Duration(milliseconds: 100));
@@ -156,12 +169,14 @@ class SyncService {
     _messageSub = _p2p.onMessage.listen((message) {
       if (message['type'] == 'sync-ping') {
         final t1 = message['data']['t1'] as int;
+        final rid = message['data']['rid']; // null이면 그대로 전달
         final fromId = message['_from'] as String?;
         if (fromId != null) {
           _p2p.sendToPeer(fromId, {
             'type': 'sync-pong',
             'data': {
               't1': t1,
+              'rid': rid,
               'hostTime': DateTime.now().millisecondsSinceEpoch,
             },
           });

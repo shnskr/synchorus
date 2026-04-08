@@ -81,8 +81,14 @@ class AudioPlayerHandler extends BaseAudioHandler with SeekHandler {
 
   @override
   Future<void> stop() async {
+    // _playerSub은 취소하지 않음 (#6): 이후 재로드/재생 시 PlaybackState 업데이트가 끊기는 문제 방지
+    // 구독은 dispose 시점에만 정리
     await _player.stop();
-    _playerSub?.cancel();
     return super.stop();
+  }
+
+  Future<void> dispose() async {
+    await _playerSub?.cancel();
+    _playerSub = null;
   }
 }

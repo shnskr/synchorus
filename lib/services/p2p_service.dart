@@ -193,62 +193,72 @@ class P2PService {
   /// 소켓에서 메시지 수신 리스너
   void _listenToSocket(Socket socket, String sourceId, {Function(Map<String, dynamic>)? onFirstMessage}) {
     bool isFirst = true;
-    final byteBuffer = <int>[];
-    final newLine = '\n'.codeUnitAt(0);
+    // 누적 버퍼 + 라인 시작 오프셋: O(n²) 회피 (#9)
+    // List.removeRange 대신 lineStart만 전진시키고, 임계치를 넘으면 한 번에 잘라냄
+    var buffer = <int>[];
+    int lineStart = 0;
+    const newLine = 0x0A; // '\n'
+
+    void processMessage(Map<String, dynamic> message) {
+      // 게스트: heartbeat 수신 → 자동 응답
+      if (message['type'] == 'heartbeat' && sourceId == 'host') {
+        _sendTo(socket, {'type': 'heartbeat-ack'});
+        return;
+      }
+      // 호스트: 게스트 leave 수신 → 즉시 퇴장 처리
+      if (message['type'] == 'leave' && sourceId != 'host') {
+        final peer = _peers.cast<Peer?>().firstWhere(
+            (p) => p!.id == sourceId, orElse: () => null);
+        if (peer != null) {
+          peer.socket.destroy();
+          _peers.remove(peer);
+          _peerLeaveController.add(peer.id);
+          broadcastToAll({
+            'type': 'peer-left',
+            'data': {'peerId': peer.id},
+          });
+        }
+        return;
+      }
+      // 호스트: heartbeat-ack 수신 → lastSeen 갱신
+      if (message['type'] == 'heartbeat-ack') {
+        final peer = _peers.cast<Peer?>().firstWhere(
+            (p) => p!.id == sourceId, orElse: () => null);
+        if (peer != null) {
+          peer.lastSeen = DateTime.now().millisecondsSinceEpoch;
+        }
+        return;
+      }
+
+      if (isFirst && onFirstMessage != null) {
+        onFirstMessage(message);
+        isFirst = false;
+      } else {
+        _messageController.add(message);
+      }
+    }
 
     socket.listen(
       (data) {
-        byteBuffer.addAll(data);
-        // 줄바꿈(\n)으로 메시지 구분 - 바이트 단위로 처리
-        while (byteBuffer.contains(newLine)) {
-          final index = byteBuffer.indexOf(newLine);
-          final lineBytes = byteBuffer.sublist(0, index);
-          byteBuffer.removeRange(0, index + 1);
-
-          try {
-            final line = utf8.decode(lineBytes);
-            final message = jsonDecode(line) as Map<String, dynamic>;
-            message['_from'] = sourceId;
-
-            // 게스트: heartbeat 수신 → 자동 응답
-            if (message['type'] == 'heartbeat' && sourceId == 'host') {
-              _sendTo(socket, {'type': 'heartbeat-ack'});
-              continue;
+        buffer.addAll(data);
+        for (int i = lineStart; i < buffer.length; i++) {
+          if (buffer[i] == newLine) {
+            final lineBytes = buffer.sublist(lineStart, i);
+            lineStart = i + 1;
+            try {
+              final line = utf8.decode(lineBytes);
+              final message = jsonDecode(line) as Map<String, dynamic>;
+              message['_from'] = sourceId;
+              processMessage(message);
+            } catch (e) {
+              debugPrint('Parse error: $e');
             }
-            // 호스트: 게스트 leave 수신 → 즉시 퇴장 처리
-            if (message['type'] == 'leave' && sourceId != 'host') {
-              final peer = _peers.cast<Peer?>().firstWhere(
-                (p) => p!.id == sourceId, orElse: () => null);
-              if (peer != null) {
-                peer.socket.destroy();
-                _peers.remove(peer);
-                _peerLeaveController.add(peer.id);
-                broadcastToAll({
-                  'type': 'peer-left',
-                  'data': {'peerId': peer.id},
-                });
-              }
-              continue;
-            }
-            // 호스트: heartbeat-ack 수신 → lastSeen 갱신
-            if (message['type'] == 'heartbeat-ack') {
-              final peer = _peers.cast<Peer?>().firstWhere(
-                (p) => p!.id == sourceId, orElse: () => null);
-              if (peer != null) {
-                peer.lastSeen = DateTime.now().millisecondsSinceEpoch;
-              }
-              continue;
-            }
-
-            if (isFirst && onFirstMessage != null) {
-              onFirstMessage(message);
-              isFirst = false;
-            } else {
-              _messageController.add(message);
-            }
-          } catch (e) {
-            debugPrint('Parse error: $e');
           }
+        }
+        // 처리된 부분 잘라내기 (lineStart가 일정 크기 이상 누적됐을 때만)
+        if (lineStart > 4096) {
+          buffer = buffer.sublist(lineStart);
+          lineStart = 0;
         }
       },
       onError: (error) {
@@ -257,6 +267,9 @@ class P2PService {
       onDone: () {
         debugPrint('Connection closed: $sourceId');
         if (sourceId == 'host') {
+          // #1: stale 소켓 참조 정리 (이후 sendToHost가 죽은 소켓에 쓰지 않도록)
+          _hostSocket?.destroy();
+          _hostSocket = null;
           _disconnectedController.add(null);
         }
       },
@@ -265,9 +278,11 @@ class P2PService {
 
   /// 호스트: 모든 참가자에게 메시지 전송
   void broadcastToAll(Map<String, dynamic> message, {String? exclude}) {
-    for (final peer in _peers) {
+    // 전송 중 peer 리스트가 변경될 수 있으므로 스냅샷 순회
+    final snapshot = List<Peer>.from(_peers);
+    for (final peer in snapshot) {
       if (peer.id != exclude) {
-        _sendTo(peer.socket, message);
+        _sendToPeerSafe(peer, message);
       }
     }
   }
@@ -279,18 +294,46 @@ class P2PService {
       orElse: () => null,
     );
     if (peer != null) {
-      _sendTo(peer.socket, message);
+      _sendToPeerSafe(peer, message);
     }
   }
 
   /// 참가자: 호스트에게 메시지 전송
   void sendToHost(Map<String, dynamic> message) {
-    if (_hostSocket != null) {
-      _sendTo(_hostSocket!, message);
+    final socket = _hostSocket;
+    if (socket == null) return;
+    try {
+      socket.add(utf8.encode('${jsonEncode(message)}\n'));
+    } catch (e) {
+      debugPrint('Send to host error: $e');
+      // 호스트 소켓이 깨진 상태 → 정리 + 재연결 트리거
+      _hostSocket?.destroy();
+      _hostSocket = null;
+      _disconnectedController.add(null);
     }
   }
 
-  /// 소켓에 JSON 메시지 전송 (줄바꿈 구분)
+  /// 호스트: peer 객체로 안전 전송. 실패 시 즉시 peer 제거 (#15)
+  void _sendToPeerSafe(Peer peer, Map<String, dynamic> message) {
+    try {
+      peer.socket.add(utf8.encode('${jsonEncode(message)}\n'));
+    } catch (e) {
+      debugPrint('Send error to ${peer.id}: $e');
+      try {
+        peer.socket.destroy();
+      } catch (_) {}
+      if (_peers.remove(peer)) {
+        _peerLeaveController.add(peer.id);
+        // 다른 피어들에게도 알림 (재귀 호출이지만 해당 peer는 이미 _peers에서 빠졌으므로 안전)
+        broadcastToAll({
+          'type': 'peer-left',
+          'data': {'peerId': peer.id},
+        });
+      }
+    }
+  }
+
+  /// 소켓에 JSON 메시지 전송 (줄바꿈 구분) - 일반 socket용
   void _sendTo(Socket socket, Map<String, dynamic> message) {
     try {
       socket.add(utf8.encode('${jsonEncode(message)}\n'));

@@ -39,6 +39,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   bool _syncing = false;
   bool _syncDone = false;
   bool _syncFailed = false;
+  bool _leaving = false; // _leaveRoom 중복 호출 방지 (#13)
   String? _hostIp;
   late int _guestPeerCount;
 
@@ -342,6 +343,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
   }
 
   Future<void> _leaveRoom() async {
+    if (_leaving) return; // #13: 중복 호출 방지
+    _leaving = true;
     // 구독 먼저 취소 (cleanup 중 콜백 방지)
     _joinSub?.cancel();
     _leaveSub?.cancel();
@@ -377,9 +380,11 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     _logScrollController.dispose();
 
-    // 앱 종료/화면 파괴 시 동기적 정리 (dispose는 sync라 await 불가)
-    final audio = ref.read(audioSyncServiceProvider);
-    audio.cleanupSync();
+    // _leaveRoom이 정상 경로로 이미 정리한 경우 중복 cleanupSync 호출 방지 (#13)
+    if (!_leaving) {
+      final audio = ref.read(audioSyncServiceProvider);
+      audio.cleanupSync();
+    }
 
     super.dispose();
   }

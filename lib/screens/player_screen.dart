@@ -181,25 +181,60 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             : fileName ?? url ?? (widget.isHost ? '오디오를 선택하세요' : '음악 대기 중');
 
         return Card(
-          child: ListTile(
-            leading: isLoading
-                ? const SizedBox(
-                    width: 40, height: 40,
-                    child: Padding(
-                      padding: EdgeInsets.all(8),
-                      child: CircularProgressIndicator(strokeWidth: 3),
-                    ),
-                  )
-                : const Icon(Icons.music_note, size: 40),
-            title: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(widget.isHost ? '호스트' : '참가자'),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              ListTile(
+                leading: isLoading
+                    ? const SizedBox(
+                        width: 40, height: 40,
+                        child: Padding(
+                          padding: EdgeInsets.all(8),
+                          child: CircularProgressIndicator(strokeWidth: 3),
+                        ),
+                      )
+                    : const Icon(Icons.music_note, size: 40),
+                title: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+                subtitle: Text(widget.isHost ? '호스트' : '참가자'),
+              ),
+              _buildLatencyInfo(),
+            ],
           ),
         );
       },
+    );
+  }
+
+  Widget _buildLatencyInfo() {
+    final my = _audio.engineLatencyMs;
+    final myRaw = _audio.engineRawOutputMs;
+    final myBuf = _audio.engineBufferMs;
+    final host = _audio.hostEngineLatencyMs;
+    final comp = _audio.latencyCompensation;
+
+    final myLabel = Platform.isIOS
+        ? 'My: ${my}ms (buf=$myBuf, rawOut=$myRaw)'
+        : 'My: ${my}ms (buf=$myBuf)';
+    final compSign = comp >= 0 ? '+' : '';
+    final hostLabel = widget.isHost ? '' : '  Host: ${host}ms  Comp: $compSign${comp}ms';
+
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Align(
+        alignment: Alignment.centerLeft,
+        child: Text(
+          '$myLabel$hostLabel',
+          style: TextStyle(
+            fontSize: 11,
+            color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+            fontFamily: 'monospace',
+          ),
+        ),
+      ),
     );
   }
 

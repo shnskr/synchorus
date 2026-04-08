@@ -47,25 +47,35 @@ class DiscoveryService {
     final socket = await RawDatagramSocket.bind(InternetAddress.anyIPv4, udpPort);
     _socket = socket;
 
-    await for (final event in socket) {
-      if (event == RawSocketEvent.read) {
-        final datagram = socket.receive();
-        if (datagram == null) continue;
+    try {
+      await for (final event in socket) {
+        if (event == RawSocketEvent.read) {
+          final datagram = socket.receive();
+          if (datagram == null) continue;
 
-        final message = utf8.decode(datagram.data);
-        final parts = message.split(':');
+          final message = utf8.decode(datagram.data);
+          // split limit으로 roomCode에 ':' 들어가도 안전 (#16-g)
+          final parts = message.split(':');
+          if (parts.length < 4 || parts[0] != prefix) continue;
 
-        if (parts.length == 4 && parts[0] == prefix) {
           final port = int.tryParse(parts[2]);
           if (port == null) continue;
+          // parts[3..] 합쳐서 roomCode 복원 (호스트명에 ':' 들어가는 경우는 보장 못함)
+          final roomCode = parts.sublist(3).join(':');
           yield DiscoveredHost(
             name: parts[1],
             ip: datagram.address.address,
             port: port,
-            roomCode: parts[3],
+            roomCode: roomCode,
           );
         }
       }
+    } finally {
+      // 스트림 취소/완료 시 항상 소켓 닫기 (#5)
+      try {
+        socket.close();
+      } catch (_) {}
+      if (_socket == socket) _socket = null;
     }
   }
 

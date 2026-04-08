@@ -25,7 +25,7 @@
 
 ### 실기기 테스트 및 버그 수정 (진행 중)
 
-테스트 환경: 에뮬레이터(Pixel 6 API 34) + Galaxy S22 (SM-S901N)
+테스트 환경: 에뮬레이터(Pixel 6 API 34) + Galaxy S22 (SM-S901N) + iPhone (iOS 게스트)
 
 #### 완료된 수정사항
 - [x] Android 네트워크 권한 추가 (INTERNET, ACCESS_WIFI_STATE 등 + usesCleartextTraffic)
@@ -196,11 +196,67 @@
 - [x] 시간 포맷 1시간+ 지원 — 60분 이상 오디오에서 `H:MM:SS` 형식으로 표시
 - [x] 게스트 피어 카운트 보정 — reconnect 시 welcome 메시지의 `peerCount`로 동기화 (증감 방식 드리프트 방지)
 
+**HTTP 서빙/파일명 안정화 (Android↔iOS 호환)**
+- [x] `_safeFileName()` — 원본 파일명 → ASCII-safe 해시명 (iOS AVPlayer가 한글/공백/특수문자 URL을 거부하는 케이스 회피)
+- [x] `_storedSafeName` ↔ `_currentFileName` 분리 — 디스크/HTTP는 해시, UI는 원본 파일명 표시
+- [x] URL 캐시 무효화 — `?v=timestamp` 쿼리스트링 (AVPlayer 캐시로 이전 세션 데이터 재사용 방지)
+- [x] 호스트 시작 시 `_cleanupTempDir()` — 이전 세션 좀비 `audio_*` 파일 제거
+- [x] iOS `MethodChannel` 추가 (`com.synchorus/audio_latency`) — `AVAudioSession.outputLatency + ioBufferDuration` 측정. 세션 카테고리/활성화는 audio_service 플러그인에 위임
+
+**버퍼링/seek 루프 방지**
+- [x] `_internalSeek` 래퍼 + `_internalSeeking` 플래그 — 내부 seek로 인한 buffering→ready 전환을 watch가 무시 (recovery 루프 차단)
+- [x] `_waitUntilReady()` — 재로드 후 ready 상태까지 대기, 이후 seek/play가 buffering 단계에서 호출되어 흔들리는 것 방지
+- [x] `_reloadInProgress` 가드 — 동시 재로드 차단
+- [x] `_handlePlay`/`_handleStateResponse`에서 idle 시 **먼저** 재로드 → 그 후 elapsed 재계산 (reload 시간이 elapsed에 포함되도록)
+- [x] sync-position 임계값 30ms → 100ms (seek 비용 고려)
+- [x] `_handleStateResponse`에서 |target-my| < 200ms 면 seek 생략 (불필요 재버퍼링 방지)
+
+**P2P 안정화**
+- [x] `p2p_service`: 게스트 disconnect 시 `_hostSocket = null`로 명시 정리
+- [x] `p2p_service`: 줄바꿈 파싱을 `List.removeRange` O(n²) → `lineStart` 오프셋 패턴
+- [x] `p2p_service`: `_sendToPeerSafe()` — 송신 에러 시 즉시 피어 제거
+- [x] `discovery_service`: `discoverHosts()` try/finally 소켓 정리, `split` 길이 검증 + `roomCode` 재조립
+- [x] `audio_handler`: `stop()`에서 `_playerSub` 유지(이후 재로드/재생 시 PlaybackState 끊김 방지), 별도 `dispose()` 분리
+- [x] `sync_service`: ping/pong에 `rid` 필드 — periodic/manual 동시 호출 시 pong 매칭
+
+**room_screen**
+- [x] `_leaving` 플래그 — `_leaveRoom` 중복 호출 방지, dispose 경로와 정상 퇴장 경로 분리
+
+#### 2026-04-07 (저녁) iOS↔Android 엔진 레이턴시 측정 비대칭 대응
+
+**문제 발견**
+- iOS는 `AVAudioSession.outputLatency` (실제 하드웨어 출력 지연)까지 잡혀 ~30~80ms 보고
+- Android는 `AudioManager.getProperty("android.media.property.OUTPUT_LATENCY")` 가 S22에서 null → buffer duration만 잡혀 4ms 보고 (`PROPERTY_OUTPUT_FRAMES_PER_BUFFER / SAMPLE_RATE`)
+- 결과: `compensation = my(50) - host(4) = +46ms` → iPhone(게스트)이 호스트보다 ahead로 재생되는 문제
+- 비대칭의 원인은 Android public API 한계 — 진짜 출력 지연을 잡으려면 AAudio/Oboe NDK 코드 필요. 단, just_audio(ExoPlayer)가 쓰는 AudioTrack에 직접 접근 불가라 NDK로 별도 stream을 열어 측정해도 정확도 보장 안 됨
+
+**해결: 측정 방식 통일 (옵션 A)**
+- [x] `ios/Runner/SceneDelegate.swift` — `totalMs = bufferMs` (outputLatency 제거). `outputLatencyMs`는 디버그 표시용으로 응답에 함께 포함
+- [x] `audio_service.dart` — latency 필드를 `total/rawOutput/buffer` 세 개로 분리 저장, public getter (`engineLatencyMs`, `engineRawOutputMs`, `engineBufferMs`, `hostEngineLatencyMs`, `latencyCompensation`) 노출
+- [x] `player_screen.dart` — Now Playing 카드 아래에 latency 디버그 한 줄 표시 (`My: 4ms (buf=4) / iOS는 (buf=Y, rawOut=Z) / 게스트는 + Host/Comp 추가`)
+- [x] `pubspec.yaml` 0.0.3 → 0.0.4
+- [x] iOS `AppDelegate.swift` 의 (다른 세션에서 추가된) audio_latency 채널 코드가 `engineBridge.binaryMessenger` 미존재로 컴파일 에러 → 원복 (SceneDelegate에 동일 채널 이미 존재)
+
+**빌드/배포**
+- [x] `flutter install`이 자동 빌드 안 함을 발견 — `flutter build {apk,ios}` 명시 후 `flutter install` 필요
+- [x] iOS 14+에서는 **debug 빌드를 디바이스에서 직접 launch 못함** (`Cannot create a FlutterEngine instance in debug mode without Flutter tooling or Xcode`) → 두 기기 모두 release 빌드 필요
+- [x] v0.0.4 release 빌드 + 양쪽 기기 install 완료 (실측 결과 대기 중)
+
+**문서**
+- [x] `CLAUDE.md` 주의사항에 "기능적 코드 수정 후 `pubspec.yaml` patch 자리 1 올리기" 규칙 추가
+
 #### 알려진 이슈 / 다음에 확인할 것
+- [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
+  - iPhone buffer 21ms ≈ 1024 frames @ 48kHz (Apple 표준 IO buffer), S22 192 frames @ 48kHz
+  - 측정 통일 후에도 17ms 비대칭 잔존 — 이건 buffer 자체 차이라 "진짜 latency 차이"의 일부
+  - Android의 hardware 출력 지연(rawOut)은 여전히 못 잡음 → 진짜 보정값과 우리 보정값 사이 잔여 오차 가능
+  - 실측 후 ahead로 들리는 정도/방향에 따라 옵션 (B) 수동 offset 슬라이더 추가 검토
 - [ ] 엔진 레이턴시 보정값이 실제와 약간 차이 (에뮬 기준 ~10ms 오차) — 수동 보정 슬라이더 추가 예정
 - [ ] 호스트 백그라운드 진입 시 파일 서버 연결 끊김 → 게스트 seek 시 404 (자동 재로드로 대응)
 - [ ] 디버그 모드에서 호스트 플레이어 간헐적 스터터 (position이 실시간보다 느리게 진행)
 - [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (추가 테스트 필요)
+- [ ] Android↔iOS 싱크 정확도 검증 — `_safeFileName` + iOS MethodChannel 적용 후 실측 필요
+- [x] iOS 게스트가 한글/공백 파일명 URL 로드 실패 → `_safeFileName` 해시명으로 해결
 - [x] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정, 20MB 테스트 통과)
 - [x] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (원인: file_picker 캐시 삭제 → 앱 임시 디렉토리에 복사하여 해결)
 - [x] 에뮬레이터 ↔ 실기기 간 네트워크 (UDP 브로드캐스트 불가 → IP 직접 입력으로 연결 가능)
@@ -348,9 +404,11 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
 
 호스트는 시간의 기준. 계산 없이 실행하고 알려주기만 함.
 
-**Play**: seek(현재position) → play() → 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }`
+**Play**: 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }` → seek(현재position) → play()
 **Pause**: pause() → 메시지 전송 `{ positionMs }`
 **Seek**: 메시지 전송 `{ hostTime, positionMs, engineLatencyMs }` → seek(position)
+
+> Play/Seek 모두 **broadcast 먼저, seek/play는 그 다음**. 게스트가 메시지를 받자마자 거의 동시에 seek를 시작하므로, 호스트와 게스트가 seek 비용을 대칭으로 치름. 게스트의 elapsed 계산에 자기 seek 시간이 포함되어 자연 상쇄. 이 순서를 뒤집으면 싱크가 깨진다 (commit c6123b6).
 **5초마다**: sync-position 브로드캐스트 `{ hostTime, positionMs, engineLatencyMs }`
 **sync-ping 수신**: sync-pong 응답
 **state-request 수신**: 현재 상태 응답 `{ hostTime, positionMs, playing, engineLatencyMs }`
@@ -475,14 +533,16 @@ play() 호출 후 실제 스피커에서 소리가 나기까지의 시간. OS AP
   expectedPosition = positionMs + elapsed + latencyCompensation
   diff = expectedPosition - 내 position
 
-  diff < 30ms   → 무시
-  diff >= 30ms  → seek(expectedPosition)
+  diff < 100ms  → 무시
+  diff >= 100ms → seek(expectedPosition)
 ```
 
 **안전장치**:
-- `_syncSeeking`: seek 진행 중 다음 sync-position 무시
+- `_syncSeeking`: sync-position 보정 seek 진행 중 다음 sync-position 무시
+- `_internalSeeking`: 내부 seek로 인한 buffering 전환을 buffering watch가 무시 (recovery 루프 방지)
 - `_awaitingStateResponse`: 버퍼링 복구 시 state-request 중복 방지 (응답 오면 해제)
 - `_commandSeq`: 빠른 재생/정지 반복 시 stale async 무효화
+- `_reloadInProgress`: 동시 재로드 차단
 
 ##### 케이스 7: 재생 중 버퍼링 발생 후 복구 [C-2]
 
@@ -576,7 +636,11 @@ seek 중 에러 발생
 | 버퍼링 복구 시 state-request | 캐시 데이터는 호스트 seek/pause 시 stale → 항상 최신 상태 요청 |
 | 쿨다운 → _awaitingStateResponse | 2초 쿨다운은 정상 복구도 차단 → 응답 대기 플래그로 자연 스로틀링 |
 | syncSeek도 broadcast 먼저 | syncPlay와 동일하게 시간 찍고 메시지 먼저 → seek (seek 비용 대칭화) |
-| 임계값 30ms | 20ms에서 상향 — 너무 민감하면 불필요한 seek 빈발 |
+| 임계값 100ms | 20→30→100ms로 단계적 상향 — seek 자체가 추가 버퍼링을 유발해서 너무 민감하면 오히려 싱크 흔들림 |
+| `_internalSeek` 래퍼 | 내부 seek로 인한 buffering→ready 전환을 buffering watch가 자연 발생으로 오인하여 state-request 루프 도는 것 방지 |
+| `_storedSafeName` ↔ `_currentFileName` 분리 | 디스크/HTTP 서빙은 ASCII-safe 해시명(iOS AVPlayer 호환), UI 표시는 원본 파일명 유지 |
+| URL `?v=timestamp` | AVPlayer가 같은 URL을 캐시해서 이전 세션 데이터를 재사용하는 문제 방지 |
+| `_handlePlay`/`_handleStateResponse`에서 reload 먼저 | 로그 출력 후 reload하면 reload 소요시간이 elapsed 계산에 누락됨. reload 후 elapsed 재계산 |
 | sync-position 5초 간격 | 드리프트/지터를 주기적으로 잡되, 너무 잦으면 seek 과다 |
 | bestRtt는 로그 전용 | offset 선택 기준으로만 사용, 이후 계산에 미사용 |
 | 블루투스 레이턴시 | engineLatency에 미포함, 수동 슬라이더로 대응 예정 |

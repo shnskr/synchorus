@@ -26,6 +26,8 @@ class AudioSyncService {
   AudioPlayerHandler? _audioHandler;
 
   String? _currentFileName;
+  // 디스크/HTTP 서빙용 ASCII-safe 파일명 (UI 표시용 _currentFileName과 분리)
+  String? _storedSafeName;
   String? _currentUrl;
   bool _audioReady = false;
 
@@ -36,9 +38,19 @@ class AudioSyncService {
   int _commandSeq = 0;
 
   // 엔진 출력 레이턴시 보정
+  // totalMs: 보정 계산에 쓰는 값 (양쪽 buffer만 잡힘 → Android와 측정 방식 통일)
+  // rawOutputMs: iOS만 의미 있음 (AVAudioSession.outputLatency 원본값, 디버그 표시용)
   int _engineLatencyMs = 0;
+  int _engineRawOutputMs = 0;
+  int _engineBufferMs = 0;
   int _hostEngineLatencyMs = 0;
   int get _latencyCompensation => _engineLatencyMs - _hostEngineLatencyMs;
+
+  int get engineLatencyMs => _engineLatencyMs;
+  int get engineRawOutputMs => _engineRawOutputMs;
+  int get engineBufferMs => _engineBufferMs;
+  int get hostEngineLatencyMs => _hostEngineLatencyMs;
+  int get latencyCompensation => _latencyCompensation;
 
   final _loadingController = StreamController<bool>.broadcast();
   Stream<bool> get loadingStream => _loadingController.stream;
@@ -71,6 +83,7 @@ class AudioSyncService {
     await _measureEngineLatency();
 
     if (isHost) {
+      await _cleanupTempDir();
       _startPositionBroadcast();
     } else {
       _startBufferingWatch();
@@ -83,11 +96,16 @@ class AudioSyncService {
       final result = await channel.invokeMethod<Map>('getOutputLatency');
       if (result != null) {
         _engineLatencyMs = (result['totalMs'] as int?) ?? 0;
-        debugPrint('Engine latency: ${_engineLatencyMs}ms');
+        _engineRawOutputMs = (result['outputLatencyMs'] as int?) ?? 0;
+        _engineBufferMs = (result['bufferMs'] as int?) ?? 0;
+        debugPrint('Engine latency: total=${_engineLatencyMs}ms '
+            '(rawOutput=${_engineRawOutputMs}ms, buffer=${_engineBufferMs}ms)');
       }
     } catch (e) {
       debugPrint('Engine latency measurement failed: $e');
       _engineLatencyMs = 0;
+      _engineRawOutputMs = 0;
+      _engineBufferMs = 0;
     }
   }
 
@@ -204,33 +222,54 @@ class AudioSyncService {
     });
   }
 
+  /// 원본 파일명을 ASCII-safe 해시명으로 변환 (한글/공백/특수문자 → AVPlayer 호환성)
+  String _safeFileName(String original) {
+    final dotIndex = original.lastIndexOf('.');
+    final ext = (dotIndex >= 0 && dotIndex < original.length - 1)
+        ? original.substring(dotIndex)
+        : '';
+    // 원본 파일명 기반 결정적 해시 (같은 파일이면 같은 이름)
+    final bytes = original.codeUnits;
+    int hash = 0;
+    for (final b in bytes) {
+      hash = (hash * 31 + b) & 0x7fffffff;
+    }
+    final extLower = ext.toLowerCase();
+    return 'audio_${hash.toRadixString(16)}$extLower';
+  }
+
   Future<void> loadFile(File file) async {
-    final fileName = file.uri.pathSegments.last;
+    final originalName = file.uri.pathSegments.last;
+    final safeName = _safeFileName(originalName);
     _audioReady = false;
     _isLoading = true;
     _loadingController.add(true);
 
     final tempDir = await getTemporaryDirectory();
 
-    // 이전 파일 삭제
-    if (_currentFileName != null && _currentFileName != fileName) {
-      final old = File('${tempDir.path}/$_currentFileName');
+    // 이전 파일 삭제 (디스크에는 safeName으로 저장됨)
+    if (_storedSafeName != null && _storedSafeName != safeName) {
+      final old = File('${tempDir.path}/$_storedSafeName');
       if (await old.exists()) await old.delete();
     }
 
-    final stableFile = File('${tempDir.path}/$fileName');
+    final stableFile = File('${tempDir.path}/$safeName');
     await file.copy(stableFile.path);
 
     // HTTP 서버 시작
-    final httpUrl = await _startFileServer(tempDir.path, fileName);
+    final httpUrl = await _startFileServer(tempDir.path, safeName);
     if (httpUrl == null) {
       _isLoading = false;
       _loadingController.add(false);
       return;
     }
 
-    _currentFileName = fileName;
-    _currentUrl = httpUrl;
+    _storedSafeName = safeName;
+    _currentFileName = originalName; // UI 표시용은 원본 파일명 유지
+    // 캐시 무효화용 timestamp 쿼리 (#8): AVPlayer가 같은 URL을 캐시해서 이전 데이터 재사용하는 문제 방지
+    final urlWithCacheBust =
+        '$httpUrl?v=${DateTime.now().millisecondsSinceEpoch}';
+    _currentUrl = urlWithCacheBust;
     await _player.setFilePath(stableFile.path);
     _audioReady = true;
     _updateMediaItem();
@@ -238,11 +277,29 @@ class AudioSyncService {
     // 게스트에게 URL 전달
     _p2p.broadcastToAll({
       'type': 'audio-url',
-      'data': {'url': httpUrl, 'playing': _player.playing},
+      'data': {'url': urlWithCacheBust, 'playing': _player.playing},
     });
 
     _isLoading = false;
     _loadingController.add(false);
+  }
+
+  /// 시작 시 호스트 temp 디렉토리 청소 (#16-b): 이전 세션 좀비 파일 제거
+  Future<void> _cleanupTempDir() async {
+    try {
+      final tempDir = await getTemporaryDirectory();
+      final files = tempDir.listSync();
+      for (final f in files) {
+        if (f is File) {
+          final name = f.uri.pathSegments.last;
+          if (name.startsWith('audio_')) {
+            try {
+              await f.delete();
+            } catch (_) {}
+          }
+        }
+      }
+    } catch (_) {}
   }
 
   // ─── 호스트: 재생 제어 ───
@@ -364,13 +421,21 @@ class AudioSyncService {
       debugPrint('Audio URL rewritten: $url');
     }
 
+    // 새 audio-url 진입 시 stale 상태 리셋 (#4)
+    _awaitingStateResponse = false;
+
+    // 새 URL 처리는 이전 명령보다 우선 → seq 증가로 in-flight 작업 무효화
+    final seq = ++_commandSeq;
+
     await _player.stop();
     _audioReady = false;
 
     _currentUrl = url;
     try {
       final pathPart = url.split('/').last;
-      final decoded = Uri.decodeComponent(pathPart);
+      // 쿼리스트링 제거 (캐시 무효화용 ?v=... 떼기)
+      final cleanPath = pathPart.split('?').first;
+      final decoded = Uri.decodeComponent(cleanPath);
       _currentFileName = decoded.isNotEmpty ? decoded : null;
     } catch (_) {
       _currentFileName = url.split('/').last;
@@ -379,18 +444,20 @@ class AudioSyncService {
     _isLoading = true;
     _loadingController.add(true);
 
+    bool loaded = false;
     try {
       await _player.setUrl(url);
-      _audioReady = true;
-      _updateMediaItem();
+      if (seq != _commandSeq) return; // stale
+      loaded = true;
     } catch (e) {
       debugPrint('Audio URL load error: $e');
-      // 로드 실패 시 2초 후 한 번 재시도
+      // 로드 실패 시 2초 후 한 번 재시도 (PLAN 125, stale check 포함)
       await Future.delayed(const Duration(seconds: 2));
+      if (seq != _commandSeq) return; // 그 사이 새 URL 왔으면 포기
       try {
         await _player.setUrl(url);
-        _audioReady = true;
-        _updateMediaItem();
+        if (seq != _commandSeq) return;
+        loaded = true;
         debugPrint('Audio URL retry succeeded');
       } catch (e2) {
         debugPrint('Audio URL retry failed: $e2');
@@ -398,11 +465,16 @@ class AudioSyncService {
       }
     }
 
+    if (loaded) {
+      _audioReady = true;
+      _updateMediaItem();
+    }
+
     _isLoading = false;
     _loadingController.add(false);
 
     // 오디오 로드 완료 + 호스트가 재생 중이면 최신 상태 요청
-    if (_audioReady && _hostPlaying) {
+    if (_audioReady && _hostPlaying && seq == _commandSeq) {
       _requestHostState();
     }
   }
@@ -422,6 +494,14 @@ class AudioSyncService {
     final positionMs = data['positionMs'] as int;
     _hostEngineLatencyMs = (data['engineLatencyMs'] as int?) ?? 0;
 
+    // 에러 상태면 오디오 재로드 (먼저 처리 → reload 시간이 elapsed에 포함되도록)
+    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
+      debugPrint('Player in error/idle state, reloading audio...');
+      await _reloadAudio();
+      if (seq != _commandSeq || !_audioReady) return;
+    }
+
+    // hostTime 기준 elapsed는 reload 후 시점에 다시 계산해야 정확
     final elapsed = _sync.nowAsHostTime - hostTime;
     final targetPosition = positionMs + elapsed + _latencyCompensation;
     final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
@@ -430,14 +510,7 @@ class AudioSyncService {
         'elapsed=$elapsed, target=$targetPosition, '
         'engineComp=$_latencyCompensation (my=$_engineLatencyMs, host=$_hostEngineLatencyMs)');
 
-    // 에러 상태면 오디오 재로드
-    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
-      debugPrint('Player in error/idle state, reloading audio...');
-      await _reloadAudio();
-      if (seq != _commandSeq || !_audioReady) return;
-    }
-
-    await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
+    await _internalSeek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
     if (seq != _commandSeq) return;
 
     if (!_player.playing) {
@@ -445,16 +518,16 @@ class AudioSyncService {
     }
   }
 
-  void _handlePause(Map<String, dynamic> data) {
+  Future<void> _handlePause(Map<String, dynamic> data) async {
     _hostPlaying = false;
     ++_commandSeq;
 
     if (!_audioReady) return;
 
-    _player.pause();
+    await _player.pause();
     final positionMs = data['positionMs'] as int?;
     if (positionMs != null) {
-      _player.seek(Duration(milliseconds: positionMs));
+      await _internalSeek(Duration(milliseconds: positionMs));
     }
   }
 
@@ -470,13 +543,13 @@ class AudioSyncService {
       final elapsed = _sync.nowAsHostTime - (hostTime as int);
       final targetPosition = positionMs + elapsed + _latencyCompensation;
       final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
-      await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
+      await _internalSeek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
       if (seq != _commandSeq) return;
       if (!_player.playing) {
         await _player.play();
       }
     } else {
-      await _player.seek(Duration(milliseconds: positionMs));
+      await _internalSeek(Duration(milliseconds: positionMs));
     }
   }
 
@@ -501,36 +574,58 @@ class AudioSyncService {
 
     debugPrint('SYNC_POS: expected=$expectedPosition, my=$myPosition, diff=$diff');
 
-    if (diff.abs() < 30) return; // 30ms 미만: 무시
+    // 100ms 미만은 무시 (seek로 인한 추가 버퍼링 비용을 피하기 위해 임계값 상향)
+    if (diff.abs() < 100) return;
 
-    // 30ms 이상: seek로 보정
     _syncSeeking = true;
-    final nowElapsed = _sync.nowAsHostTime - hostTime;
-    final adjustedPosition = hostPositionMs + nowElapsed + _latencyCompensation;
-    final maxPosition = _player.duration?.inMilliseconds ?? adjustedPosition;
+    final maxPosition = _player.duration?.inMilliseconds ?? expectedPosition;
     try {
-      await _player.seek(Duration(milliseconds: adjustedPosition.clamp(0, maxPosition)));
+      await _internalSeek(Duration(milliseconds: expectedPosition.clamp(0, maxPosition)));
     } catch (e) {
       debugPrint('Sync seek error: $e, reloading audio...');
       await _reloadAudio();
     }
     _syncSeeking = false;
 
-    debugPrint('Sync: ${diff}ms → seek to ${adjustedPosition}ms');
+    debugPrint('Sync: ${diff}ms → seek to ${expectedPosition}ms');
   }
 
   // ─── 게스트: 오디오 에러 시 재로드 ───
 
+  bool _reloadInProgress = false;
+
   Future<void> _reloadAudio() async {
     if (_currentUrl == null) return;
+    if (_reloadInProgress) return;
+    _reloadInProgress = true;
     debugPrint('Reloading audio from $_currentUrl');
     try {
       await _player.setUrl(_currentUrl!);
       _audioReady = true;
+      // ready 상태까지 대기 (#14): 직후 seek/play가 buffering 단계에서 호출되어 흔들리는 것 방지
+      await _waitUntilReady();
     } catch (e) {
       debugPrint('Audio reload failed: $e');
       // 호스트에게 다시 요청
       requestCurrentAudio();
+    } finally {
+      _reloadInProgress = false;
+    }
+  }
+
+  /// 플레이어가 ready/completed 상태가 될 때까지 최대 [timeout]ms 대기
+  Future<void> _waitUntilReady({int timeoutMs = 3000}) async {
+    if (_player.processingState == ProcessingState.ready ||
+        _player.processingState == ProcessingState.completed) {
+      return;
+    }
+    try {
+      await _player.processingStateStream
+          .firstWhere((s) =>
+              s == ProcessingState.ready || s == ProcessingState.completed)
+          .timeout(Duration(milliseconds: timeoutMs));
+    } catch (_) {
+      // 타임아웃이면 그냥 진행 (호출 측에서 후속 처리)
     }
   }
 
@@ -540,9 +635,17 @@ class AudioSyncService {
 
   bool _awaitingStateResponse = false;
 
+  /// 내부 seek 진행 중 표시. true인 동안은 buffering 전환을 자연 발생으로 보지 않고 무시.
+  bool _internalSeeking = false;
+
   void _startBufferingWatch() {
     _bufferingSub?.cancel();
     _bufferingSub = _player.processingStateStream.listen((state) {
+      // 내부 seek로 인한 buffering 전환은 무시 (recovery 루프 방지)
+      if (_internalSeeking) {
+        _lastProcessingState = state;
+        return;
+      }
       if (_lastProcessingState == ProcessingState.buffering &&
           state == ProcessingState.ready &&
           _player.playing) {
@@ -552,12 +655,24 @@ class AudioSyncService {
           return;
         }
         _awaitingStateResponse = true;
-
         debugPrint('Buffering recovery: requesting host state');
         _requestHostState();
       }
       _lastProcessingState = state;
     });
+  }
+
+  /// 내부 seek 래퍼: buffering watch가 무시하도록 플래그 설정
+  Future<void> _internalSeek(Duration position) async {
+    _internalSeeking = true;
+    try {
+      await _player.seek(position);
+    } finally {
+      // 약간 여유 두고 해제 (seek 직후 발생하는 buffering→ready 전환까지 무시)
+      Future.delayed(const Duration(milliseconds: 500), () {
+        _internalSeeking = false;
+      });
+    }
   }
 
   // ─── 게스트: state-response 처리 ───
@@ -574,6 +689,12 @@ class AudioSyncService {
     final positionMs = data['positionMs'] as int;
     _hostEngineLatencyMs = (data['engineLatencyMs'] as int?) ?? 0;
 
+    // 에러 상태면 먼저 재로드 (그 사이 시간은 elapsed에 포함되어야 함)
+    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
+      await _reloadAudio();
+      if (seq != _commandSeq || !_audioReady) return;
+    }
+
     final elapsed = _sync.nowAsHostTime - hostTime;
     final targetPosition = positionMs + elapsed + _latencyCompensation;
     final maxPosition = _player.duration?.inMilliseconds ?? targetPosition;
@@ -581,14 +702,12 @@ class AudioSyncService {
     debugPrint('STATE_RESPONSE: hostTime=$hostTime, positionMs=$positionMs, '
         'elapsed=$elapsed, target=$targetPosition');
 
-    // 에러 상태면 오디오 재로드
-    if (_player.processingState == ProcessingState.idle && _currentUrl != null) {
-      await _reloadAudio();
-      if (seq != _commandSeq || !_audioReady) return;
+    // 현재 위치와 목표 위치 차이가 작으면 seek 생략 (불필요한 재버퍼링 방지)
+    final myPosition = _player.position.inMilliseconds;
+    if ((targetPosition - myPosition).abs() >= 200) {
+      await _internalSeek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
+      if (seq != _commandSeq) return;
     }
-
-    await _player.seek(Duration(milliseconds: targetPosition.clamp(0, maxPosition)));
-    if (seq != _commandSeq) return;
 
     if (!_player.playing) {
       await _player.play();
@@ -626,11 +745,12 @@ class AudioSyncService {
     _bufferingSub?.cancel();
     await _stopFileServer();
 
-    if (_currentFileName != null) {
+    if (_storedSafeName != null) {
       final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/$_currentFileName');
+      final file = File('${tempDir.path}/$_storedSafeName');
       if (await file.exists()) await file.delete();
     }
+    _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
   }
@@ -645,6 +765,7 @@ class AudioSyncService {
     _bufferingSub?.cancel();
     _messageSub?.cancel();
     _messageSub = null;
+    _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
   }
