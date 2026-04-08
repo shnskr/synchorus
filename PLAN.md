@@ -645,6 +645,378 @@ seek 중 에러 발생
 | bestRtt는 로그 전용 | offset 선택 기준으로만 사용, 이후 계산에 미사용 |
 | 블루투스 레이턴시 | engineLatency에 미포함, 수동 슬라이더로 대응 예정 |
 
+## 핵심 기술 설계 (v3) — 폐루프 리아키텍처 (설계 단계, 코드 미반영)
+
+> **상태**: 설계 완료, PoC 시작 직전. 현재 코드(v2)는 그대로 유지되며, v3는 PoC 통과 후 단계적 통합. 이 섹션은 PoC와 본 구현의 단일 참조 지점이다 — 같은 토론을 반복하지 않기 위함.
+
+### 배경: 왜 v3로 가는가
+
+v2는 **개방 루프 (open-loop) 보정**:
+1. 호스트가 "지금 X 위치에서 재생"을 알림
+2. 게스트가 elapsed + engineLatency를 **계산**해서 보정 위치 산출
+3. 그 위치로 seek + play
+
+문제:
+- **engineLatency 측정 한계**: Android `AudioManager.getProperty(OUTPUT_LATENCY)`가 S22에서 null, buffer duration만 잡혀 4ms 보고. iOS `AVAudioSession.outputLatency`는 실측과 차이 큼 (특히 Bluetooth)
+- **계산 vs 실제 불일치**: 디코더 지연, GC, 스레드 스케줄링 등 측정 불가능한 변수 다수
+- **결과**: v0.0.4 측정 시 17ms 잔여 비대칭. 일부 디바이스에서 더 큼. 드리프트 누적 위험.
+
+v3는 **폐루프 (closed-loop) 보정**:
+1. 게스트가 **자기 엔진의 실제 출력 시점**을 측정 (`getTimestamp` / `lastRenderTime`)
+2. 호스트의 동일한 측정값과 비교 → 실측 drift 계산
+3. drift를 보정 (seek 또는 rate 조정)
+
+핵심 차이: **계산이 아니라 측정**. 측정 불가능한 변수도 측정값에 자동으로 녹아 있음.
+
+### 1. 전략 선택: D (엔진만 네이티브)
+
+| 전략 | 범위 | 평가 |
+|---|---|---|
+| A. 전체 네이티브 | 화면/P2P까지 전부 네이티브 | 가장 정밀, 가장 큰 비용. 기존 자산 폐기 |
+| B. iOS만 네이티브 | iOS 우선 | 앱스토어 운영 비용 부담 |
+| **D. 엔진만 네이티브** | 오디오 엔진만, 나머지 Flutter 유지 | 정밀도 거의 동일, 비용 최소 |
+
+→ **D 채택**. Android 우선 (앱스토어 운영 비용 회피), iOS는 동일 패턴 반복.
+
+### 2. 네이티브 엔진 선택
+
+#### 2-1. Android: Oboe
+- AAudio (API 27+) 자동 활용, OpenSL ES fallback
+- `AAudioStream_getTimestamp(framePosition, nanoseconds)` 로 출력된 프레임의 정확한 시각 측정
+- Google 공식, 활발히 유지, MediaCodec 디코딩과 결합 가능
+
+**S22 Wi-Fi + Oboe glitching 리스크 검증**:
+- 과거 Samsung WiFi 드라이버 인터럽트 disable → DSP underflow 이슈 (S10, Oboe issue #1178), Android 11에서 수정
+- S22는 Exynos 2200, Android 12+ → 동일 이슈 가능성 낮음. Oboe Samsung Quirks wiki에 S22 항목 없음
+- Fallback: MMAP off → PerformanceMode 낮춤 → buffer size 증가 → Oboe quirk 등록
+
+#### 2-2. iOS: AVAudioEngine
+- `engine.lastRenderTime` 으로 sample-accurate 출력 시각 측정
+- `play(at: AVAudioTime)` 로 정밀 예약 재생
+- `AVAudioFile`로 mp3/aac/m4a/alac 단일 API 디코딩
+
+**iOS 주의점**:
+- Bluetooth(AirPods 등) latency 부정확: `outputLatency` 보고값과 실측이 다름 (193~260ms 변동, 1분 내 변화 가능) → 수동 보정 슬라이더 필요
+- `AVAudioEngineConfigurationChange` notification 처리 필수 (인터럽션 후 노드 재연결)
+
+#### 2-3. FLAC: 미지원 (생략)
+- `AVAudioFile`가 FLAC 지원 안 함
+- 일반 사용자 거의 사용 안 함 (mp3/aac/m4a/wav로 충분)
+- 추후 필요 시 별도 디코더 통합 검토
+
+### 3. audio_service 플러그인과의 공존
+
+`audio_service` (백그라운드 재생 / 잠금화면 컨트롤) + 커스텀 네이티브 엔진을 같이 쓸 수 있는가?
+
+- audio_service 공식 README: `final _player = AudioPlayer(); // e.g. just_audio` — 주석에서 다른 player도 명시적으로 허용
+- BaseAudioHandler는 player 추상화에 무관, 네이티브 엔진을 wrap한 커스텀 핸들러 가능
+- iOS `AVAudioSession`은 audio_service 플러그인이 카테고리/활성화 관리, 네이티브 엔진은 같은 세션 위에서 동작
+- Android는 layer 분리: `audio_session`(AudioFocus) / `audio_service`(ForegroundService) / `Oboe`(PCM stream)
+
+→ **공존 가능, 통합 가능**
+
+### 4. 측정 인프라 설계
+
+폐루프가 동작하기 위한 5개 항목.
+
+#### 4-1. 관측 데이터: `(framePos, deviceTimeNs)` 페어
+
+- **framePos**: 방금 물리 스피커에서 울린 샘플의 인덱스
+  - Android: `AAudioStream_getTimestamp(CLOCK_MONOTONIC, &framePos, &nanos)`
+  - iOS: `engine.lastRenderTime.sampleTime`
+- **deviceTimeNs**: 그 프레임이 출력된 시각 (로컬 CLOCK_MONOTONIC, ns)
+  - Android: `getTimestamp`의 두 번째 파라미터
+  - iOS: `lastRenderTime.hostTime` → `mach_timebase_info`로 ns 환산
+
+**왜 이 페어가 최소 단위인가**: 시간 축과 샘플 축이 둘 다 있어야 디바이스 간 "같은 프레임이 언제 울렸나"를 비교할 수 있음. 엔진 레이턴시·DAC 지연 등이 페어에 자동 내포됨 (계산 불필요).
+
+**트랙 포지션 변환**:
+```
+trackPosMs = anchor.trackMs + (framePos - anchor.framePos) * 1000 / sampleRate
+```
+앵커는 마지막 seek/play 시점에 갱신.
+
+**PoC에서 검증할 잔가지**: framePos 리셋 규칙(stream stop 시 등), 첫 프레임 시각의 정의, 초기 getTimestamp 실패 처리.
+
+#### 4-2. 관측 주기
+
+- **로컬 관측**: 50-100ms (로컬 API는 저렴)
+- **P2P 교환 (정상)**: 500ms-1s
+- **P2P 교환 (재생 시작 직후)**: 100-200ms (초기 수렴)
+
+근거: 일반 수정 발진기 드리프트 ±20-50 ppm = 1분당 1.2~3ms 누적. 청각 임계 ~20ms (Haas effect 기반) 도달 전 충분히 보정 가능.
+
+#### 4-3. 교환 프로토콜: A + Drift Report 하이브리드
+
+**방향 결정**:
+| 옵션 | 장점 | 단점 |
+|---|---|---|
+| A. Host Push | 단순 (Snapcast/AirPlay 2 PTP 패턴), 지연 최소 | 호스트가 게스트 상태 모름 |
+| B. 양방향 | 로깅/모니터링 풍부 | 트래픽 2배, 대부분 낭비 |
+| C. Guest Pull | 네트워크 효율 | RTT가 정확도 깎음 (position 같은 동적 값엔 부적합) |
+
+→ **A 기본 + Guest Drift Report 이벤트** 채택. PoC 분석 단계에 가시성 확보 + 운영 시 부하 최소.
+
+**참고 레퍼런스**:
+- Snapcast: Server Push (audio + timestamps) + Client 독립 clock sync, <1ms 편차
+- AirPlay 2: PTP (IEEE 1588), 마스터 push, 디바이스 간 sub-25ms
+- NTP vs PTP: NTP=Client Pull (정적 offset 추정 OK), PTP=Master Push (동적 sync 적합)
+
+**핵심 통찰**: clock sync (정적)에는 Pull, position observation (동적)에는 Push가 자연스럽다. 이게 우연히 Snapcast 패턴과 일치.
+
+**메시지 타입**:
+- `audio-obs` (호스트→게스트, 평상시 500ms 주기 broadcast) — 신규
+- `audio-drift-report` (게스트→호스트, 드리프트 임계 초과 시에만) — 신규
+- `sync-ping`/`sync-pong` 유지 (clock offset용)
+- `sync-position` 폐기 (audio-obs로 대체 — sync-position은 시각 축이 없어 정확 drift 계산 불가)
+
+**페이로드 (audio-obs)**:
+```json
+{
+  "type": "audio-obs",
+  "seq": 1234,
+  "hostTimeMs": 1712567890123,
+  "anchor": { "framePos": 0, "trackMs": 30000 },
+  "framePos": 88200,
+  "playing": true
+}
+```
+
+**페이로드 (audio-drift-report)**:
+```json
+{
+  "type": "audio-drift-report",
+  "seq": 42,
+  "hostTimeMs": 1712567890123,
+  "observedTrackMs": 30050,
+  "expectedTrackMs": 30105,
+  "driftMs": -55
+}
+```
+
+**계층 정리**:
+```
+[Layer 1] sync-ping/pong   → wall clock offset (기존, 유지)
+                ↓ 제공
+[Layer 2] audio-obs        → 엔진 상태 + 시각 (신규)
+                ↓ 소비
+[Layer 3] drift 계산 + 보정
+```
+
+**앵커 갱신 규칙**: 평상시 같은 앵커, seek/play 직후 즉시 새 앵커 broadcast (늦게 도착하는 옛 측정값과 혼동 방지).
+
+#### 4-4. 드리프트 계산: 호스트 obs 선형 보간
+
+호스트 최근 obs 두 개 `(T1, P1)`, `(T2, P2)`, 게스트 관측 순간 `T_g` (`T1 ≤ T_g ≤ T2`):
+
+```
+expectedP_at_Tg = P1 + (P2 - P1) * (T_g - T1) / (T2 - T1)
+drift = observedP_g - expectedP_at_Tg
+```
+
+재생 속도 일정 시 P는 T에 대해 선형 → 보간이 수학적으로 정확.
+
+**왜 "앵커 + 이론 계산"이 아니라 "실측 보간"인가**:
+- 앵커 기반 `expectedP(T) = P_anchor + (T - T_anchor)`는 클락 드리프트를 못 잡음 = **개방 루프 그 자체**
+- 호스트 obs는 실측값이라 그 자체에 호스트 측 모든 지연이 녹아 있음
+- 게스트가 실측값을 기준선으로 자기 실측과 직접 비교 → 진짜 폐루프
+
+#### 4-5. 보정 실행: 계층적
+
+| drift 크기 | 방법 | 비고 |
+|---|---|---|
+| **< 15ms** | 무시 (dead zone) | 측정 노이즈 zone |
+| **15 ~ 50ms** | rate 조정 (1.025~1.05×) | 매끄럽게 수렴 (본 구현 단계) |
+| **> 50ms** | seek | rate로 따라잡기 너무 느림, 갑작스런 점프 대비 |
+
+**노이즈 원천 분해** (왜 임계값이 ms 단위인가):
+
+| 원천 | 크기 | 네이티브가 해결? |
+|---|---|---|
+| 엔진 타임스탬프 정밀도 | <1ms | ✅ |
+| Wi-Fi clock 동기화 오차 | 5-10ms | ❌ (네트워크 본질) |
+| 네트워크 전송 지연 | 우회 가능 (obs에 발생 시각 박아 보냄) | - |
+| 재생 하드웨어 지연 | ~0 (`getTimestamp`가 빼고 돌려줌) | - |
+
+→ **병목은 Wi-Fi clock 동기화**. 네이티브 가도 이건 안 줄어. 실제 floor는 3-10ms 범위. dead zone 15ms는 보수적 출발값.
+
+**임계값은 PoC 실측 후 확정**: 정적 상태에서 noise floor 측정 → dead zone = floor × 2 (oscillation 방지). 15ms가 빡빡/헐거우면 조정.
+
+**보정 후 쿨다운**: 한 번 보정 후 최소 500ms-1s 대기 (oscillation 방지).
+
+**PoC 단계 (rate 조정 생략)**:
+```
+< 15ms   → 무시
+≥ 15ms   → seek
+```
+
+본 구현 단계에서 rate 조정 추가 시 위 3계층 활성화.
+
+**clock sync 개선 기법** (필요 시 PoC 측정 후 적용):
+1. Kalman filter — RTT 시계열 필터링, 튀는 값 자동 배제
+2. ping 주기 ↑ — 30s → 5-10s
+3. 샘플 수 ↑ — 10 → 20-30
+4. 이상치 제거 — RTT 분포 기반 outlier 버림
+
+### 5. Flutter ↔ 네이티브 인터페이스 (스켈레톤)
+
+채널 분리:
+
+| 채널 | 용도 |
+|---|---|
+| MethodChannel | 명령 (play/seek/pause 등 일회성 RPC) |
+| EventChannel | 관측값 스트림 (지속 push) |
+
+**왜 분리**: MethodChannel만 쓰면 Flutter가 50-100ms마다 polling 해야 함 → 폴링 자체가 노이즈 원천. 관측은 native 자발적 push가 정답.
+
+**명령 API (예시)**:
+```dart
+abstract class NativeAudioEngine {
+  Future<void> prepareSource({required String url});
+  Future<void> play({int? atHostTimeMs});
+  Future<void> pause();
+  Future<void> seek({required int positionMs});
+  Future<void> setRate(double rate);  // 1.0 = normal, 1.05 = 5% faster
+  Future<void> dispose();
+}
+```
+
+**이벤트 API (예시)**:
+```dart
+abstract class NativeAudioEvents {
+  Stream<AudioObservation> get observations;
+  Stream<PlaybackState> get stateChanges;
+  Stream<AudioError> get errors;
+}
+```
+
+**데이터 모델 (예시)**:
+```dart
+class AudioObservation {
+  final int framePos;
+  final int deviceTimeNs;
+  final int anchorFramePos;
+  final int anchorTrackMs;
+  final int sampleRate;
+  final bool playing;
+}
+
+enum PlaybackState { idle, preparing, ready, playing, paused, ended }
+
+class AudioError {
+  final String code;
+  final String message;
+  final bool fatal;  // recoverable vs 엔진 재초기화 필요
+}
+```
+
+**설계 포인트**:
+- **앵커는 native가 관리**, Flutter는 받기만 (play/seek 호출 시 native 갱신)
+- **observation은 native 자발적 push** (Flutter polling 안 함)
+- **`setRate`는 인터페이스에 미리 둠** (PoC에선 호출 안 하지만 본 구현 단계에 native만 구현 추가하면 됨)
+- **에러는 fatal/recoverable 구분**
+
+위 코드는 형태 예시. 최종 시그니처는 PoC 구현 중 조정 가능 — 빠진 메서드/필드는 그때 추가.
+
+### 6. PoC 플랜
+
+#### 6-1. PoC가 답해야 할 3가지
+
+1. **네이티브 엔진 정밀도**가 정말 sub-ms인가
+2. **Wi-Fi clock sync 노이즈**가 어느 수준인가 (5-10ms 가정 검증)
+3. **폐루프가 진짜 수렴**하는가 (drift → 보정 → 안정 사이클)
+
+이 3개에 답하면 본 구현 GO. 못 답하면 설계 재검토.
+
+#### 6-2. 범위 (격리 원칙)
+
+**PoC = 변수 하나만 실험**. 다른 모든 변수는 의도적으로 제외:
+
+| 포함 | 제외 (본 구현 단계로 미룸) |
+|---|---|
+| Android Oboe 네이티브 엔진 | UI 폴리싱 |
+| getTimestamp 폴링 + 로그 파일 | audio_service 플러그인 통합 |
+| 최소 P2P (audio-obs, drift-report) | iOS (별도 task) |
+| Drift 계산 + seek 보정 | rate 조정 |
+| 광범위한 로깅 | 백그라운드 모드 |
+| 호스트 1 + 게스트 1 | 멀티 게스트 |
+| 로컬 파일 직접 재생 | HTTP 파일 전송 |
+
+**왜 격리하는가**: 전부 다 넣으면 drift 원인 추적 불가능 ("sync 알고리즘 탓? 플러그인 충돌? HTTP 지연? 백그라운드?"). 좁게 잡아야 인과 분석 가능.
+
+#### 6-3. 단계별 진행
+
+| 단계 | 내용 | 출력/통과 기준 |
+|---|---|---|
+| 0 | Oboe 래퍼 + 단순 재생 | "소리 나옴" 확인 |
+| 1 | getTimestamp 폴링 + 파일 로그 | (framePos, ns) 시계열 확보 |
+| 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 |
+| 3 | drift 계산 (선형 보간) | drift 시계열 로그 |
+| 4 | seek 보정 + drift-report | 보정 전/후 비교 |
+| 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor |
+| 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 |
+
+각 단계 끝에 로그 분석으로 통과 판정. 다음 단계 가기 전 측정값 확인.
+
+#### 6-4. 성공 기준
+
+| 항목 | 목표 |
+|---|---|
+| 정적 noise floor | <10ms |
+| 30분 보정 없이 누적 drift | <100ms |
+| 보정 후 안정 시간 | <1초 |
+| S22 글리칭 발생 빈도 | 분당 0회 |
+| 글리칭 발생 시 복구 시간 | <2초 |
+
+미달 시 → 어디서 막혔는지 로그로 진단 → 설계 재검토.
+
+#### 6-5. 본 구현 단계 흐름 (PoC 통과 후)
+
+```
+1. PoC 코드 → audio_service 안으로 통합 (백그라운드/잠금화면)
+2. 1:1 → 1:N 멀티 게스트 확장
+3. 로컬 파일 → HTTP 전송 추가
+4. rate 조정 추가 (UX 개선)
+5. iOS 동일 패턴 반복
+6. UI 폴리싱
+```
+
+각 단계 후 회귀 테스트.
+
+### 7. v3 설계 결정 기록
+
+| 결정 | 이유 |
+|---|---|
+| 네이티브 엔진(Oboe/AVAudioEngine) 도입 | just_audio + 플랫폼 채널로는 출력 시각의 sub-ms 측정 불가 |
+| 전략 D (엔진만 네이티브) | 정밀도 거의 동일, 비용 최소 (UI/P2P/플러그인 재사용) |
+| Android 우선 | 앱스토어 운영 비용 회피, iOS는 동일 패턴 반복 |
+| Oboe 채택 (AAudio 직접 X) | AAudio + OpenSL ES fallback + Quirks 자동 처리 + Google 공식 |
+| AVAudioEngine 채택 (AVAudioPlayer X) | sample-accurate 측정(`lastRenderTime`) + `play(at:)` 정밀 예약 |
+| FLAC 미지원 | AVAudioFile 비지원, 일반 사용자 거의 안 씀 |
+| 폐루프 (계산 → 측정) | 측정 불가능한 변수까지 자동 내포됨 |
+| `(framePos, deviceTimeNs)` 페어 | 시간/샘플 양 축 모두 있어야 디바이스 간 비교 가능 |
+| 호스트 Push + Guest Drift Report 이벤트 | 단순함 + 모니터링 가시성 동시 확보 (PoC 분석에 필수) |
+| 선형 보간 (실측 기반) | 앵커 기반 이론 계산은 클락 드리프트 못 잡음 (개방 루프 회귀) |
+| dead zone 15ms 출발값 | 측정 노이즈(5-10ms) × 2 + 청각 임계(20ms) 미만, PoC 측정 후 재조정 |
+| seek 임계 50ms | 청각 임계와 정합. 갑작스런 점프 시 "긴 에코" 대신 "한 번 클릭"이 나음 |
+| 보정 후 500ms-1s 쿨다운 | oscillation 방지 |
+| MethodChannel + EventChannel 분리 | 명령 RPC와 관측 스트림은 본질이 다름. 단일 채널이면 polling 발생 |
+| 앵커는 native 관리 | seek/play 시점에 native 내부 상태가 가장 정확 |
+| sync-position 폐기, audio-obs 신규 | sync-position은 시각 축 없어 정확 drift 계산 불가 |
+| sync-ping/pong 유지 | clock offset (정적)에는 Pull (NTP) 패턴이 적합 |
+| PoC 격리 원칙 | 한 번에 다 만들면 원인 추적 불가, 한 변수씩 검증 |
+
+### 8. v3 새 P2P 메시지 (요약)
+
+| 타입 | 방향 | 페이로드 | 용도 |
+|---|---|---|---|
+| `audio-obs` | 호스트→게스트 | `seq`, `hostTimeMs`, `anchor`, `framePos`, `playing` | 호스트 엔진 실측값 broadcast (500ms 주기, 앵커 변경 시 즉시) |
+| `audio-drift-report` | 게스트→호스트 | `seq`, `hostTimeMs`, `observedTrackMs`, `expectedTrackMs`, `driftMs` | 게스트가 임계 초과 drift 감지 시 보고 (이벤트성) |
+
+기존 `sync-position`은 v3에서 폐기. `sync-ping`/`sync-pong`은 그대로 유지.
+
+---
+
 ## 아키텍처: 하이브리드 (P2P + 클라우드)
 
 ### 설계 원칙
