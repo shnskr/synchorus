@@ -20,9 +20,21 @@ class MainActivity : FlutterActivity() {
                             mapOf(
                                 "framePos" to arr[0],
                                 "timeNs" to arr[1],
-                                "ok" to (arr[2] == 1L),
+                                "wallAtFramePosNs" to arr[2],
+                                "ok" to (arr[3] == 1L),
                             )
                         )
+                    }
+                    "seekToFrame" -> {
+                        val newFrame = (call.arguments as? Number)?.toLong()
+                        if (newFrame == null) {
+                            result.error("ARG", "newFrame must be a Number", null)
+                        } else {
+                            result.success(NativeAudio.nativeSeekToFrame(newFrame))
+                        }
+                    }
+                    "getVirtualFrame" -> {
+                        result.success(NativeAudio.nativeGetVirtualFrame())
                     }
                     else -> result.notImplemented()
                 }

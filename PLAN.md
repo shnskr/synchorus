@@ -272,7 +272,10 @@
 
 **다음 작업 (Phase 2~6)**
 - [x] **Phase 2**: P2P `audio-obs` 송수신 (S22 호스트 + S10 게스트 실기기 2대, 2026-04-09 통과)
-- [ ] Phase 3: drift 계산 (선형 보간) + clock sync (sync-ping/pong)
+- [~] **Phase 3 (진행 중, 2026-04-09)**: clock sync (sync-ping/pong) + 게스트 자체 엔진 재생 + 원시 CSV 3종
+  - **접근**: 온디바이스는 원시 수집 + 단일 기본 알고리즘, drift 알고리즘 비교는 **오프라인 Python**에서 (§6-2 "변수 하나씩" 원칙 확장)
+  - **clock sync 알고리즘**: 초기 10회 빠른 ping → RTT-min offset / 주기 1s ping, 최근 5개 window, RTT-min → EMA(α=0.1) `filtered = old*0.9 + new*0.1`
+  - **왜 EMA**: 선형 회귀·Kalman보다 설명·디버깅 쉬움. 드리프트가 빠르게 변하지 않는 환경에서는 충분. 추가 알고리즘은 오프라인 분석으로 벤치마크 후 본 구현에서 교체 여부 결정.
 - [ ] Phase 4: seek 보정 + drift-report
 - [ ] Phase 5: 정적 noise floor 측정
 - [ ] Phase 6: S22 30분 stress + 네트워크 블립
@@ -314,6 +317,207 @@
 - **주목 1**: 게스트 수신 주기의 stdev(67.8ms)가 호스트 송신(13.2ms)의 ~5배. 순수 네트워크 + 게스트 OS 스케줄링 지터가 크므로, Phase 3 drift 계산은 개별 샘플이 아닌 **smoothing(선형 회귀 or EMA)** 전제 필요.
 - **주목 2**: Dart `Timer.periodic`은 드리프트 누적 없이 정확 (stdev 13.2ms). 120회 중 이상치 1개(min 355ms, 0.8%).
 - CSV 로그: `/tmp/synchorus_poc_phase2/audio_obs_2026-04-09T21-03-31-781504.csv` (임시 위치, 참고용)
+
+#### 2026-04-09 PoC Phase 3 구현 (진행 중)
+
+**구현 스코프 결정 과정**
+- 초안: 온디바이스에 선형 회귀/Kalman 등 여러 알고리즘을 두고 비교
+- 피드백: 용어가 과해 맥락 잃음 → 용어/수식 최소화, 비유 기반 설명으로 재정리
+- 최종 결정: **"원시 데이터 수집 + 오프라인 비교"** 로 경로 변경. 온디바이스엔 **사용자가 제안한 EMA 방식**만 넣고 (설명·디버깅 쉬움), 선형 회귀·Kalman 등 정교한 알고리즘은 Python 스크립트로 같은 CSV에 적용해 벤치마크.
+- 이유:
+  1. 온디바이스 여러 알고리즘 → 코드 복잡, 실험 1회성, 공정 비교 어려움
+  2. 원시 CSV 보존 → 새 알고리즘 추가돼도 기존 데이터로 재평가 가능
+  3. PoC §6-2 "변수 하나만 실험" 원칙을 알고리즘 축까지 확장
+
+**메시지 신설 (§8 보강)**
+| 타입 | 방향 | 페이로드 | 용도 |
+|---|---|---|---|
+| `sync-ping` | 게스트→호스트 | `seq`, `t1` | 게스트 wall clock 송신 (RTT 측정용) |
+| `sync-pong` | 호스트→게스트 | `seq`, `t1 (echo)`, `t2` | 호스트가 수신 직후 찍은 wall clock 반환 |
+
+**clock sync 알고리즘 (NTP/SNTP 유사, §7에 추가 결정 기록)**
+- 초기 핸드셰이크: 10회 빠른 ping (100ms 간격) → RTT 최소 샘플 채택
+  - `rawOffset = t2 − (t1+t3)/2` (양방향 단방향 지연 대칭 가정)
+  - 10회 수집 후 `settleDelay = 500ms` 대기 → orphan pong 회수 시도
+- 주기 단계: 1s마다 ping, sliding window 5개 유지
+  - 창 내 RTT 최소 샘플의 raw offset을 "새 측정값"으로 보고
+  - `filtered = old * 0.9 + new * 0.1` (EMA, α=0.1)
+  - 작은 α로 튀는 값 완화. α 튜닝은 오프라인 분석 결과 기반.
+
+**게스트 자체 엔진 동작**
+- 첫 `audio-obs(playing=true)` 수신 시 `start` → Oboe 폴링(100ms) 개시
+- `audio-obs(playing=false)` 수신 시 `stop` + 폴링 정지
+- 게스트 자체 재생은 드리프트 측정 목적 (호스트와 동일 sine wave, seek 보정은 Phase 4)
+
+**CSV 3종** (같은 timestamp 접미사, 오프라인 짝짓기 쉽게)
+- `audio_obs_*.csv`: 호스트 obs 수신 시계열 (Phase 2 유지, 동일 포맷)
+- `sync_*.csv`: `seq,t1,t2,t3,rttMs,rawOffsetMs,filteredOffsetMs,phase(init/steady)`
+- `guest_ts_*.csv`: `wallMs,framePos,timeNs,ok`
+
+**호스트 측 변경**
+- `_onClient`에서 LineSplitter 기반 line stream으로 전환 (기존 `(_) {}` 빈 핸들러 대체)
+- `sync-ping` 수신 시 파싱 직후 **즉시 t2를 찍고** pong 응답 (호스트 처리 지연 최소화)
+- 호스트 화면에 `sync-pong 응답 수` / `last seq` 표시
+
+**게스트 화면 신규 카드**
+- `clock sync`: 단계(init N/10 or steady), pong 수신, 최근 RTT, 초기 offset, filtered offset
+- `게스트 재생`: 재생 상태, 폴링 수, ok 비율, last framePos
+
+**파일 변경 범위**
+- `lib/main.dart` 단일 파일 확장. 네이티브/Manifest/pubspec 변경 없음 (Phase 2 인터페이스 그대로 재사용).
+- 빌드: `flutter build apk --debug --target-platform android-arm64` ✓
+- 설치: S22(R3CT60D20XE) + S10(R3CM602J2DD) 두 기기 수동 연결 대기 중
+
+#### 2026-04-09 ~ 2026-04-10 PoC Phase 4~5 (seek 보정 + 시간축 정합)
+
+여러 라운드의 실측 → 버그 발견 → 수정 사이클. 각 테스트마다 CSV 수집해서 Python 분석
+스크립트 (`analysis/phase4_drift_vs_seek.py`)로 통계/수렴성 판정.
+
+기기: S10(SM-G977N, R3CM602J2DD) = 게스트, S22(SM-S901N, R3CT60D20XE) = 호스트
+(USB 한 번에 한 대씩 연결 → 교체 → 설치 → 테스트 → swap → CSV 추출 워크플로우)
+
+**Phase 4 초기 구현 (seek 보정 루프)**
+- `_tryEstablishAnchor` / `_recomputeDrift` / `_performSeek` / `_maybeProbePostSeek` 4단계
+- 앵커: clock sync 초기화 + filtered offset 있고 playing obs 수신하면 첫 게스트 poll에서 설정
+- drift 수식: `drift = dG - dH`
+  - `dG = effectiveGuestFrame - anchorGF` (guest 쪽 프레임 진행)
+  - `dH = expectedHostFrameNow - anchorHF` (host 쪽 프레임 진행, 최근 obs + 외삽)
+- seek 트리거: `|drift| ≥ 20ms` + 쿨다운(1000ms) 해제
+- 보정: `correctionFrames = -drift * gain(0.8) * 48`, `seekToFrame(currentVf + correctionFrames)`
+- post-seek probe: `[100, 300, 500, 1000, 2000]ms` 시점 drift를 seek_events CSV에 기록
+- CSV 2종 신설: `drift_*.csv` (매 poll), `seek_events_*.csv` (pre/probe 이벤트)
+
+**1차 실측 (2026-04-09 23:15)** → 결과 참담
+- `|drift|<20ms`: **0.0%**, mean `-348ms`
+- seek 평균 |pre|=347.8 → |post|=348.1 (seek 효과 **제로**)
+- **버그 A (seek vs framePos 체계 불일치)**: `seekToFrame`은 `mVirtualFrame`만 덮어쓰고 HAL
+  `framePos`는 그대로 증가. drift는 HAL framePos로 계산 → seek해도 drift 값은 그대로.
+- **버그 B (앵커 시간축 불일치)**: `_tryEstablishAnchor`에서 `_anchorHostObsFrame = obs.framePos`로 그대로 저장.
+  obs는 최대 500ms 오래된 값이라 anchorHF는 과거 시점, anchorGF는 현재 시점 → 300ms 초기 오프셋.
+
+**버그 A, B 수정**
+- `_seekCorrectionAccum` 필드 신설. 매 seek마다 `correctionFrames` 누적.
+- `effectiveGuestFrame = guestFramePos + _seekCorrectionAccum`로 "seek가 없었다면 HAL이
+  갔을 위치"를 복원해서 drift 계산에 사용.
+- anchor 시 host frame을 `obs.framePos + (anchorHostWall - obs.hostTimeMs) * 48`로 외삽해서
+  게스트 현재 시점으로 맞춤.
+- drift CSV에 `seekAccum` 열 추가.
+
+**2차 실측 (2026-04-09 23:34)** → 의미 있는 개선이지만 스파이크 잔존
+- `|drift|<20ms`: **74.3%**, mean `+3.0ms`, median `+3.8ms`
+- seek 수렴률: 73.8%, |pre|=45.6 → |post|=29.5 (35% 감소)
+- 문제: 7% 샘플이 `|drift|>50ms`, 최대 ±100ms 스파이크. 100% 쿨다운 구간(seek 후 0~1000ms) 내 발생.
+- offset 변동은 세션 전체 1.34ms만 → NTP는 안정. 스파이크 원인은 clock sync 아님.
+- **버그 C (호스트 broadcast 시간축 불일치)**: `_broadcastOnce`가 `hostTimeMs: DateTime.now()`로
+  "broadcast 순간의 wall"을 썼지만 `framePos`는 "최대 100ms 전 poll" 값. 100ms × 48 = 4800 frames
+  = **100ms drift 오차**가 broadcast마다 무작위로 삽입됨.
+
+**버그 C 수정**
+- `hostTimeMs: latest.wallMs`로 변경 → framePos를 포함한 sample의 wallMs와 pair로 묶음.
+
+**비프음 전환 요청 (청각 검증용)**
+- 사용자 요청: "1초 간격 비프로 바꿔서 귀로 에코/지연 체감하게"
+- `oboe_engine.cpp` `onAudioReady`: 연속 sine → `vf % beepPeriodFrames` 기반 비프
+  - 440Hz sine을 100ms 동안 재생 + 900ms 무음 (1s 주기)
+  - 양끝 5ms fade in/out으로 click 제거
+  - seek 호환: `mod` 계산에 음수 vf 처리 (`if (mod < 0) mod += period`)
+  - sampleRate 기반 상수라 스트림 rate 자동 적응
+
+**3차 실측 (2026-04-09 23:51)** → 숫자 좋은데 귀로는 "아예 안 맞음"
+- `|drift|<20ms`: **78.4%**, mean `+3.2ms`, median `+4.8ms`
+- seek 수렴률: 77.3%, |pre|=47.4 → |post|=25.3
+- 그런데 사용자 청각 확인: **"호스트랑 게스트 귀로 듣기엔 아예 안맞아"**
+- **버그 D (drift 수식의 근본적 오해)**: drift = dG - dH는 **rate drift (시간에 따른 속도 차이)**만
+  측정함. 앵커 시점의 `anchorHF - anchorGF = 초기 절대 오프셋`이 영구 보존됨.
+  - CSV 수동 검증: 첫 샘플 `anchorHF=43296, anchorGF=6339, 초기 오프셋=36957 frames = 770ms`
+  - 연속 sine에서는 phase만 어긋나 귀로 모름 → 숫자 통계가 좋아 보였음
+  - 1초 주기 비프로 바꾸니 770ms 어긋남이 그대로 들림
+
+**버그 D 수정 (Phase 5 초기 정렬 seek)**
+- `_tryEstablishAnchor`에서 앵커 설정 시 게스트 `mVirtualFrame`을 호스트 frame 좌표계로 즉시 점프:
+  ```
+  initialCorrection = anchorHF - (framePos + _seekCorrectionAccum)
+  seekToFrame(anchorHF)  # 즉시 정렬
+  _seekCorrectionAccum += initialCorrection
+  ```
+- 이후 `anchorGF == anchorHF`이므로 `drift = dG - dH = effective - expected`로 **절대 오정렬** 측정.
+- HAL 버퍼에 이미 들어간 샘플(~10-30ms)은 이전 vf로 재생 → 완전 정렬은 HAL latency만큼 지연.
+- `_maybeProbePostSeek`에서 **앵커 재설정 제거** (gain=0.8의 잔차가 "새 기준선"으로 흡수되는 문제 방지).
+- `_ensureGuestStarted`에서 stale state 리셋 (play toggle 시 네이티브 `mVirtualFrame=0`과 일치시키기).
+
+**4차 실측 (2026-04-10 00:09)** → 여전히 스파이크 (이번엔 다른 원인)
+- `|drift|<20ms`: **83.0%**, mean `+4.2ms`, median `+8.2ms`
+- seek 수렴률: 76.3%, |pre|=50.5 → |post|=24.5
+- 초기 정렬 seek 정상 작동 확인: 첫 샘플 `seekAccum=39374 ≈ anchorHF(47057) - guestFrame(7587)`
+- **여전히 ±100ms 스파이크**. audio_obs CSV에서 발견:
+  - seq 1→2: `Δwall=498ms, Δmono=458.2ms` → 39.8ms 편차 (1.5% 아닌 **8%**)
+  - clock drift로는 불가능한 값 → 두 시계가 다른 순간에 캡처되고 있음
+- **버그 E (wallMs vs timeNs 캡처 순간 불일치)**:
+  - `_pollOnce` 코드:
+    ```dart
+    final wallMs = DateTime.now().millisecondsSinceEpoch;  // await 이전
+    final result = await _nativeChannel.invokeMethod('getTimestamp');  // timeNs는 이 내부에서 캡처
+    ```
+  - `wallMs`와 `timeNs`는 서로 다른 순간 + 그 gap이 샘플마다 변동 → `hostTimeMs`와 `framePos`가
+    atomically 정합되지 않음 → 게스트 외삽에서 ±40ms 오차 → 스파이크
+
+**버그 E 수정 (Phase 5 네이티브 시간축 원자화)**
+- `oboe_engine.cpp::getLatestTimestamp`가 `outWallAtFramePosNs` 추가 반환:
+  ```cpp
+  oboe::getTimestamp(CLOCK_MONOTONIC, &framePos, &timeNs_oboe);
+  clock_gettime(CLOCK_REALTIME, &wallTs);
+  clock_gettime(CLOCK_MONOTONIC, &monoTs);
+  wallAtFramePosNs = wallNow - (monoNow - timeNs_oboe);
+  // = "framePos가 DAC에 나간 순간의 CLOCK_REALTIME 추정치"
+  ```
+- JNI 배열 3 → 4 원소 (`[framePos, timeNs, wallAtFramePosNs, ok]`)
+- `MainActivity.kt` 메서드 채널 Map에 `wallAtFramePosNs` 필드 추가
+- `NativeAudio.kt` 주석 업데이트
+- Dart `_pollOnce`/`_guestPollOnce`: `DateTime.now()` 제거, `result['wallAtFramePosNs'] ~/ 1000000` 사용
+- 이로써 `Sample.wallMs`와 `framePos`가 네이티브에서 원자적으로 엮여 샘플 간 rate가 일관됨
+
+**현재 상태 (빌드 완료, 테스트 미실행)**
+- 빌드: `flutter build apk --debug` ✓ (2026-04-10, `oboe_engine.cpp` + JNI + Kotlin + Dart)
+- **APK 위치**: `build/app/outputs/flutter-apk/app-debug.apk`
+- **설치 상태**: S10 설치 시도 중 기기 분리 → 미설치. S22도 미설치.
+- **다음 세션 시작 시 할 일**:
+  1. S10 연결 확인 후 `adb install -r build/app/outputs/flutter-apk/app-debug.apk`
+  2. USB 교체 → S22에도 설치
+  3. 5차 테스트: 4차와 동일 절차 (호스트/게스트 각 역할 선택 → 재생 → 약 2분 → 정지)
+  4. 청각 확인: 비프음이 두 기기에서 동시에 "띡!" 들리는지
+  5. S10(게스트)에서 `drift_*.csv` + `seek_events_*.csv` + `audio_obs_*.csv` 추출
+  6. `analysis/phase4_drift_vs_seek.py <session>` 실행해서 통계 확인
+  7. 기대값: `|drift|<20ms` 90%+, 스파이크 제거 (±20ms 이내), 청각상 완전 일치
+
+**수정된 파일 목록 (5차 테스트 대상 코드)**
+- `android/app/src/main/cpp/oboe_engine.cpp`: 비프음 + `wallAtFramePosNs` 반환 + `#include <time.h>`
+- `android/app/src/main/kotlin/.../NativeAudio.kt`: 주석
+- `android/app/src/main/kotlin/.../MainActivity.kt`: `getTimestamp` Map에 `wallAtFramePosNs` 추가
+- `lib/main.dart`:
+  - `Sample.wallMs` 시맨틱 코멘트 업데이트
+  - `_pollOnce` / `_guestPollOnce`: 네이티브 `wallAtFramePosNs` 사용
+  - `_tryEstablishAnchor`: 초기 정렬 seek + 쿨다운 설정
+  - `_recomputeDrift`: `effectiveGuestFrame = framePos + _seekCorrectionAccum`
+  - `_performSeek`: `_seekCorrectionAccum += correctionFrames`
+  - `_maybeProbePostSeek`: 앵커 재설정 제거
+  - `_ensureGuestStarted`: stale state 리셋
+  - `_broadcastOnce`: `hostTimeMs: latest.wallMs`
+  - `_seekCorrectionAccum` 필드 신설
+  - drift CSV에 `seekAccum` 열 추가
+  - GuestPage UI: `SingleChildScrollView` + drift/seek 카드
+
+**분석 스크립트**
+- `analysis/phase4_drift_vs_seek.py` (이번에 신설): drift 시계열 + seek 이벤트 통합 분석
+  - 입력: `drift_<session>.csv`, `seek_events_<session>.csv`
+  - 출력: `output/phase4_<session>.png` (시계열 + pre/post scatter) + stdout 통계
+  - venv 필요: `source analysis/.venv/bin/activate`
+
+**실측 세션 목록 (전부 S10 외부저장소에 있음)**
+- `2026-04-09T23-15-08-800629` (1차, 버그 A/B)
+- `2026-04-09T23-34-15-698589` (2차, 스파이크 발견)
+- `2026-04-09T23-51-51-182343` (3차, 버그 D 발견)
+- `2026-04-10T00-09-00-052681` (4차, 버그 E 발견)
+- `/Users/dal/IdeaProjects/synchorus/poc/native_audio_engine_android/analysis/data/` 에 1~4차 전부 pull 완료
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`

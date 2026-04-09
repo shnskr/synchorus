@@ -1,15 +1,47 @@
-// PoC Phase 2: audio-obs P2P 송수신 (호스트 → 게스트, TCP)
+// PoC Phase 2~4: audio-obs + clock sync + 게스트 재생 + drift/seek 보정 실험
 //
-// Phase 2 통과 기준 (게스트 로그):
-//   - seq 연속성 (gap = 0)
-//   - 수신 간격 ≈ 500ms
-//   - hostTimeMs 단조 증가
+// Phase 3까지: 네트워크 지연 분리 (sync-ping/pong), 게스트 자체 재생,
+//   드리프트 시계열 원시 수집.
+// Phase 4 (현 단계): 게스트가 호스트 대비 drift를 ms 단위로 계산하고, 20ms 넘으면
+//   네이티브 seekToFrame(virtual playhead) 호출로 실시간 보정. 목표는 "seek로
+//   실제로 수렴이 일어나는지 + 몇 ms 안에 들어오는지" 측정.
 //
-// 설계 (PLAN.md §6, §8):
-//   - PoC 격리 원칙: 디스커버리/join/welcome 없음. IP 수동 입력, TCP 다이렉트.
-//   - 메시지 1개: audio-obs (호스트 → 게스트, '\n' 구분 JSON line)
-//   - anchor = 재생 시작 이후 첫 ok 샘플의 (framePos, timeNs)
-//     (Phase 3 drift 계산의 기준점. 재생 중 재앵커 없음.)
+// Phase 4 알고리즘:
+//   1) 앵커: 첫 (audio-obs 수신 + 게스트 ok 샘플) 시점에 드리프트=0 기준선을
+//      설정. ⚠️ 호스트 frame은 obs.framePos 그대로가 아니라, 앵커 순간의 host
+//      wall clock(=guestWall+offset)까지 선형 외삽한 값을 저장 (1차 실측에서
+//      앵커 시점 obs 나이 때문에 초기 offset 수백 ms가 붙던 버그 수정).
+//   2) 매 게스트 poll마다 drift 재계산:
+//        host_wall_now = guest_wall_now + filteredOffsetMs  (offset>0: host 앞섬)
+//        expected_host_frame_now = latestObs.framePos
+//            + (host_wall_now - latestObs.hostTimeMs) * 48.0
+//        dH = expected_host_frame_now - anchorHostFrame
+//        effective_guest_frame = guest_HAL_framePos + seekCorrectionAccum
+//        dG = effective_guest_frame - anchorGuestFrame
+//        drift_frame = dG - dH   (양수: 게스트 앞섬)
+//        drift_ms = drift_frame / 48.0
+//      ⚠️ seekToFrame은 mVirtualFrame만 덮어쓰고 HAL framePos에는 영향 없음.
+//      1차 실측에서 seek를 해도 drift가 전혀 줄지 않은 원인 → 과거 seek 보정을
+//      seekCorrectionAccum에 누적해서 HAL framePos에 더해 "seek 효과 복원".
+//   3) |drift_ms| > 20 && 쿨다운 아닐 때 seek 발동:
+//        correction_frames = (-drift_ms * 0.8) * 48   (0.8 = 오버슈팅 방지)
+//        new_vf = getVirtualFrame() + correction_frames
+//        seekToFrame(new_vf); seekCorrectionAccum += correction_frames
+//   4) seek 후 1초 쿨다운 + post-seek 시계열 기록(100/300/500/1000/2000ms 지점의 drift).
+//      추적 끝나면 앵커 재설정 (현재 상태를 새 drift=0 기준으로, 동일하게 외삽).
+//
+// Clock sync 알고리즘 (Phase 3):
+//   - 초기 핸드셰이크: 10회 빠른 ping (100ms 간격) → RTT 최소 샘플의
+//     raw offset = t2 − (t1+t3)/2 을 초기값으로 확정
+//   - 주기 단계: 1s마다 ping, 최근 5개 sliding window, 창 내 RTT 최소 샘플의
+//     raw offset을 new로 보고 filtered = old*0.9 + new*0.1 (EMA α=0.1)
+//
+// CSV 5종 (오프라인 분석용):
+//   - audio_obs_*.csv:   호스트 obs 수신 시계열
+//   - sync_*.csv:        ping/pong 샘플 (raw + filtered offset)
+//   - guest_ts_*.csv:    게스트 Oboe 폴링 시계열
+//   - drift_*.csv:       매 poll마다 drift_ms (Phase 4)
+//   - seek_events_*.csv: seek 이벤트 + post-seek 수렴 시계열 (Phase 4)
 
 import 'dart:async';
 import 'dart:convert';
@@ -25,6 +57,33 @@ const int _tcpPort = 7777;
 const Duration _obsInterval = Duration(milliseconds: 500);
 const Duration _pollInterval = Duration(milliseconds: 100);
 const int _maxSamples = 1000;
+
+// ── Phase 3: clock sync 파라미터 ─────────────────────────────
+// 초기 핸드셰이크: 10번 빠르게 → RTT 최소 샘플의 offset을 초기값으로 채택.
+// 주기 단계: 매 1초 1회 ping, 최근 5개 sliding window 유지.
+//   최근 5개 중 RTT 최소 샘플의 raw offset을 new로 보고,
+//   filteredOffset = old * 0.9 + new * 0.1 (EMA, α=0.1)
+const int _syncInitialCount = 10;
+const Duration _syncInitialGap = Duration(milliseconds: 100);
+const Duration _syncInitialSettleDelay = Duration(milliseconds: 500);
+const Duration _syncInterval = Duration(seconds: 1);
+const int _syncWindowSize = 5;
+const double _syncEmaAlpha = 0.1; // new 비중 (old 0.9 + new 0.1)
+
+// ── Phase 4: drift / seek 파라미터 ───────────────────────────
+// |drift| > 20ms 넘으면 seek 발동. 20ms는 v2와 동일 기준.
+const double _driftSeekThresholdMs = 20.0;
+// 오버슈팅 방지용 proportional gain. 1.0이면 "정확히 보정", 0.8이면
+// "벗어난 양의 80%만 당겨옴". 반동 줄이기 위해 1 미만.
+const double _seekCorrectionGain = 0.8;
+// seek 호출 후 이 시간 동안은 측정만 하고 추가 seek 판단 금지.
+// HAL 버퍼가 새 위치 반영할 시간 + post-seek 수렴 관찰 창.
+const Duration _seekCooldown = Duration(milliseconds: 1000);
+// 48kHz 가정. (실측 drift가 ±수 ppm 수준이라 계산용 상수로 충분)
+const double _idealFramesPerMs = 48.0;
+// post-seek 시점에 drift를 찍을 오프셋(ms). seek 이후 경과시간이 이 값을
+// 넘으면 해당 시점의 drift를 CSV에 한 줄 기록.
+const List<int> _postSeekProbeMs = [100, 300, 500, 1000, 2000];
 
 void main() {
   runApp(const PocApp());
@@ -110,6 +169,11 @@ class Sample {
   final int framePos;
   final int timeNs;
   final bool ok;
+  // ⚠️ 이 wallMs는 "framePos가 DAC에 나간 순간의 CLOCK_REALTIME"이어야 함.
+  // 네이티브 쪽에서 getTimestamp 직후 clock_gettime 두 개(mono, realtime)를 찍어
+  // wallAtFramePosNs = wallNow - (monoNow - timeNs_oboe) 로 계산해 반환한 값을 ms
+  // 단위로 저장. Dart에서 DateTime.now()를 쓰면 네이티브 호출 이전/이후 jitter로
+  // 샘플마다 편차(최대 수십 ms)가 생겨 drift 계산에 직접 오차로 누적됨.
   final int wallMs;
 
   Sample({
@@ -165,6 +229,88 @@ class AudioObs {
   String encodeLine() => '${jsonEncode(toJson())}\n';
 }
 
+/// Phase 3: clock sync — 게스트→호스트 ping.
+/// `t1`은 게스트가 송신 직전에 찍은 wall clock (millisecondsSinceEpoch).
+class SyncPing {
+  final int seq;
+  final int t1;
+
+  const SyncPing({required this.seq, required this.t1});
+
+  Map<String, dynamic> toJson() => {
+        'type': 'sync-ping',
+        'seq': seq,
+        't1': t1,
+      };
+
+  String encodeLine() => '${jsonEncode(toJson())}\n';
+}
+
+/// Phase 3: clock sync — 호스트→게스트 pong.
+/// `t1`은 ping의 echo, `t2`는 호스트가 수신 직후 찍은 wall clock.
+class SyncPong {
+  final int seq;
+  final int t1;
+  final int t2;
+
+  const SyncPong({required this.seq, required this.t1, required this.t2});
+
+  Map<String, dynamic> toJson() => {
+        'type': 'sync-pong',
+        'seq': seq,
+        't1': t1,
+        't2': t2,
+      };
+
+  factory SyncPong.fromJson(Map<String, dynamic> m) => SyncPong(
+        seq: (m['seq'] as num).toInt(),
+        t1: (m['t1'] as num).toInt(),
+        t2: (m['t2'] as num).toInt(),
+      );
+
+  String encodeLine() => '${jsonEncode(toJson())}\n';
+}
+
+/// Phase 3: 게스트 쪽 ping/pong 한 쌍.
+/// RTT = t3 - t1
+/// rawOffsetMs = t2 - (t1 + t3) / 2  (양수면 "호스트 시계가 게스트보다 앞섬")
+class _SyncSample {
+  final int seq;
+  final int t1;
+  final int t2;
+  final int t3;
+
+  const _SyncSample({
+    required this.seq,
+    required this.t1,
+    required this.t2,
+    required this.t3,
+  });
+
+  int get rttMs => t3 - t1;
+
+  int get rawOffsetMs => t2 - ((t1 + t3) ~/ 2);
+}
+
+/// Phase 4: seek 이벤트 한 건. CSV에는 event row(pre) + 여러 probe row로 저장됨.
+class _SeekEvent {
+  final int eventId;
+  final int tSeekMs; // 게스트 wall clock
+  final double preDriftMs; // seek 직전 drift
+  final int correctionFrames; // virtual frame delta (부호 포함)
+  final int oldVirtualFrame;
+  final int newVirtualFrame;
+
+  const _SeekEvent({
+    required this.eventId,
+    required this.tSeekMs,
+    required this.preDriftMs,
+    required this.correctionFrames,
+    required this.oldVirtualFrame,
+    required this.newVirtualFrame,
+  });
+}
+
 // ======================================================================
 // 호스트
 // ======================================================================
@@ -200,6 +346,10 @@ class _HostPageState extends State<HostPage> {
   int _seq = 0;
   int _lastSentSeq = -1;
 
+  // ── Phase 3: sync-pong 송신 통계 ─────────────────────────
+  int _pongSentCount = 0;
+  int _lastPongSeq = -1;
+
   @override
   void initState() {
     super.initState();
@@ -227,13 +377,47 @@ class _HostPageState extends State<HostPage> {
 
   void _onClient(Socket client) {
     setState(() => _clients.add(client));
-    // 클라이언트가 끊기면 목록에서 제거.
-    client.listen(
-      (_) {}, // 게스트→호스트 메시지는 Phase 2에서 없음
+    // Phase 3: 게스트→호스트 sync-ping 수신 처리.
+    // Socket을 line stream으로 변환. listen 구독은 서버가 유지만 하면 되고,
+    // 취소할 필요는 없음 (client 종료 시 onDone으로 _removeClient 호출).
+    client
+        .cast<List<int>>()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())
+        .listen(
+      (line) => _handleClientLine(client, line),
       onError: (Object _) => _removeClient(client),
       onDone: () => _removeClient(client),
       cancelOnError: true,
     );
+  }
+
+  /// 게스트가 보낸 sync-ping 처리. 다른 타입은 무시.
+  ///
+  /// 주의: t2는 **수신 직후 즉시** 찍어야 정확. 파싱 후가 아니라
+  /// 파싱 직후 바로 찍는 것이 호스트 측 처리 지연을 최소화.
+  void _handleClientLine(Socket client, String line) {
+    if (line.isEmpty) return;
+    try {
+      final m = jsonDecode(line);
+      if (m is! Map<String, dynamic>) return;
+      if (m['type'] != 'sync-ping') return;
+      final t2 = DateTime.now().millisecondsSinceEpoch;
+      final seq = (m['seq'] as num).toInt();
+      final t1 = (m['t1'] as num).toInt();
+      final pong = SyncPong(seq: seq, t1: t1, t2: t2);
+      try {
+        client.write(pong.encodeLine());
+      } catch (_) {
+        _removeClient(client);
+      }
+      setState(() {
+        _lastPongSeq = seq;
+        _pongSentCount++;
+      });
+    } catch (_) {
+      // parse 실패는 조용히 무시 (PoC)
+    }
   }
 
   void _removeClient(Socket client) {
@@ -325,16 +509,19 @@ class _HostPageState extends State<HostPage> {
   }
 
   Future<void> _pollOnce() async {
-    final wallMs = DateTime.now().millisecondsSinceEpoch;
     try {
       final result = await _nativeChannel
           .invokeMethod<Map<dynamic, dynamic>>('getTimestamp');
       if (!mounted || result == null) return;
+      // Phase 5 fix: wallMs는 네이티브에서 clock_gettime으로 찍은
+      // "framePos가 DAC에 나간 순간의 wall clock". Dart DateTime.now()와 달리
+      // framePos와 정합되는 값이라 drift 외삽에 안전.
+      final wallAtFramePosNs = (result['wallAtFramePosNs'] as num).toInt();
       final s = Sample(
         framePos: (result['framePos'] as num).toInt(),
         timeNs: (result['timeNs'] as num).toInt(),
         ok: result['ok'] as bool,
-        wallMs: wallMs,
+        wallMs: wallAtFramePosNs ~/ 1000000,
       );
       // 첫 ok 샘플을 anchor로 기록.
       if (s.ok && _anchorFramePos == null) {
@@ -385,7 +572,12 @@ class _HostPageState extends State<HostPage> {
     }
     final obs = AudioObs(
       seq: _seq++,
-      hostTimeMs: DateTime.now().millisecondsSinceEpoch,
+      // ⚠️ hostTimeMs는 "framePos가 측정된 시각"이어야 함.
+      // 예전엔 DateTime.now() (= 브로드캐스트 순간)을 썼는데, latest는 최대 100ms
+      // 전 poll 결과라 framePos와 hostTimeMs가 0~100ms 어긋남. 이 불일치가
+      // 게스트 drift 계산에 그대로 수백 frames 오차로 들어가 ±100ms 스파이크를
+      // 만들었음 (2차 실측 스파이크 원인). → latest.wallMs로 맞춤.
+      hostTimeMs: latest.wallMs,
       anchorFramePos: _anchorFramePos!,
       anchorTimeNs: _anchorTimeNs!,
       framePos: latest.framePos,
@@ -493,6 +685,12 @@ class _HostPageState extends State<HostPage> {
                       t,
                       '마지막 송신 seq',
                       _lastSentSeq >= 0 ? '$_lastSentSeq' : '—',
+                    ),
+                    _kvRow(
+                      t,
+                      'sync-pong 응답 수',
+                      '$_pongSentCount'
+                      '${_lastPongSeq >= 0 ? ' (last=$_lastPongSeq)' : ''}',
                     ),
                     if (_ipCandidates.isNotEmpty) ...[
                       const SizedBox(height: 6),
@@ -664,6 +862,8 @@ class _GuestPageState extends State<GuestPage> {
 
   String _status = '연결 중...';
   String _logPath = '—';
+
+  // ── audio-obs 수신 통계 ─────────────────────────────────
   int _receivedCount = 0;
   int? _lastSeq;
   int _seqGaps = 0;
@@ -671,8 +871,68 @@ class _GuestPageState extends State<GuestPage> {
   int _lastIntervalMs = 0;
   final List<AudioObs> _recent = [];
 
-  File? _logFile;
-  IOSink? _logSink;
+  // ── Phase 3: CSV 3종 ─────────────────────────────────────
+  File? _obsFile;
+  IOSink? _obsSink;
+  File? _syncFile;
+  IOSink? _syncSink;
+  File? _guestFile;
+  IOSink? _guestSink;
+
+  // ── Phase 3: clock sync ─────────────────────────────────
+  Timer? _syncTimer;
+  int _syncSeqNext = 0;
+  // 송신 시점의 t1을 seq로 찾을 수 있게 보관 (pong 매칭용).
+  final Map<int, int> _pendingPingT1 = {};
+  // 초기 10회 수집 버퍼. 10개 모이면 min-RTT로 초기 offset 확정.
+  final List<_SyncSample> _initialSamples = [];
+  // 주기 단계 sliding window (최근 _syncWindowSize개 유지).
+  final List<_SyncSample> _recentSyncWindow = [];
+  bool _syncInitialized = false;
+  int? _initialOffsetMs; // 초기 확정값 (고정)
+  double? _filteredOffsetMs; // 주기 EMA 필터링 값
+  int _latestRttMs = 0;
+  int _syncPongReceived = 0;
+
+  // ── Phase 3: 게스트 자체 Oboe 재생 ────────────────────────
+  bool _guestPlaying = false;
+  Timer? _guestPollTimer;
+  int _guestPolls = 0;
+  int _guestOkCount = 0;
+  int? _guestLastFramePos;
+  int? _guestLastTimeNs;
+  int? _guestLastWallMs;
+
+  // ── Phase 4: drift / seek 보정 ────────────────────────────
+  // 가장 최근 audio-obs (drift 계산 시 expected host frame 외삽용)
+  AudioObs? _latestObs;
+  // 앵커: drift=0 기준선
+  int? _anchorHostObsFrame;
+  int? _anchorHostObsWallMs;
+  int? _anchorGuestFrame;
+  int? _anchorGuestWallMs;
+  // 최신 drift 값 (UI + 판단용)
+  double? _latestDriftMs;
+  int _driftSampleCount = 0;
+  // 누적 seek 보정: 과거 seek가 mVirtualFrame을 건드린 총량 (frames).
+  // HAL framePos는 seek의 영향을 받지 않으므로, drift 계산 시
+  //   effectiveGuestFrame = guestFramePos + _seekCorrectionAccum
+  // 으로 "seek 영향을 포함한 게스트 sine 위치"를 복원.
+  int _seekCorrectionAccum = 0;
+  // seek 통계
+  int _seekCount = 0;
+  int _seekCooldownUntilMs = 0;
+  int _seekNextEventId = 0;
+  _SeekEvent? _latestSeek;
+  // post-seek 추적 중인 이벤트 (하나만 동시 진행)
+  int? _trackingEventId;
+  int? _trackingStartMs;
+  final Set<int> _probedIndexes = {};
+  // Phase 4 로그 파일
+  File? _driftFile;
+  IOSink? _driftSink;
+  File? _seekFile;
+  IOSink? _seekSink;
 
   @override
   void initState() {
@@ -681,11 +941,20 @@ class _GuestPageState extends State<GuestPage> {
   }
 
   Future<void> _setup() async {
-    await _openLogFile();
+    await _openLogFiles();
     await _connect();
+    if (_socket != null) {
+      // fire-and-forget: 초기 핸드셰이크 10회 → 끝나면 주기 단계 시작.
+      unawaited(_startInitialSync());
+    }
   }
 
-  Future<void> _openLogFile() async {
+  /// Phase 3: CSV 3종을 연다.
+  /// - audio_obs_*.csv: 호스트로부터 수신한 audio-obs 시계열
+  /// - sync_*.csv:      clock sync (ping/pong) 샘플 시계열
+  /// - guest_ts_*.csv:  게스트 자체 Oboe 폴링 시계열
+  /// 같은 timestamp 접미사를 써서 오프라인 분석 시 짝짓기 쉬움.
+  Future<void> _openLogFiles() async {
     try {
       final dir = await getExternalStorageDirectory();
       if (dir == null) {
@@ -696,13 +965,42 @@ class _GuestPageState extends State<GuestPage> {
           .toIso8601String()
           .replaceAll(':', '-')
           .replaceAll('.', '-');
-      _logFile = File('${dir.path}/audio_obs_$stamp.csv');
-      _logSink = _logFile!.openWrite();
-      _logSink!.writeln(
+
+      _obsFile = File('${dir.path}/audio_obs_$stamp.csv');
+      _obsSink = _obsFile!.openWrite();
+      _obsSink!.writeln(
         'seq,hostTimeMs,rxWallMs,anchorFramePos,anchorTimeNs,'
         'framePos,timeNs,playing',
       );
-      if (mounted) setState(() => _logPath = _logFile!.path);
+
+      _syncFile = File('${dir.path}/sync_$stamp.csv');
+      _syncSink = _syncFile!.openWrite();
+      _syncSink!.writeln(
+        'seq,t1,t2,t3,rttMs,rawOffsetMs,filteredOffsetMs,phase',
+      );
+
+      _guestFile = File('${dir.path}/guest_ts_$stamp.csv');
+      _guestSink = _guestFile!.openWrite();
+      _guestSink!.writeln('wallMs,framePos,timeNs,ok');
+
+      // Phase 4: drift 시계열. 매 게스트 poll마다 한 줄.
+      _driftFile = File('${dir.path}/drift_$stamp.csv');
+      _driftSink = _driftFile!.openWrite();
+      _driftSink!.writeln(
+        'wallMs,obsHostFrame,obsHostTimeMs,guestFrame,seekAccum,'
+        'filteredOffsetMs,expectedHostFrame,driftMs',
+      );
+
+      // Phase 4: seek 이벤트. kind=pre는 seek 직전 한 줄,
+      // kind=probe는 seek 이후 경과 시점마다 한 줄.
+      _seekFile = File('${dir.path}/seek_events_$stamp.csv');
+      _seekSink = _seekFile!.openWrite();
+      _seekSink!.writeln(
+        'eventId,wallMs,msSinceSeek,driftMs,'
+        'correctionFrames,oldVf,newVf,kind',
+      );
+
+      if (mounted) setState(() => _logPath = dir.path);
     } catch (e) {
       if (mounted) setState(() => _logPath = '파일 열기 실패: $e');
     }
@@ -738,45 +1036,412 @@ class _GuestPageState extends State<GuestPage> {
 
   void _onLine(String line) {
     if (line.isEmpty) return;
+    // sync-pong의 t3는 수신 직후 즉시 찍는 것이 중요 (파싱 지연 배제).
+    final rxWallMs = DateTime.now().millisecondsSinceEpoch;
     try {
       final m = jsonDecode(line);
       if (m is! Map<String, dynamic>) return;
-      if (m['type'] != 'audio-obs') return;
-      final obs = AudioObs.fromJson(m);
-      final now = DateTime.now().millisecondsSinceEpoch;
-      final interval = _lastRxMs > 0 ? now - _lastRxMs : 0;
-      // seq gap 검출.
-      int newGaps = _seqGaps;
-      if (_lastSeq != null && obs.seq > _lastSeq! + 1) {
-        newGaps += obs.seq - _lastSeq! - 1;
+      final type = m['type'];
+      if (type == 'audio-obs') {
+        _handleAudioObs(AudioObs.fromJson(m), rxWallMs);
+      } else if (type == 'sync-pong') {
+        _handlePong(SyncPong.fromJson(m), rxWallMs);
       }
-      setState(() {
-        _receivedCount++;
-        _lastSeq = obs.seq;
-        _seqGaps = newGaps;
-        _lastRxMs = now;
-        _lastIntervalMs = interval;
-        _recent.insert(0, obs);
-        if (_recent.length > 10) _recent.removeLast();
-      });
-      _logSink?.writeln(
-        '${obs.seq},${obs.hostTimeMs},$now,'
-        '${obs.anchorFramePos},${obs.anchorTimeNs},'
-        '${obs.framePos},${obs.timeNs},${obs.playing ? 1 : 0}',
-      );
     } catch (e) {
       debugPrint('parse error: $e line=$line');
+    }
+  }
+
+  void _handleAudioObs(AudioObs obs, int rxWallMs) {
+    final interval = _lastRxMs > 0 ? rxWallMs - _lastRxMs : 0;
+    int newGaps = _seqGaps;
+    if (_lastSeq != null && obs.seq > _lastSeq! + 1) {
+      newGaps += obs.seq - _lastSeq! - 1;
+    }
+    setState(() {
+      _receivedCount++;
+      _lastSeq = obs.seq;
+      _seqGaps = newGaps;
+      _lastRxMs = rxWallMs;
+      _lastIntervalMs = interval;
+      _recent.insert(0, obs);
+      if (_recent.length > 10) _recent.removeLast();
+      // Phase 4: drift 계산에 쓸 최신 obs 저장
+      _latestObs = obs;
+    });
+    _obsSink?.writeln(
+      '${obs.seq},${obs.hostTimeMs},$rxWallMs,'
+      '${obs.anchorFramePos},${obs.anchorTimeNs},'
+      '${obs.framePos},${obs.timeNs},${obs.playing ? 1 : 0}',
+    );
+    // 게스트 자체 엔진 자동 시작/정지.
+    if (obs.playing) {
+      unawaited(_ensureGuestStarted());
+    } else {
+      unawaited(_stopGuest());
+    }
+  }
+
+  // ── clock sync ────────────────────────────────────────────
+
+  /// 초기 핸드셰이크: 10번 빠르게 ping 보내고, 다 도착할 때까지
+  /// 잠깐(_syncInitialSettleDelay) 기다린 뒤 RTT 최소 샘플로 offset 확정.
+  /// 이후 주기 단계 시작.
+  Future<void> _startInitialSync() async {
+    for (int i = 0; i < _syncInitialCount; i++) {
+      if (!mounted || _socket == null) return;
+      _sendPing();
+      await Future.delayed(_syncInitialGap);
+    }
+    // orphan pong이 일부 남지 않도록 여유 시간.
+    await Future.delayed(_syncInitialSettleDelay);
+    if (!mounted) return;
+    if (_initialSamples.isNotEmpty) {
+      // RTT 최소 샘플 채택 (단방향 지연 대칭 가정이 가장 잘 성립).
+      final minSample = _initialSamples
+          .reduce((a, b) => a.rttMs < b.rttMs ? a : b);
+      setState(() {
+        _initialOffsetMs = minSample.rawOffsetMs;
+        _filteredOffsetMs = minSample.rawOffsetMs.toDouble();
+        _syncInitialized = true;
+      });
+    }
+    _startPeriodicSync();
+  }
+
+  void _startPeriodicSync() {
+    _syncTimer?.cancel();
+    _syncTimer = Timer.periodic(_syncInterval, (_) => _sendPing());
+  }
+
+  void _sendPing() {
+    final socket = _socket;
+    if (socket == null) return;
+    final seq = _syncSeqNext++;
+    final t1 = DateTime.now().millisecondsSinceEpoch;
+    _pendingPingT1[seq] = t1;
+    try {
+      socket.write(SyncPing(seq: seq, t1: t1).encodeLine());
+    } catch (_) {
+      _pendingPingT1.remove(seq);
+    }
+  }
+
+  void _handlePong(SyncPong pong, int rxWallMs) {
+    final t1 = _pendingPingT1.remove(pong.seq);
+    if (t1 == null) return; // orphan
+    final sample = _SyncSample(
+      seq: pong.seq,
+      t1: t1,
+      t2: pong.t2,
+      t3: rxWallMs,
+    );
+    _syncPongReceived++;
+    _latestRttMs = sample.rttMs;
+
+    if (!_syncInitialized) {
+      _initialSamples.add(sample);
+    } else {
+      _recentSyncWindow.add(sample);
+      if (_recentSyncWindow.length > _syncWindowSize) {
+        _recentSyncWindow.removeAt(0);
+      }
+      // 최근 창에서 RTT 최소 샘플의 offset을 "이번 측정값"으로 보고
+      // EMA로 기존 filtered와 혼합.
+      final min = _recentSyncWindow
+          .reduce((a, b) => a.rttMs < b.rttMs ? a : b);
+      final current = _filteredOffsetMs ?? min.rawOffsetMs.toDouble();
+      _filteredOffsetMs =
+          current * (1 - _syncEmaAlpha) + min.rawOffsetMs * _syncEmaAlpha;
+    }
+    _syncSink?.writeln(
+      '${sample.seq},${sample.t1},${sample.t2},${sample.t3},'
+      '${sample.rttMs},${sample.rawOffsetMs},'
+      '${_filteredOffsetMs?.toStringAsFixed(3) ?? ''},'
+      '${_syncInitialized ? "steady" : "init"}',
+    );
+    if (mounted) setState(() {});
+  }
+
+  // ── 게스트 자체 재생 ───────────────────────────────────────
+
+  Future<void> _ensureGuestStarted() async {
+    if (_guestPlaying) return;
+    try {
+      final ok = await _nativeChannel.invokeMethod<bool>('start') ?? false;
+      if (!ok || !mounted) return;
+      // 네이티브 재시작 시 mVirtualFrame은 0으로 리셋됨. Dart 앵커/누적 보정도
+      // stale 상태 방지를 위해 초기화 → 다음 poll에서 _tryEstablishAnchor 재실행.
+      _anchorHostObsFrame = null;
+      _anchorHostObsWallMs = null;
+      _anchorGuestFrame = null;
+      _anchorGuestWallMs = null;
+      _seekCorrectionAccum = 0;
+      _seekCooldownUntilMs = 0;
+      _trackingEventId = null;
+      _trackingStartMs = null;
+      _probedIndexes.clear();
+      setState(() => _guestPlaying = true);
+      _startGuestPolling();
+    } catch (e) {
+      debugPrint('guest start error: $e');
+    }
+  }
+
+  Future<void> _stopGuest() async {
+    if (!_guestPlaying) return;
+    _guestPollTimer?.cancel();
+    _guestPollTimer = null;
+    try {
+      await _nativeChannel.invokeMethod<bool>('stop');
+    } catch (_) {}
+    if (mounted) setState(() => _guestPlaying = false);
+  }
+
+  void _startGuestPolling() {
+    _guestPollTimer?.cancel();
+    _guestPollTimer = Timer.periodic(_pollInterval, (_) => _guestPollOnce());
+  }
+
+  Future<void> _guestPollOnce() async {
+    try {
+      final result = await _nativeChannel
+          .invokeMethod<Map<dynamic, dynamic>>('getTimestamp');
+      if (result == null) return;
+      final framePos = (result['framePos'] as num).toInt();
+      final timeNs = (result['timeNs'] as num).toInt();
+      // Phase 5 fix: wallMs는 네이티브에서 framePos와 원자적으로 캡처한 값.
+      // DateTime.now()와 달리 timeNs와 정합되어 drift 외삽 정확도 ↑.
+      final wallAtFramePosNs = (result['wallAtFramePosNs'] as num).toInt();
+      final wallMs = wallAtFramePosNs ~/ 1000000;
+      final ok = result['ok'] as bool;
+      _guestPolls++;
+      if (ok) {
+        _guestOkCount++;
+        _guestLastFramePos = framePos;
+        _guestLastTimeNs = timeNs;
+        _guestLastWallMs = wallMs;
+        // Phase 4: 앵커 없으면 설정 시도, 있으면 drift 재계산.
+        if (_anchorHostObsFrame == null) {
+          _tryEstablishAnchor(wallMs, framePos);
+        } else {
+          _recomputeDrift(wallMs, framePos);
+        }
+      }
+      _guestSink?.writeln('$wallMs,$framePos,$timeNs,${ok ? 1 : 0}');
+      if (mounted) setState(() {});
+    } catch (_) {
+      // 다음 poll 재시도
+    }
+  }
+
+  // ── Phase 4: drift / seek ─────────────────────────────────
+
+  /// 앵커 설정 조건:
+  ///  - 아직 앵커 없음
+  ///  - clock sync 초기화 완료 (_syncInitialized && filtered offset 있음)
+  ///  - 호스트가 재생 중인 audio-obs 최소 1건 수신
+  ///
+  /// ⚠️ 앵커 순간의 호스트 frame은 obs.framePos를 **그대로 쓰면 안 됨**.
+  /// obs는 호스트가 500ms 주기로 송출하므로 앵커 시점에 최대 500ms 오래된 값임.
+  /// 그대로 저장하면 anchorHF는 과거 시점, anchorGF는 현재 시점이 되어 시간축이
+  /// 불일치하고, 그만큼 초기 drift에 상수 오프셋이 붙음 (1차 실측 -315ms의 원인).
+  /// → 앵커 순간의 host wall clock (= guestWall + offset) 까지 obs를 선형 외삽해서
+  ///    "앵커 시점에 호스트가 만들고 있을 frame"을 저장.
+  void _tryEstablishAnchor(int wallMs, int framePos) {
+    if (!_syncInitialized) return;
+    final offset = _filteredOffsetMs;
+    if (offset == null) return;
+    final obs = _latestObs;
+    if (obs == null || !obs.playing) return;
+    final anchorHostWall = wallMs + offset;
+    final anchorHostFrameExtrapolated = obs.framePos +
+        (anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs;
+    final anchorHF = anchorHostFrameExtrapolated.round();
+
+    // ⚠️ 2차 실측 후 발견한 버그: 현재 drift 식은 (dG - dH)로 단순 rate drift만
+    // 측정함. 즉 "anchorGF와 anchorHF 사이의 초기 오프셋"이 보존됨. 연속 sine일
+    // 때는 phase만 어긋나서 귀로 모르지만, 1초 주기 비프로 바꾸면 초기 오프셋
+    // (ex: 770ms)이 그대로 들림. 3차 실측에서 드리프트 78% within 20ms인데 귀로는
+    // "아예 안 맞음"이었던 원인이 이것.
+    //
+    // 해결: 앵커 설정 시점에 게스트 mVirtualFrame을 호스트의 frame 좌표계로 즉시
+    // 점프. 이후 anchorGF == anchorHF이므로 drift = dG - dH =
+    // (effective - expected) + (anchorHF - anchorGF) = effective - expected로
+    // 절대 오정렬을 측정하게 됨.
+    //
+    // 주의: HAL 버퍼에 이미 들어간 샘플(~10-30ms)은 이전 vf로 재생됨 →
+    // 속도적 전환. 완전한 정렬은 HAL latency만큼 지연 후.
+    final currentEffective = framePos + _seekCorrectionAccum;
+    final initialCorrection = anchorHF - currentEffective;
+    unawaited(
+      _nativeChannel.invokeMethod<bool>('seekToFrame', anchorHF),
+    );
+    _seekCorrectionAccum += initialCorrection;
+
+    _anchorHostObsFrame = anchorHF;
+    _anchorHostObsWallMs = anchorHostWall.round();
+    // 초기 정렬 seek 후 anchorGF == anchorHF가 되도록 기록.
+    _anchorGuestFrame = framePos + _seekCorrectionAccum;
+    _anchorGuestWallMs = wallMs;
+
+    // HAL 버퍼 안정화 + 큰 seek로 인한 측정 노이즈 방지를 위해 초기 쿨다운.
+    _seekCooldownUntilMs = wallMs + _seekCooldown.inMilliseconds;
+  }
+
+  /// 매 게스트 poll마다 호출. 앵커 이후 drift(ms)를 재계산 + CSV 기록 +
+  /// post-seek probe + seek 판단.
+  void _recomputeDrift(int guestWallMs, int guestFramePos) {
+    final obs = _latestObs;
+    final anchorHF = _anchorHostObsFrame;
+    final anchorHW = _anchorHostObsWallMs;
+    final anchorGF = _anchorGuestFrame;
+    final anchorGW = _anchorGuestWallMs;
+    final offset = _filteredOffsetMs;
+    if (obs == null ||
+        anchorHF == null ||
+        anchorHW == null ||
+        anchorGF == null ||
+        anchorGW == null ||
+        offset == null) {
+      return;
+    }
+    // "지금 이 게스트 wall 시각"에 해당하는 호스트 wall 시각.
+    // offset > 0 = 호스트가 게스트보다 앞섬 → host_wall = guest_wall + offset.
+    final hostWallNow = guestWallMs + offset;
+    // 가장 최근 obs를 기준으로, 그 시각까지 호스트 프레임을 선형 외삽.
+    final expectedHostFrameNow = obs.framePos +
+        (hostWallNow - obs.hostTimeMs) * _idealFramesPerMs;
+    final dH = expectedHostFrameNow - anchorHF;
+    // ⚠️ seekToFrame은 mVirtualFrame만 건드리고 HAL framePos는 영향 없음.
+    // 1차 실측에서 seek를 해도 drift가 전혀 줄지 않은 원인이 이것.
+    // → 과거 seek가 mVirtualFrame에 가한 총 correction을 HAL framePos에 더해서
+    //    "만약 seek가 없었다면 있어야 할 frame 위치"를 복원한 뒤 비교.
+    final effectiveGuestFrame = guestFramePos + _seekCorrectionAccum;
+    final dG = (effectiveGuestFrame - anchorGF).toDouble();
+    final driftFrame = dG - dH; // 양수: 게스트 앞섬
+    final driftMs = driftFrame / _idealFramesPerMs;
+
+    _latestDriftMs = driftMs;
+    _driftSampleCount++;
+    _driftSink?.writeln(
+      '$guestWallMs,${obs.framePos},${obs.hostTimeMs},'
+      '$guestFramePos,$_seekCorrectionAccum,'
+      '${offset.toStringAsFixed(3)},'
+      '${expectedHostFrameNow.toStringAsFixed(1)},'
+      '${driftMs.toStringAsFixed(3)}',
+    );
+
+    // 진행 중인 seek 이벤트가 있으면 post-seek probe 기록.
+    _maybeProbePostSeek(guestWallMs, driftMs, guestFramePos);
+
+    // seek 판단 (쿨다운 중이면 알아서 skip).
+    _maybeTriggerSeek(guestWallMs, driftMs, guestFramePos);
+  }
+
+  void _maybeTriggerSeek(int wallMs, double driftMs, int guestFramePos) {
+    if (wallMs < _seekCooldownUntilMs) return;
+    if (driftMs.abs() < _driftSeekThresholdMs) return;
+    unawaited(_performSeek(wallMs, driftMs));
+  }
+
+  Future<void> _performSeek(int wallMs, double driftMs) async {
+    int currentVf;
+    try {
+      final res = await _nativeChannel.invokeMethod<dynamic>('getVirtualFrame');
+      if (res is num) {
+        currentVf = res.toInt();
+      } else {
+        return;
+      }
+    } catch (_) {
+      return;
+    }
+    // drift > 0 (게스트 앞섬) → 뒤로 이동 (프레임 감소) 필요 → correction < 0
+    // drift < 0 (게스트 뒤처짐) → 앞으로 이동 (프레임 증가) 필요 → correction > 0
+    final correctionFrames =
+        (-driftMs * _seekCorrectionGain * _idealFramesPerMs).round();
+    final newVf = currentVf + correctionFrames;
+    try {
+      final ok = await _nativeChannel
+          .invokeMethod<bool>('seekToFrame', newVf) ?? false;
+      if (!ok) return;
+    } catch (_) {
+      return;
+    }
+
+    _seekCount++;
+    _seekCooldownUntilMs = wallMs + _seekCooldown.inMilliseconds;
+    // 다음 drift 계산부터 이 보정을 반영.
+    _seekCorrectionAccum += correctionFrames;
+    final eventId = _seekNextEventId++;
+    _trackingEventId = eventId;
+    _trackingStartMs = wallMs;
+    _probedIndexes.clear();
+
+    _latestSeek = _SeekEvent(
+      eventId: eventId,
+      tSeekMs: wallMs,
+      preDriftMs: driftMs,
+      correctionFrames: correctionFrames,
+      oldVirtualFrame: currentVf,
+      newVirtualFrame: newVf,
+    );
+
+    _seekSink?.writeln(
+      '$eventId,$wallMs,0,${driftMs.toStringAsFixed(3)},'
+      '$correctionFrames,$currentVf,$newVf,pre',
+    );
+
+    if (mounted) setState(() {});
+  }
+
+  /// seek 이후 _postSeekProbeMs에 정의된 시점들마다 drift를 seek_events CSV에 찍음.
+  /// ⚠️ 3차 실측 후 변경: 앵커 재설정 제거. 초기 정렬 fix 이후, 앵커는
+  /// "effective == expected"를 의미하므로 drift는 절대 오정렬. gain=0.8이면
+  /// 매 seek 후 20% 잔차가 남는데, 재설정하면 잔차가 "새 기준선"으로 흡수되어
+  /// 오디오가 여전히 어긋나 있는데도 drift=0으로 보임. 재설정 없이 잔차는 다음
+  /// poll에서 다시 측정되어 다음 seek가 추가 보정.
+  void _maybeProbePostSeek(int wallMs, double driftMs, int guestFramePos) {
+    final eventId = _trackingEventId;
+    final startMs = _trackingStartMs;
+    if (eventId == null || startMs == null) return;
+    final elapsed = wallMs - startMs;
+    for (int idx = 0; idx < _postSeekProbeMs.length; idx++) {
+      if (_probedIndexes.contains(idx)) continue;
+      if (elapsed >= _postSeekProbeMs[idx]) {
+        _seekSink?.writeln(
+          '$eventId,$wallMs,$elapsed,${driftMs.toStringAsFixed(3)},'
+          ',,,probe',
+        );
+        _probedIndexes.add(idx);
+      }
+    }
+    if (_probedIndexes.length >= _postSeekProbeMs.length) {
+      _trackingEventId = null;
+      _trackingStartMs = null;
+      _probedIndexes.clear();
     }
   }
 
   @override
   void dispose() {
     _lineSub?.cancel();
+    _syncTimer?.cancel();
+    _guestPollTimer?.cancel();
+    // 게스트 엔진이 돌고 있다면 정지 신호만 던짐 (비동기 응답 안 기다림).
+    if (_guestPlaying) {
+      _nativeChannel.invokeMethod('stop').ignore();
+    }
     try {
       _socket?.destroy();
     } catch (_) {}
     // IOSink는 close()가 pending write를 flush함.
-    _logSink?.close();
+    _obsSink?.close();
+    _syncSink?.close();
+    _guestSink?.close();
+    _driftSink?.close();
+    _seekSink?.close();
     super.dispose();
   }
 
@@ -785,7 +1450,7 @@ class _GuestPageState extends State<GuestPage> {
     final t = Theme.of(context);
     return Scaffold(
       appBar: AppBar(title: const Text('Guest · Phase 2')),
-      body: Padding(
+      body: SingleChildScrollView(
         padding: const EdgeInsets.all(16),
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
@@ -839,25 +1504,144 @@ class _GuestPageState extends State<GuestPage> {
               ),
             ),
             const SizedBox(height: 12),
-            Text('최근 수신 (최신순)', style: t.textTheme.titleSmall),
-            const SizedBox(height: 4),
-            Expanded(
-              child: ListView.builder(
-                itemCount: _recent.length,
-                itemBuilder: (_, i) {
-                  final o = _recent[i];
-                  return Padding(
-                    padding: const EdgeInsets.symmetric(vertical: 2),
-                    child: Text(
-                      'seq=${o.seq}  host=${o.hostTimeMs}  '
-                      'frame=${o.framePos}  play=${o.playing ? 1 : 0}',
-                      style: t.textTheme.bodySmall
-                          ?.copyWith(fontFamily: 'monospace'),
+            // Phase 3: clock sync 상태
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('clock sync', style: t.textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    _kvRow(
+                      t,
+                      '단계',
+                      _syncInitialized
+                          ? 'steady (주기)'
+                          : 'init (${_initialSamples.length}/$_syncInitialCount)',
                     ),
-                  );
-                },
+                    _kvRow(t, 'pong 수신', '$_syncPongReceived'),
+                    _kvRow(
+                      t,
+                      '최근 RTT',
+                      _latestRttMs > 0 ? '$_latestRttMs ms' : '—',
+                    ),
+                    _kvRow(
+                      t,
+                      '초기 offset',
+                      _initialOffsetMs != null
+                          ? '${_initialOffsetMs!} ms'
+                          : '—',
+                    ),
+                    _kvRow(
+                      t,
+                      'filtered offset',
+                      _filteredOffsetMs != null
+                          ? '${_filteredOffsetMs!.toStringAsFixed(1)} ms'
+                          : '—',
+                    ),
+                  ],
+                ),
               ),
             ),
+            const SizedBox(height: 12),
+            // Phase 3: 게스트 자체 재생 상태
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('게스트 재생', style: t.textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    _kvRow(t, '재생 상태', _guestPlaying ? '재생 중 ✓' : '정지'),
+                    _kvRow(t, '폴링', '$_guestPolls'),
+                    _kvRow(
+                      t,
+                      'ok',
+                      '$_guestOkCount'
+                      '${_guestPolls > 0 ? ' (${(_guestOkCount * 100 / _guestPolls).toStringAsFixed(0)}%)' : ''}',
+                    ),
+                    _kvRow(
+                      t,
+                      'last framePos',
+                      _guestLastFramePos?.toString() ?? '—',
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            // Phase 4: drift / seek 상태
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('drift / seek (Phase 4)',
+                        style: t.textTheme.titleSmall),
+                    const SizedBox(height: 4),
+                    _kvRow(
+                      t,
+                      '앵커 설정',
+                      _anchorHostObsFrame != null ? '✓' : '대기 중',
+                    ),
+                    _kvRow(
+                      t,
+                      '현재 drift',
+                      _latestDriftMs != null
+                          ? '${_latestDriftMs!.toStringAsFixed(2)} ms'
+                              '${_latestDriftMs! > 0 ? ' (게스트 앞섬)' : ' (게스트 뒤처짐)'}'
+                          : '—',
+                    ),
+                    _kvRow(t, 'drift 샘플', '$_driftSampleCount'),
+                    _kvRow(t, 'seek 횟수', '$_seekCount'),
+                    if (_latestSeek != null) ...[
+                      const SizedBox(height: 4),
+                      Text(
+                        '마지막 seek: '
+                        'id=${_latestSeek!.eventId} '
+                        'pre=${_latestSeek!.preDriftMs.toStringAsFixed(1)}ms '
+                        'Δ=${_latestSeek!.correctionFrames} frames',
+                        style: t.textTheme.bodySmall?.copyWith(
+                          fontFamily: 'monospace',
+                        ),
+                      ),
+                    ],
+                    _kvRow(
+                      t,
+                      '쿨다운',
+                      _seekCooldownUntilMs >
+                              DateTime.now().millisecondsSinceEpoch
+                          ? '진행 중'
+                          : '—',
+                    ),
+                    _kvRow(
+                      t,
+                      'post-seek probe',
+                      _trackingEventId != null
+                          ? '${_probedIndexes.length}/${_postSeekProbeMs.length}'
+                          : '—',
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Text('최근 수신 (최신순)', style: t.textTheme.titleSmall),
+            const SizedBox(height: 4),
+            // SingleChildScrollView 안이라 Expanded 못 씀 → 고정 높이.
+            for (final o in _recent)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 2),
+                child: Text(
+                  'seq=${o.seq}  host=${o.hostTimeMs}  '
+                  'frame=${o.framePos}  play=${o.playing ? 1 : 0}',
+                  style: t.textTheme.bodySmall
+                      ?.copyWith(fontFamily: 'monospace'),
+                ),
+              ),
           ],
         ),
       ),
