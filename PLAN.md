@@ -271,12 +271,49 @@
 - 커밋: `3ed267a` PoC Phase 1: Oboe getTimestamp 폴링 + 시계열 확보
 
 **다음 작업 (Phase 2~6)**
-- [ ] **Phase 2**: P2P `audio-obs` 송수신 — 두 번째 기기 필요 (에뮬레이터 or 실기기)
-- [ ] Phase 3: drift 계산 (선형 보간)
+- [x] **Phase 2**: P2P `audio-obs` 송수신 (S22 호스트 + S10 게스트 실기기 2대, 2026-04-09 통과)
+- [ ] Phase 3: drift 계산 (선형 보간) + clock sync (sync-ping/pong)
 - [ ] Phase 4: seek 보정 + drift-report
 - [ ] Phase 5: 정적 noise floor 측정
 - [ ] Phase 6: S22 30분 stress + 네트워크 블립
 - [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
+
+#### 2026-04-09 PoC Phase 2 완료
+
+**구현 (PoC 격리 원칙: 최소 P2P만)**
+- [x] `lib/main.dart`: `RoleSelectionPage` → `HostPage` / `GuestPage` 2-path 구조
+- [x] `AudioObs` 모델: `seq`, `hostTimeMs`, `anchor(FramePos/TimeNs)`, `framePos`, `timeNs`, `playing` (PLAN.md §8)
+- [x] 호스트: `ServerSocket.bind(anyIPv4, 7777)` + `Timer.periodic(500ms)` broadcast, JSON line (`\n` 구분)
+- [x] 게스트: `Socket.connect` + `LineSplitter` → CSV 로그 (`getExternalStorageDirectory`)
+- [x] anchor 전략: 재생 시작 후 첫 ok 샘플을 기록, 재생 중 재앵커링 없음
+- [x] `AndroidManifest.xml` INTERNET 권한 추가, `path_provider 2.1.5` 의존성 추가
+- [x] `NetworkInterface.list` wlan* 우선 선택 + 디버깅용 후보 리스트 표시
+  (한국 통신사 환경에서 `clat4` (192.0.0.4, NAT64) 가상 인터페이스가 먼저 뽑히는 버그 수정)
+
+**PoC 격리 원칙 적용 (§6-2)**
+- 디스커버리 / join / welcome 없음 → IP 수동 입력, TCP 다이렉트
+- 메시지 1종 (`audio-obs`)만 구현, drift-report는 Phase 4로 미룸
+- 네이티브(Oboe/JNI) 변경 없음, Phase 1 인터페이스 그대로 재사용
+- 에뮬은 제외 (가상 네트워크/HAL이 실기기 조건과 달라 참고 가치 제한적, Phase 3에서 로직 verify 용도로 선택적 추가 검토)
+
+**Phase 2 실측 (2026-04-09, S22 SM-S901N Android 16 + S10 SM-G977N Android 12, 60.4s)**
+
+| 항목 | 값 | 판정 |
+|---|---|---|
+| seq 연속성 | 0~121 (122개), gaps=0 | ✅ |
+| 호스트 송신 주기 | mean 498.8ms, stdev 13.2ms, p5~p95 498~502 | ✅ Timer 매우 정확 |
+| 게스트 수신 주기 | mean 498.0ms, stdev 67.8ms, p5~p95 400~605 | ✅ 평균 OK, 지터는 큼 |
+| framePos/timeNs 단조 | OK | ✅ |
+| frames/ms | 48.0003 (60s) | ✅ Phase 1과 동일, 장시간 안정 |
+| rx-host offset | mean 507ms, range 473~636 (clock offset + 네트워크 지연 혼재) | ⚠ 분리 불가 |
+
+→ **§6-1 질문 1 (네이티브 엔진 sub-ms 정밀도) 재확인**. 60초 동안 frames/ms = 48.0003로 유지.
+→ **§6-1 질문 2 (Wi-Fi clock sync 노이즈)는 아직 분리 불가**. rx-host offset의 변동(±40ms stdev)은 clock offset과 네트워크 지연이 섞여 있어, Phase 3에서 `sync-ping/pong` 구현 후에야 순수 clock 노이즈 분리 가능.
+
+**Phase 2 → Phase 3 전달 사항**
+- **주목 1**: 게스트 수신 주기의 stdev(67.8ms)가 호스트 송신(13.2ms)의 ~5배. 순수 네트워크 + 게스트 OS 스케줄링 지터가 크므로, Phase 3 drift 계산은 개별 샘플이 아닌 **smoothing(선형 회귀 or EMA)** 전제 필요.
+- **주목 2**: Dart `Timer.periodic`은 드리프트 누적 없이 정확 (stdev 13.2ms). 120회 중 이상치 1개(min 355ms, 0.8%).
+- CSV 로그: `/tmp/synchorus_poc_phase2/audio_obs_2026-04-09T21-03-31-781504.csv` (임시 위치, 참고용)
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
@@ -983,8 +1020,8 @@ class AudioError {
 |---|---|---|---|
 | 0 | Oboe 래퍼 + 단순 재생 | "소리 나옴" 확인 | ✅ 2026-04-08 S22 통과 |
 | 1 | getTimestamp 폴링 + 파일 로그 | (framePos, ns) 시계열 확보 | ✅ 2026-04-08 S22 통과 |
-| 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 | **다음** (2번째 기기 필요) |
-| 3 | drift 계산 (선형 보간) | drift 시계열 로그 | 대기 |
+| 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 | ✅ 2026-04-09 S22+S10 통과 |
+| 3 | drift 계산 (선형 보간) + clock sync | drift 시계열 로그, 네트워크 지연 분리 | **다음** |
 | 4 | seek 보정 + drift-report | 보정 전/후 비교 | 대기 |
 | 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor | 대기 |
 | 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 | 대기 |
@@ -997,6 +1034,16 @@ class AudioError {
 - `framePos` 단조 ✓ / `timeNs` (CLOCK_MONOTONIC) 단조 ✓
 - `Timer.periodic(100ms)` + MethodChannel 폴링, ok 유효율 거의 100%
 → **PoC 6-1의 질문 1번 (네이티브 엔진 정밀도 sub-ms)에 긍정 답**. `(framePos, deviceTimeNs)` pair가 JNI→Kotlin→MethodChannel→Dart 경로를 거쳐 손상 없이 도달 확인.
+
+**Phase 2 실측 결과 (2026-04-09, S22 SM-S901N Android 16 호스트 + S10 SM-G977N Android 12 게스트, 60.4s)**
+- TCP 다이렉트(JSON over `\n`), 500ms 주기 broadcast, 총 122개 수신
+- **seq 연속성**: gaps = 0 ✅ (유실/재정렬 없음)
+- **호스트 송신 주기**: mean 498.8ms, stdev 13.2ms (Timer 매우 정확)
+- **게스트 수신 주기**: mean 498.0ms, stdev 67.8ms (평균은 보존, 지터는 크다)
+- **frames/ms = 48.0003** — Phase 1과 동일값, 60초 장시간 안정
+- **rx-host offset**: mean 507ms, range 473~636 (clock offset + 네트워크 지연 혼재, 분리는 Phase 3에서)
+→ **§6-1 질문 1 재확인** (sub-ms 정밀도 장시간 안정).
+→ **§6-1 질문 2는 아직 미답** — 수신 지터가 5배 크다는 사실은 확인했으나, 이게 WiFi 노이즈인지 게스트 OS 스케줄링인지 분리 못함. `sync-ping/pong` 구현 필요.
 
 코드: `poc/native_audio_engine_android/` (독립 Flutter 프로젝트, 본 앱과 세션 충돌 방지 위해 격리)
 

@@ -1,4 +1,7 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
+    <!-- PoC Phase 2: TCP 소켓으로 audio-obs 송수신 (같은 WiFi 내 P2P) -->
+    <uses-permission android:name="android.permission.INTERNET"/>
+
     <application
         android:label="native_audio_engine_android"
         android:name="${applicationName}"
