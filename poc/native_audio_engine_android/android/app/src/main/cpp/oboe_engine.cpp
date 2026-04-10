@@ -25,8 +25,20 @@
 
 namespace {
 
-constexpr float kSineFrequencyHz = 440.0f;
 constexpr float kAmplitude = 0.3f;
+// C major 음계 (도레미파솔라시도). 1초마다 다음 음으로 순환.
+// 싱크 맞으면 같은 음, 1초 어긋나면 다른 음이 들림 → 청각 검증 용이.
+constexpr float kNoteFrequencies[] = {
+    261.63f,  // C4 (도)
+    293.66f,  // D4 (레)
+    329.63f,  // E4 (미)
+    349.23f,  // F4 (파)
+    392.00f,  // G4 (솔)
+    440.00f,  // A4 (라)
+    493.88f,  // B4 (시)
+    523.25f,  // C5 (도)
+};
+constexpr int kNumNotes = sizeof(kNoteFrequencies) / sizeof(kNoteFrequencies[0]);
 // 1초 주기 비프음 파라미터. 귀로 에코/지연을 체감하기 위함.
 // period = 1s, beep = 100ms, 나머지 900ms 무음. 비프 시작/끝 5ms fade로
 // 클릭음 방지. 모두 sampleRate 기반이라 실제 스트림 rate 따라감.
@@ -157,8 +169,6 @@ public:
         auto* output = static_cast<float*>(audioData);
         const int channelCount = stream->getChannelCount();
         const double sr = static_cast<double>(mSampleRate);
-        const double twoPiFreqOverSr =
-            2.0 * M_PI * static_cast<double>(kSineFrequencyHz) / sr;
         // 비프 파라미터 → frame 단위 변환. sampleRate 기반이라 스트림 rate 변경에
         // 자동 적응.
         const int64_t beepPeriodFrames =
@@ -177,8 +187,15 @@ public:
 
             float sample = 0.0f;
             if (mod < beepDurationFrames) {
-                // 비프 ON 구간: sine 생성 + fade 엔벨로프로 클릭 제거.
-                const double phase = twoPiFreqOverSr * static_cast<double>(vf);
+                // 몇 번째 비트인지 → 음계 선택 (도레미파솔라시도 순환).
+                // (vf - mod)은 현재 주기의 시작점, 나누면 beat index.
+                const int64_t beatIndex = (vf - mod) / beepPeriodFrames;
+                const int noteIdx = static_cast<int>(
+                    ((beatIndex % kNumNotes) + kNumNotes) % kNumNotes);
+                const double freq = static_cast<double>(kNoteFrequencies[noteIdx]);
+                // mod 기준 phase → 매 비프가 phase 0에서 시작 (클릭 방지).
+                const double phase = 2.0 * M_PI * freq
+                    * static_cast<double>(mod) / sr;
                 float env = 1.0f;
                 if (mod < beepFadeFrames) {
                     // fade-in: 0 → 1

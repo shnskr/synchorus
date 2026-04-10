@@ -193,6 +193,10 @@ class AudioObs {
   final int framePos;
   final int timeNs;
   final bool playing;
+  /// 호스트의 virtual playhead (seek 반영). HAL framePos와 달리
+  /// seekToFrame 시 즉시 점프하므로, 게스트는 이 값으로 drift를 계산해야
+  /// 호스트 seek을 감지할 수 있음.
+  final int virtualFrame;
 
   const AudioObs({
     required this.seq,
@@ -202,6 +206,7 @@ class AudioObs {
     required this.framePos,
     required this.timeNs,
     required this.playing,
+    required this.virtualFrame,
   });
 
   Map<String, dynamic> toJson() => {
@@ -213,6 +218,7 @@ class AudioObs {
         'framePos': framePos,
         'timeNs': timeNs,
         'playing': playing,
+        'virtualFrame': virtualFrame,
       };
 
   factory AudioObs.fromJson(Map<String, dynamic> m) => AudioObs(
@@ -223,6 +229,7 @@ class AudioObs {
         framePos: (m['framePos'] as num).toInt(),
         timeNs: (m['timeNs'] as num).toInt(),
         playing: m['playing'] as bool,
+        virtualFrame: (m['virtualFrame'] as num).toInt(),
       );
 
   /// '\n' 붙인 송신용 라인.
@@ -333,6 +340,9 @@ class _HostPageState extends State<HostPage> {
   // ── Phase 2: anchor (재생 시작 후 첫 ok 샘플) ─────────────
   int? _anchorFramePos;
   int? _anchorTimeNs;
+
+  // ── 호스트 virtual frame 캐시 (broadcast용) ──────────────
+  int _cachedVirtualFrame = 0;
 
   // ── Phase 2: TCP 서버 + broadcast ────────────────────────
   ServerSocket? _server;
@@ -496,6 +506,27 @@ class _HostPageState extends State<HostPage> {
     }
   }
 
+  /// 호스트 수동 seek: 현재 virtual frame에서 deltaSeconds초만큼 점프.
+  /// 게스트가 다음 audio-obs에서 큰 drift를 감지 → seek 보정 작동 확인용.
+  Future<void> _seekBy(int deltaSeconds) async {
+    if (!_playing) return;
+    final frames = deltaSeconds * mSampleRate;
+    try {
+      final vf = await _nativeChannel.invokeMethod<int>('getVirtualFrame') ?? 0;
+      final newVf = vf + frames;
+      final ok = await _nativeChannel.invokeMethod<bool>('seekToFrame', newVf) ?? false;
+      if (!mounted) return;
+      setState(() => _lastLog = 'seek ${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}s → $ok (vf: $vf→$newVf)');
+    } catch (e) {
+      if (!mounted) return;
+      setState(() => _lastLog = 'seek 에러: $e');
+    }
+  }
+
+  /// PoC에서는 48000 고정이지만, 네이티브 sampleRate와 일치시키는 게 정확.
+  /// 간단 PoC라 하드코딩.
+  static const int mSampleRate = 48000;
+
   void _startPolling() {
     _pollTimer?.cancel();
     _samples.clear();
@@ -513,6 +544,9 @@ class _HostPageState extends State<HostPage> {
       final result = await _nativeChannel
           .invokeMethod<Map<dynamic, dynamic>>('getTimestamp');
       if (!mounted || result == null) return;
+      // virtual frame도 같이 캐싱 (broadcastOnce에서 사용).
+      final vf = await _nativeChannel.invokeMethod<int>('getVirtualFrame') ?? 0;
+      _cachedVirtualFrame = vf;
       // Phase 5 fix: wallMs는 네이티브에서 clock_gettime으로 찍은
       // "framePos가 DAC에 나간 순간의 wall clock". Dart DateTime.now()와 달리
       // framePos와 정합되는 값이라 drift 외삽에 안전.
@@ -583,6 +617,7 @@ class _HostPageState extends State<HostPage> {
       framePos: latest.framePos,
       timeNs: latest.timeNs,
       playing: _playing,
+      virtualFrame: _cachedVirtualFrame,
     );
     final line = obs.encodeLine();
     // 복사본으로 순회 (removeClient가 목록을 변경할 수 있음).
@@ -728,6 +763,31 @@ class _HostPageState extends State<HostPage> {
               onPressed: _toggle,
               icon: Icon(_playing ? Icons.stop : Icons.play_arrow),
               label: Text(_playing ? '정지' : '재생'),
+            ),
+            const SizedBox(height: 8),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                OutlinedButton(
+                  onPressed: _playing ? () => _seekBy(-10) : null,
+                  child: const Text('-10s'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: _playing ? () => _seekBy(-3) : null,
+                  child: const Text('-3s'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: _playing ? () => _seekBy(3) : null,
+                  child: const Text('+3s'),
+                ),
+                const SizedBox(width: 8),
+                OutlinedButton(
+                  onPressed: _playing ? () => _seekBy(10) : null,
+                  child: const Text('+10s'),
+                ),
+              ],
             ),
             const SizedBox(height: 4),
             Text(_lastLog,
@@ -1255,7 +1315,7 @@ class _GuestPageState extends State<GuestPage> {
     final obs = _latestObs;
     if (obs == null || !obs.playing) return;
     final anchorHostWall = wallMs + offset;
-    final anchorHostFrameExtrapolated = obs.framePos +
+    final anchorHostFrameExtrapolated = obs.virtualFrame +
         (anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs;
     final anchorHF = anchorHostFrameExtrapolated.round();
 
@@ -1309,8 +1369,9 @@ class _GuestPageState extends State<GuestPage> {
     // "지금 이 게스트 wall 시각"에 해당하는 호스트 wall 시각.
     // offset > 0 = 호스트가 게스트보다 앞섬 → host_wall = guest_wall + offset.
     final hostWallNow = guestWallMs + offset;
-    // 가장 최근 obs를 기준으로, 그 시각까지 호스트 프레임을 선형 외삽.
-    final expectedHostFrameNow = obs.framePos +
+    // 가장 최근 obs의 virtualFrame(seek 반영) 기준으로 호스트 프레임을 선형 외삽.
+    // HAL framePos는 seek에 무관하게 단조 증가하므로 drift 계산에 쓰면 안 됨.
+    final expectedHostFrameNow = obs.virtualFrame +
         (hostWallNow - obs.hostTimeMs) * _idealFramesPerMs;
     final dH = expectedHostFrameNow - anchorHF;
     // ⚠️ seekToFrame은 mVirtualFrame만 건드리고 HAL framePos는 영향 없음.
@@ -1339,7 +1400,22 @@ class _GuestPageState extends State<GuestPage> {
     _maybeTriggerSeek(guestWallMs, driftMs, guestFramePos);
   }
 
+  /// 200ms 이상 drift는 호스트 seek이나 재생 재시작으로 판단 → 앵커 재설정.
+  /// 점진적 gain=0.8 보정으로는 타겟이 움직이는 상황에서 수렴 불가.
+  static const double _reAnchorThresholdMs = 200.0;
+
   void _maybeTriggerSeek(int wallMs, double driftMs, int guestFramePos) {
+    if (driftMs.abs() >= _reAnchorThresholdMs) {
+      // 큰 drift (호스트 seek 등) → 쿨다운 무시, 즉시 앵커 리셋.
+      // _latestObs는 유지 — 감지 시점의 obs가 이미 호스트 seek 후 값이므로
+      // 다음 poll에서 바로 _tryEstablishAnchor가 이 obs로 재정렬 가능.
+      _anchorHostObsFrame = null;
+      _anchorHostObsWallMs = null;
+      _anchorGuestFrame = null;
+      _anchorGuestWallMs = null;
+      _seekCooldownUntilMs = 0;
+      return;
+    }
     if (wallMs < _seekCooldownUntilMs) return;
     if (driftMs.abs() < _driftSeekThresholdMs) return;
     unawaited(_performSeek(wallMs, driftMs));

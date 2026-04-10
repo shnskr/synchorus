@@ -272,12 +272,8 @@
 
 **다음 작업 (Phase 2~6)**
 - [x] **Phase 2**: P2P `audio-obs` 송수신 (S22 호스트 + S10 게스트 실기기 2대, 2026-04-09 통과)
-- [~] **Phase 3 (진행 중, 2026-04-09)**: clock sync (sync-ping/pong) + 게스트 자체 엔진 재생 + 원시 CSV 3종
-  - **접근**: 온디바이스는 원시 수집 + 단일 기본 알고리즘, drift 알고리즘 비교는 **오프라인 Python**에서 (§6-2 "변수 하나씩" 원칙 확장)
-  - **clock sync 알고리즘**: 초기 10회 빠른 ping → RTT-min offset / 주기 1s ping, 최근 5개 window, RTT-min → EMA(α=0.1) `filtered = old*0.9 + new*0.1`
-  - **왜 EMA**: 선형 회귀·Kalman보다 설명·디버깅 쉬움. 드리프트가 빠르게 변하지 않는 환경에서는 충분. 추가 알고리즘은 오프라인 분석으로 벤치마크 후 본 구현에서 교체 여부 결정.
-- [ ] Phase 4: seek 보정 + drift-report
-- [ ] Phase 5: 정적 noise floor 측정
+- [x] **Phase 3**: clock sync (sync-ping/pong EMA) + 게스트 자체 엔진 재생 + 원시 CSV 3종
+- [x] **Phase 4~5**: seek 보정 루프 + 시간축 원자화 + 호스트 seek 대응 (11차 실측 통과)
 - [ ] Phase 6: S22 30분 stress + 네트워크 블립
 - [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
 
@@ -476,48 +472,90 @@
 - Dart `_pollOnce`/`_guestPollOnce`: `DateTime.now()` 제거, `result['wallAtFramePosNs'] ~/ 1000000` 사용
 - 이로써 `Sample.wallMs`와 `framePos`가 네이티브에서 원자적으로 엮여 샘플 간 rate가 일관됨
 
-**현재 상태 (빌드 완료, 테스트 미실행)**
-- 빌드: `flutter build apk --debug` ✓ (2026-04-10, `oboe_engine.cpp` + JNI + Kotlin + Dart)
-- **APK 위치**: `build/app/outputs/flutter-apk/app-debug.apk`
-- **설치 상태**: S10 설치 시도 중 기기 분리 → 미설치. S22도 미설치.
-- **다음 세션 시작 시 할 일**:
-  1. S10 연결 확인 후 `adb install -r build/app/outputs/flutter-apk/app-debug.apk`
-  2. USB 교체 → S22에도 설치
-  3. 5차 테스트: 4차와 동일 절차 (호스트/게스트 각 역할 선택 → 재생 → 약 2분 → 정지)
-  4. 청각 확인: 비프음이 두 기기에서 동시에 "띡!" 들리는지
-  5. S10(게스트)에서 `drift_*.csv` + `seek_events_*.csv` + `audio_obs_*.csv` 추출
-  6. `analysis/phase4_drift_vs_seek.py <session>` 실행해서 통계 확인
-  7. 기대값: `|drift|<20ms` 90%+, 스파이크 제거 (±20ms 이내), 청각상 완전 일치
+#### 2026-04-10 PoC Phase 5 실측 (5~11차)
 
-**수정된 파일 목록 (5차 테스트 대상 코드)**
-- `android/app/src/main/cpp/oboe_engine.cpp`: 비프음 + `wallAtFramePosNs` 반환 + `#include <time.h>`
-- `android/app/src/main/kotlin/.../NativeAudio.kt`: 주석
-- `android/app/src/main/kotlin/.../MainActivity.kt`: `getTimestamp` Map에 `wallAtFramePosNs` 추가
-- `lib/main.dart`:
-  - `Sample.wallMs` 시맨틱 코멘트 업데이트
-  - `_pollOnce` / `_guestPollOnce`: 네이티브 `wallAtFramePosNs` 사용
-  - `_tryEstablishAnchor`: 초기 정렬 seek + 쿨다운 설정
-  - `_recomputeDrift`: `effectiveGuestFrame = framePos + _seekCorrectionAccum`
-  - `_performSeek`: `_seekCorrectionAccum += correctionFrames`
-  - `_maybeProbePostSeek`: 앵커 재설정 제거
-  - `_ensureGuestStarted`: stale state 리셋
-  - `_broadcastOnce`: `hostTimeMs: latest.wallMs`
-  - `_seekCorrectionAccum` 필드 신설
-  - drift CSV에 `seekAccum` 열 추가
-  - GuestPage UI: `SingleChildScrollView` + drift/seek 카드
+기기: S22(SM-S901N, 호스트) + Z플립4(SM-F721N, 게스트). USB 1대씩 교체 설치.
 
-**분석 스크립트**
-- `analysis/phase4_drift_vs_seek.py` (이번에 신설): drift 시계열 + seek 이벤트 통합 분석
-  - 입력: `drift_<session>.csv`, `seek_events_<session>.csv`
-  - 출력: `output/phase4_<session>.png` (시계열 + pre/post scatter) + stdout 통계
-  - venv 필요: `source analysis/.venv/bin/activate`
+**비프음 음계 전환**
+- [x] 440Hz 고정 → C major 음계(도레미파솔라시도) 8음 순환, 1초마다 다음 음
+- 목적: 동일 음 반복 시 1초 지연을 구분 불가 → 음계로 청각 검증 정확도 향상
 
-**실측 세션 목록 (전부 S10 외부저장소에 있음)**
-- `2026-04-09T23-15-08-800629` (1차, 버그 A/B)
-- `2026-04-09T23-34-15-698589` (2차, 스파이크 발견)
-- `2026-04-09T23-51-51-182343` (3차, 버그 D 발견)
-- `2026-04-10T00-09-00-052681` (4차, 버그 E 발견)
-- `/Users/dal/IdeaProjects/synchorus/poc/native_audio_engine_android/analysis/data/` 에 1~4차 전부 pull 완료
+**호스트 seek 버튼 추가**
+- [x] HostPage에 -10s/-3s/+3s/+10s 버튼, `seekToFrame(vf + delta*48000)` 호출
+- [x] `_cachedVirtualFrame`: poll 시 같이 캐싱, broadcastOnce에서 사용
+
+**5차 실측 (연속 재생)** — 버그 E 수정 효과 확인
+| 항목 | 값 |
+|---|---|
+| |drift| < 5ms | 82.8% |
+| |drift| < 10ms | **100%** |
+| max |drift| | 8.9ms |
+| seek 보정 | 0건 |
+| 청각 | 완전 일치 ✓ |
+
+**6차 실측 (play/stop 반복)**
+| 항목 | 값 |
+|---|---|
+| |drift| < 5ms | 89.8% |
+| |drift| < 10ms | **100%** |
+| max |drift| | 8.0ms |
+| seek 보정 | 0건 |
+| 청각 | 완전 일치 ✓ |
+
+→ 버그 E(시간축 원자화) 수정으로 스파이크 완전 제거. play/stop 반복에도 안정.
+
+**7차 실측 (호스트 seek)** — 버그 F 발견
+- drift 데이터 99.8% < 20ms로 보였으나 **청각상 게스트가 seek을 전혀 안 따라감**
+- **버그 F**: `audio-obs`가 HAL `framePos`만 보냄. HAL framePos는 seek 무관 단조 증가 → 게스트가 호스트 seek 감지 불가
+- 수정: `AudioObs`에 `virtualFrame` 필드 추가, drift 계산 및 앵커 외삽을 `obs.virtualFrame` 기준으로 변경
+
+**8차 실측 (호스트 seek + 연타)** — 버그 G 발견
+- max |drift| = 42s, seek 보정이 연쇄 폭주
+- **버그 G**: 큰 drift에서 `gain=0.8` 점진 보정 → 타겟이 움직이는 상황에서 수렴 불가, 과보정↔미보정 진동
+- 수정: |drift| ≥ 200ms → 앵커 재설정 방식 전환 (점진 보정 대신 즉시 재정렬)
+
+**9차 실측** — 앵커 재설정 동작 확인, 과도 구간 잔존
+- 앵커 재설정 후 즉시 ~0ms 복구 확인
+- 단, 쿨다운(1s) + stale obs 대기로 스파이크 600~900ms 유지
+- 수정: 앵커 재설정 시 쿨다운 해제 + stale obs 무효화
+
+**10차 실측** — 과도 구간 대폭 축소
+- 스파이크 대부분 1샘플(100ms), 700ms 스파이크 1건
+- |drift| < 20ms: 89%, 청각 확인 양호
+
+**11차 실측 (최종)** — obs 유지 최적화
+- `_latestObs` null 제거: 감지 시점 obs가 이미 호스트 seek 후 값이므로 유지
+| 항목 | 값 |
+|---|---|
+| |drift| < 10ms | 64.5% (seek 과도 구간 포함) |
+| |drift| < 20ms | 86.4% (seek 과도 구간 포함) |
+| |drift| > 50ms | 25건 (4.2%), **전부 1샘플(100ms) 스파이크** |
+| max |drift| | 30018ms (호스트 +30s seek 직후 1회) |
+| 안정 상태 (seek 제외) | < 10ms 100%, max 9ms |
+| 청각 | 완전 일치 ✓ |
+
+→ 호스트 seek 후 재정렬: 데이터상 1 poll(100ms), 체감 최대 ~600ms (obs 주기 대기).
+→ 안정 상태 drift는 5차/6차와 동일하게 < 10ms 100%.
+
+**발견/수정 버그 요약 (이번 세션)**
+| 버그 | 원인 | 수정 |
+|---|---|---|
+| F | audio-obs가 HAL framePos만 전송, 호스트 seek 감지 불가 | `virtualFrame` 필드 추가, drift/앵커 계산 기준 변경 |
+| G | 큰 drift에서 gain=0.8 점진 보정 발산 | |drift| ≥ 200ms → 앵커 재설정 |
+
+**실측 세션 목록**
+- 1~4차: S22 + S10, `analysis/data/`에 pull 완료
+- `2026-04-10T09-40-52-528321` (5차, 연속 재생)
+- `2026-04-10T09-47-00-913275` (6차, play/stop 반복)
+- `2026-04-10T09-52-57-659060` (7차, 호스트 seek — 버그 F)
+- `2026-04-10T10-02-11-824919` (8차, seek 연타 — 버그 G)
+- `2026-04-10T10-09-21-658055` (9차, 앵커 재설정 + 과도 구간)
+- `2026-04-10T10-18-02-600315` (10차, stale obs 무효화)
+- `2026-04-10T10-29-03-446402` (11차, obs 유지 최종)
+
+**다음 작업**
+- [ ] Phase 6: S22 30분 stress + 네트워크 블립
+- [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
