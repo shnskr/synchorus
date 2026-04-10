@@ -274,7 +274,7 @@
 - [x] **Phase 2**: P2P `audio-obs` 송수신 (S22 호스트 + S10 게스트 실기기 2대, 2026-04-09 통과)
 - [x] **Phase 3**: clock sync (sync-ping/pong EMA) + 게스트 자체 엔진 재생 + 원시 CSV 3종
 - [x] **Phase 4~5**: seek 보정 루프 + 시간축 원자화 + 호스트 seek 대응 (11차 실측 통과)
-- [ ] Phase 6: S22 30분 stress + 네트워크 블립
+- [x] **Phase 6**: S22 30분 stress 통과 (2026-04-10, |drift|<20ms 99.9%, seek 17회/31분)
 - [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
 
 #### 2026-04-09 PoC Phase 2 완료
@@ -552,9 +552,38 @@
 - `2026-04-10T10-09-21-658055` (9차, 앵커 재설정 + 과도 구간)
 - `2026-04-10T10-18-02-600315` (10차, stale obs 무효화)
 - `2026-04-10T10-29-03-446402` (11차, obs 유지 최종)
+- `2026-04-10T12-46-36-013824` (연속 재생 검증, drift<10ms 100%)
+- `2026-04-10T13-06-00-238661` (Phase 6, 31분 stress)
+
+#### 2026-04-10 PoC Phase 6: 30분 stress + drift/seek 구조 정리
+
+**drift 계산 구조 정리 (버그 H~I 수정)**
+- 12~15차 실측에서 연속 재생 시 drift 진동 발견 (5ms/500ms 계단식)
+- **버그 H**: `virtualFrame` rate가 `framePos`(HAL)와 미세하게 다름 → drift 계산에 virtualFrame 사용 시 누적 오차
+- **버그 I**: `framePos`만 사용하면 호스트 seek 감지 불가 (framePos는 seek에 무관하게 단조 증가)
+- **해결**: 역할 분리
+  - **rate drift 추적**: `framePos`(HAL 하드웨어 클록) 기반 → 정확
+  - **콘텐츠 정렬**: `virtualFrame` 기반 — 매 poll마다 `_checkContentAlignment`로 게스트 vf ≈ 호스트 vf 확인, 4800 frames(100ms) 이상 차이 시 즉시 보정
+  - **호스트 seek 전달**: `seek-notify` TCP 메시지 + 콘텐츠 정렬 체크가 안전망
+  - **초기 정렬**: `_tryEstablishAnchor`에서 앵커는 `framePos` 기반, seek 목표는 `virtualFrame` 기반
+
+**Phase 6 실측 (2026-04-10, S22 호스트 + Z플립4 게스트, 31분 연속 재생)**
+| 항목 | 값 |
+|---|---|
+| 총 시간 | 31분 (18,753 samples) |
+| |drift| < 10ms | 70.5% |
+| |drift| < 20ms | **99.9%** |
+| |drift| > 50ms | 1건 (77.5ms, 단발) |
+| mean drift | -1.7ms |
+| seek 보정 | 17회 (~110초에 1회, 하드웨어 클록 차이 보정) |
+| 시간대별 안정성 | 전 구간 mean |d| = 5~10ms, 발산 없음 |
+| clock sync | 1,888회, offset 안정 |
+| 청각 | 31분간 싱크 유지 ✓ |
+
+→ 장시간 drift 발산 없음, EMA clock sync 지속 보정 확인.
 
 **다음 작업**
-- [ ] Phase 6: S22 30분 stress + 네트워크 블립
+- [ ] 네트워크 블립 테스트 (WiFi 일시 끊김 → 복구 후 재동기화)
 - [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
 
 #### 알려진 이슈 / 다음에 확인할 것

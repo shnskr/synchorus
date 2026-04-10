@@ -22,6 +22,7 @@ class MainActivity : FlutterActivity() {
                                 "timeNs" to arr[1],
                                 "wallAtFramePosNs" to arr[2],
                                 "ok" to (arr[3] == 1L),
+                                "virtualFrame" to arr[4],
                             )
                         )
                     }

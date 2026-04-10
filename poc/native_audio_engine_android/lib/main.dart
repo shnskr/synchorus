@@ -175,12 +175,16 @@ class Sample {
   // 단위로 저장. Dart에서 DateTime.now()를 쓰면 네이티브 호출 이전/이후 jitter로
   // 샘플마다 편차(최대 수십 ms)가 생겨 drift 계산에 직접 오차로 누적됨.
   final int wallMs;
+  /// 같은 getTimestamp 호출에서 원자적으로 캡처된 virtualFrame.
+  /// framePos와 항상 같은 시점이므로 broadcast에서 짝이 맞음.
+  final int virtualFrame;
 
   Sample({
     required this.framePos,
     required this.timeNs,
     required this.ok,
     required this.wallMs,
+    required this.virtualFrame,
   });
 }
 
@@ -507,7 +511,7 @@ class _HostPageState extends State<HostPage> {
   }
 
   /// 호스트 수동 seek: 현재 virtual frame에서 deltaSeconds초만큼 점프.
-  /// 게스트가 다음 audio-obs에서 큰 drift를 감지 → seek 보정 작동 확인용.
+  /// seek 후 즉시 seek-notify 메시지를 게스트에 전송 → 게스트가 앵커 리셋.
   Future<void> _seekBy(int deltaSeconds) async {
     if (!_playing) return;
     final frames = deltaSeconds * mSampleRate;
@@ -516,6 +520,20 @@ class _HostPageState extends State<HostPage> {
       final newVf = vf + frames;
       final ok = await _nativeChannel.invokeMethod<bool>('seekToFrame', newVf) ?? false;
       if (!mounted) return;
+      if (ok) {
+        // 게스트에 즉시 seek-notify + delta 전송 → 게스트도 같은 양만큼 점프
+        final line = '${jsonEncode({
+          'type': 'seek-notify',
+          'deltaFrames': frames,
+        })}\n';
+        for (final c in List<Socket>.from(_clients)) {
+          try {
+            c.write(line);
+          } catch (_) {
+            _removeClient(c);
+          }
+        }
+      }
       setState(() => _lastLog = 'seek ${deltaSeconds > 0 ? "+" : ""}${deltaSeconds}s → $ok (vf: $vf→$newVf)');
     } catch (e) {
       if (!mounted) return;
@@ -544,18 +562,18 @@ class _HostPageState extends State<HostPage> {
       final result = await _nativeChannel
           .invokeMethod<Map<dynamic, dynamic>>('getTimestamp');
       if (!mounted || result == null) return;
-      // virtual frame도 같이 캐싱 (broadcastOnce에서 사용).
-      final vf = await _nativeChannel.invokeMethod<int>('getVirtualFrame') ?? 0;
-      _cachedVirtualFrame = vf;
       // Phase 5 fix: wallMs는 네이티브에서 clock_gettime으로 찍은
       // "framePos가 DAC에 나간 순간의 wall clock". Dart DateTime.now()와 달리
       // framePos와 정합되는 값이라 drift 외삽에 안전.
       final wallAtFramePosNs = (result['wallAtFramePosNs'] as num).toInt();
+      final vf = (result['virtualFrame'] as num).toInt();
+      _cachedVirtualFrame = vf;
       final s = Sample(
         framePos: (result['framePos'] as num).toInt(),
         timeNs: (result['timeNs'] as num).toInt(),
         ok: result['ok'] as bool,
         wallMs: wallAtFramePosNs ~/ 1000000,
+        virtualFrame: vf,
       );
       // 첫 ok 샘플을 anchor로 기록.
       if (s.ok && _anchorFramePos == null) {
@@ -617,7 +635,7 @@ class _HostPageState extends State<HostPage> {
       framePos: latest.framePos,
       timeNs: latest.timeNs,
       playing: _playing,
-      virtualFrame: _cachedVirtualFrame,
+      virtualFrame: latest.virtualFrame,
     );
     final line = obs.encodeLine();
     // 복사본으로 순회 (removeClient가 목록을 변경할 수 있음).
@@ -1106,6 +1124,11 @@ class _GuestPageState extends State<GuestPage> {
         _handleAudioObs(AudioObs.fromJson(m), rxWallMs);
       } else if (type == 'sync-pong') {
         _handlePong(SyncPong.fromJson(m), rxWallMs);
+      } else if (type == 'seek-notify') {
+        // 호스트가 deltaFrames만큼 seek → 게스트도 동일 delta 적용.
+        // 앵커/drift 계산은 framePos 기반이라 영향 없음 — 콘텐츠 위치만 맞춤.
+        final delta = (m['deltaFrames'] as num).toInt();
+        _applyHostSeek(delta);
       }
     } catch (e) {
       debugPrint('parse error: $e line=$line');
@@ -1225,6 +1248,47 @@ class _GuestPageState extends State<GuestPage> {
 
   // ── 게스트 자체 재생 ───────────────────────────────────────
 
+  /// 콘텐츠 정렬 체크: 게스트 virtualFrame ≈ 호스트 virtualFrame인지 확인.
+  /// 4800 frames(100ms) 이상 차이나면 즉시 보정.
+  /// framePos 기반 drift 계산은 rate만 보므로, 콘텐츠 위치(어떤 음)는 여기서 잡음.
+  static const int _contentAlignThreshold = 4800; // 100ms
+
+  Future<void> _checkContentAlignment(int guestWallMs) async {
+    final obs = _latestObs;
+    final offset = _filteredOffsetMs;
+    if (obs == null || !obs.playing || offset == null) return;
+    // 호스트의 예상 virtualFrame (지금 이 순간)
+    final hostWallNow = guestWallMs + offset;
+    final expectedHostVf = obs.virtualFrame +
+        ((hostWallNow - obs.hostTimeMs) * _idealFramesPerMs).round();
+    // 게스트의 현재 virtualFrame
+    int guestVf;
+    try {
+      guestVf = await _nativeChannel.invokeMethod<int>('getVirtualFrame') ?? 0;
+    } catch (_) {
+      return;
+    }
+    final diff = (expectedHostVf - guestVf).abs();
+    if (diff > _contentAlignThreshold) {
+      // 콘텐츠 불일치 → 게스트를 호스트 위치로 즉시 점프
+      await _nativeChannel.invokeMethod<bool>('seekToFrame', expectedHostVf);
+      debugPrint('content align: diff=$diff frames, seekTo=$expectedHostVf');
+    }
+  }
+
+  /// 호스트 seek에 대응: 게스트 virtualFrame을 동일 delta만큼 점프.
+  /// framePos/앵커/drift 계산에는 영향 없음 — 콘텐츠 위치만 맞춤.
+  Future<void> _applyHostSeek(int deltaFrames) async {
+    if (!_guestPlaying) return;
+    try {
+      final vf = await _nativeChannel.invokeMethod<int>('getVirtualFrame') ?? 0;
+      final newVf = vf + deltaFrames;
+      await _nativeChannel.invokeMethod<bool>('seekToFrame', newVf);
+      // _seekCorrectionAccum은 건드리지 않음 — host seek delta는 drift 보정이
+      // 아니라 콘텐츠 정렬. framePos 기반 drift 계산에는 영향 없어야 함.
+    } catch (_) {}
+  }
+
   Future<void> _ensureGuestStarted() async {
     if (_guestPlaying) return;
     try {
@@ -1287,6 +1351,10 @@ class _GuestPageState extends State<GuestPage> {
         } else {
           _recomputeDrift(wallMs, framePos);
         }
+        // 콘텐츠 정렬 체크: 게스트 virtualFrame이 호스트 virtualFrame과 맞는지.
+        // framePos 기반 drift는 "속도"만 보고 "위치"를 모름.
+        // 호스트 seek, 초기 정렬 미스 등을 여기서 잡음.
+        _checkContentAlignment(wallMs);
       }
       _guestSink?.writeln('$wallMs,$framePos,$timeNs,${ok ? 1 : 0}');
       if (mounted) setState(() {});
@@ -1315,27 +1383,20 @@ class _GuestPageState extends State<GuestPage> {
     final obs = _latestObs;
     if (obs == null || !obs.playing) return;
     final anchorHostWall = wallMs + offset;
-    final anchorHostFrameExtrapolated = obs.virtualFrame +
+    // drift 추적용 앵커: framePos 기반 (rate 정확).
+    final anchorHostFrameExtrapolated = obs.framePos +
         (anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs;
     final anchorHF = anchorHostFrameExtrapolated.round();
 
-    // ⚠️ 2차 실측 후 발견한 버그: 현재 drift 식은 (dG - dH)로 단순 rate drift만
-    // 측정함. 즉 "anchorGF와 anchorHF 사이의 초기 오프셋"이 보존됨. 연속 sine일
-    // 때는 phase만 어긋나서 귀로 모르지만, 1초 주기 비프로 바꾸면 초기 오프셋
-    // (ex: 770ms)이 그대로 들림. 3차 실측에서 드리프트 78% within 20ms인데 귀로는
-    // "아예 안 맞음"이었던 원인이 이것.
-    //
-    // 해결: 앵커 설정 시점에 게스트 mVirtualFrame을 호스트의 frame 좌표계로 즉시
-    // 점프. 이후 anchorGF == anchorHF이므로 drift = dG - dH =
-    // (effective - expected) + (anchorHF - anchorGF) = effective - expected로
-    // 절대 오정렬을 측정하게 됨.
-    //
-    // 주의: HAL 버퍼에 이미 들어간 샘플(~10-30ms)은 이전 vf로 재생됨 →
-    // 속도적 전환. 완전한 정렬은 HAL latency만큼 지연 후.
+    // 콘텐츠 정렬: virtualFrame 기반 (실제 재생 위치).
+    // framePos는 "몇 번째 출력"이고, virtualFrame은 "어떤 음을 만들고 있는지".
+    // 게스트는 호스트와 같은 콘텐츠를 재생해야 하므로 virtualFrame으로 점프.
+    final hostContentFrame = obs.virtualFrame +
+        ((anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs).round();
     final currentEffective = framePos + _seekCorrectionAccum;
     final initialCorrection = anchorHF - currentEffective;
     unawaited(
-      _nativeChannel.invokeMethod<bool>('seekToFrame', anchorHF),
+      _nativeChannel.invokeMethod<bool>('seekToFrame', hostContentFrame),
     );
     _seekCorrectionAccum += initialCorrection;
 
@@ -1369,9 +1430,9 @@ class _GuestPageState extends State<GuestPage> {
     // "지금 이 게스트 wall 시각"에 해당하는 호스트 wall 시각.
     // offset > 0 = 호스트가 게스트보다 앞섬 → host_wall = guest_wall + offset.
     final hostWallNow = guestWallMs + offset;
-    // 가장 최근 obs의 virtualFrame(seek 반영) 기준으로 호스트 프레임을 선형 외삽.
-    // HAL framePos는 seek에 무관하게 단조 증가하므로 drift 계산에 쓰면 안 됨.
-    final expectedHostFrameNow = obs.virtualFrame +
+    // framePos(HAL, 하드웨어 클록)로 외삽. rate 정확.
+    // 호스트 seek은 별도 seek-notify 메시지로 처리.
+    final expectedHostFrameNow = obs.framePos +
         (hostWallNow - obs.hostTimeMs) * _idealFramesPerMs;
     final dH = expectedHostFrameNow - anchorHF;
     // ⚠️ seekToFrame은 mVirtualFrame만 건드리고 HAL framePos는 영향 없음.

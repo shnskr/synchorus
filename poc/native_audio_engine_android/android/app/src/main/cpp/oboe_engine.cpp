@@ -110,12 +110,14 @@ public:
     bool getLatestTimestamp(
         int64_t* outFramePos,
         int64_t* outTimeNs,
-        int64_t* outWallAtFramePosNs) {
+        int64_t* outWallAtFramePosNs,
+        int64_t* outVirtualFrame) {
         std::lock_guard<std::mutex> lock(mLock);
         if (!mStream) {
             *outFramePos = -1;
             *outTimeNs = -1;
             *outWallAtFramePosNs = -1;
+            *outVirtualFrame = 0;
             return false;
         }
         int64_t framePos = 0;
@@ -125,6 +127,7 @@ public:
             *outFramePos = -1;
             *outTimeNs = -1;
             *outWallAtFramePosNs = -1;
+            *outVirtualFrame = 0;
             return false;
         }
         // getTimestamp 바로 직후 두 시계를 같이 찍음. 이 두 타임스탬프 사이 간격은
@@ -142,6 +145,8 @@ public:
         *outFramePos = framePos;
         *outTimeNs = timeNs;
         *outWallAtFramePosNs = wallNow - gap;
+        // 같은 lock 안에서 virtualFrame도 읽어서 wallMs와 원자적으로 묶음.
+        *outVirtualFrame = mVirtualFrame.load(std::memory_order_relaxed);
         return true;
     }
 
@@ -250,22 +255,23 @@ Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeStop(
 }
 
 // Phase 1: Flutter가 100ms 주기로 polling.
-// 반환 배열: [framePos, timeNs, wallAtFramePosNs, ok(1|0)]
+// 반환 배열: [framePos, timeNs, wallAtFramePosNs, ok(1|0), virtualFrame]
 // wallAtFramePosNs는 "framePos가 DAC에 나간 순간의 CLOCK_REALTIME (ns)".
-// Dart는 이걸 ms로 나눠서 "sample의 wall 시각"으로 사용 → framePos와 정합.
+// virtualFrame은 같은 lock 안에서 읽은 mVirtualFrame — wallMs와 원자적 정합.
 JNIEXPORT jlongArray JNICALL
 Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeGetTimestamp(
     JNIEnv* env, jobject /*thiz*/) {
     int64_t framePos = -1;
     int64_t timeNs = -1;
     int64_t wallAtFramePosNs = -1;
+    int64_t virtualFrame = 0;
     const bool ok = engine().getLatestTimestamp(
-        &framePos, &timeNs, &wallAtFramePosNs);
-    jlongArray arr = env->NewLongArray(4);
-    const jlong values[4] = {
-        framePos, timeNs, wallAtFramePosNs, ok ? 1L : 0L
+        &framePos, &timeNs, &wallAtFramePosNs, &virtualFrame);
+    jlongArray arr = env->NewLongArray(5);
+    const jlong values[5] = {
+        framePos, timeNs, wallAtFramePosNs, ok ? 1L : 0L, virtualFrame
     };
-    env->SetLongArrayRegion(arr, 0, 4, values);
+    env->SetLongArrayRegion(arr, 0, 5, values);
     return arr;
 }
 
