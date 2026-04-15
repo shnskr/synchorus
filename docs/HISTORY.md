@@ -693,9 +693,16 @@
 - [x] `NativeAudio.kt`에 `nativeLoadFile` JNI, `MainActivity.kt`에 loadFile 핸들러
 - [x] getTimestamp JNI 배열 5→7 확장 (sampleRate, totalFrames 추가)
 
-**양 플랫폼 빌드 통과**, 실기기 파일 재생 테스트 필요
+**테스트 UI**
+- [x] `lib/screens/native_test_screen.dart` 생성 — 파일 선택/재생/정지/seek + getTimestamp 폴링(200ms)
+- [x] `lib/screens/home_screen.dart`에 "Native Engine Test" 버튼 추가
 
-**다음**: 실기기 테스트 → step 1-3 (P2P + clock sync + drift 보정 통합)
+**S22 실기기 테스트 (2026-04-15)**
+- 파일 로드 ✅, 재생/정지 ✅, seek(±3s/±10s) ✅
+- sampleRate: 44100 Hz (파일 네이티브 레이트 정상 보고)
+- virtualFrame/totalFrames 정상 동작 확인
+
+**다음**: step 1-3 (P2P + clock sync + drift 보정 통합)
 
 #### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
 

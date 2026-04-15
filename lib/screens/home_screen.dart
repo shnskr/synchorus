@@ -8,6 +8,7 @@ import 'package:package_info_plus/package_info_plus.dart';
 import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
 import '../services/p2p_service.dart';
+import 'native_test_screen.dart';
 import 'room_screen.dart';
 
 class HomeScreen extends ConsumerStatefulWidget {
@@ -210,6 +211,17 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           mainAxisAlignment: MainAxisAlignment.center,
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
+            // [임시] v3 네이티브 엔진 테스트
+            OutlinedButton.icon(
+              onPressed: () => Navigator.push(
+                context,
+                MaterialPageRoute(builder: (_) => const NativeTestScreen()),
+              ),
+              icon: const Icon(Icons.science),
+              label: const Text('Native Engine Test'),
+            ),
+            const SizedBox(height: 16),
+
             // 방 만들기 버튼
             ElevatedButton.icon(
               onPressed: _createRoom,
