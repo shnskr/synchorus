@@ -589,7 +589,24 @@
 - **결론**: 동기화 정밀도와 무관한 네트워크 복구 문제. 본 앱(v2)에 자동 재연결/heartbeat 이미 구현되어 있으므로 v3 본 구현에서 재사용.
 
 **다음 작업**
-- [ ] iOS PoC (AVAudioEngine `lastRenderTime` 기반, Android PoC 통과 후)
+- [ ] iOS PoC Phase 2: P2P audio-obs 송수신
+
+#### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
+
+**프로젝트 생성**
+- [x] `poc/native_audio_engine_ios/` 독립 Flutter 앱 생성
+- [x] `AudioEngine.swift`: AVAudioEngine + AVAudioSourceNode render block, 음계 비프(C4~C5), os_unfair_lock
+- [x] `AppDelegate.swift`: MethodChannel `com.synchorus.poc/native_audio` (start/stop/getTimestamp/seekToFrame/getVirtualFrame)
+- [x] MethodChannel 인터페이스 Android PoC와 동일 → Phase 2부터 main.dart 공유 가능
+
+**Phase 0+1 실측 (2026-04-15, iPhone, iOS 26.4.1)**
+| 항목 | iOS (iPhone) | Android (S22) |
+|---|---|---|
+| frames/ms | **48.0010** | 48.0003 |
+| Monotonic framePos | ✓ | ✓ |
+| Monotonic timeNs | ✓ | ✓ |
+
+→ 48kHz 정확 일치, Android PoC와 동등한 정밀도 확인
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
