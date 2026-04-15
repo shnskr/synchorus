@@ -643,8 +643,13 @@
 → 역방향도 **100% ±20ms 이내**. 호스트/게스트 역할 무관하게 크로스플랫폼 싱크 동작 확인.
 → S22 외부 저장소 경로가 `/storage/emulated/95/` (멀티유저)인 점 발견.
 
+**drift mean +4.5ms 원인 분석 (완료)**
+- [x] clock sync offset이 25분간 -320ms → -278ms로 42ms 이동 (crystal 속도 차이 ~28ppm, 정상)
+- [x] EMA 필터가 천천히 추적하면서 drift mean이 구간별 -5ms ~ +10ms 진동
+- [x] **iOS latency 과보정 아님** — 고정 오프셋이 아닌 동적 진동. 코드 수정 불필요
+- [x] 27분 스파이크: clock sync offset이 +800ms로 급변 (네트워크 일시 장애) → 자동 복구 확인
+
 **다음 작업**
-- [ ] drift mean 오프셋 원인 조사 (iOS latency 과보정 가능성, 수 ms 수준)
 - [ ] PoC → 본 구현 통합 계획 수립
 
 #### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
