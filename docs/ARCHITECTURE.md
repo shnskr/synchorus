@@ -337,27 +337,36 @@ drift = observedP_g - expectedP_at_Tg
 
 ### 5. Flutter ↔ 네이티브 인터페이스
 
-#### 5-1. 현재 구현 (step 1-1, MethodChannel 단일)
-
-PoC에서 검증 완료된 패턴. MethodChannel 폴링 방식으로 동작 확인됨.
+#### 5-1. 현재 구현 (step 1-2, MethodChannel 단일)
 
 **채널명**: `com.synchorus/native_audio` (Android/iOS 동일)
+**Dart 래퍼**: `lib/services/native_audio_service.dart`
 
 **구현된 메서드**:
 
 | 메서드 | 인자 | 반환 | 용도 |
 |---|---|---|---|
-| `start` | 없음 | `bool` | 엔진 시작 (AVAudioSession/Oboe stream 초기화) |
+| `loadFile` | `String` (파일 절대경로) | `bool` | 오디오 파일 디코딩/로드 |
+| `start` | 없음 | `bool` | 엔진 시작 + 재생 (loadFile 후 호출) |
 | `stop` | 없음 | `bool` | 엔진 정지 + 노드 해제 |
-| `getTimestamp` | 없음 | `Map` | `{framePos, timeNs, wallAtFramePosNs, ok, virtualFrame, sampleRate, ...}` |
-| `seekToFrame` | `int64` (숫자 직접) | `bool` | virtualFrame 즉시 갱신 |
-| `getVirtualFrame` | 없음 | `int64` | 현재 virtualFrame 조회 |
+| `getTimestamp` | 없음 | `Map` | `{framePos, timeNs, wallAtFramePosNs, ok, virtualFrame, sampleRate, totalFrames, ...}` |
+| `seekToFrame` | `int64` (숫자 직접) | `bool` | 재생 위치 점프 (파일 프레임 단위) |
+| `getVirtualFrame` | 없음 | `int64` | 현재 콘텐츠 위치 조회 |
+
+**네이티브 구현**:
+- Android: NDK AMediaCodec 전체 디코딩 → int16 버퍼 → Oboe float 콜백 (`oboe_engine.cpp`)
+- iOS: AVAudioPlayerNode + AVAudioFile 스트리밍 재생 (`AudioEngine.swift`)
 
 **파일 위치**:
+- Dart: `lib/services/native_audio_service.dart`
 - Android: `android/app/src/main/cpp/oboe_engine.cpp` + `NativeAudio.kt` + `MainActivity.kt`
 - iOS: `ios/Runner/AudioEngine.swift` + `AppDelegate.swift`
 
-#### 5-2. 향후 확장 계획 (step 1-2+)
+**제한**:
+- Android: 전체 파일 메모리 디코딩 (150MB 제한, ~5분 곡). 향후 스트리밍 디코딩 전환 가능
+- sampleRate/virtualFrame은 파일 네이티브 샘플레이트 기준
+
+#### 5-2. 향후 확장 계획 (step 1-3+)
 
 EventChannel 추가로 native 자발적 push 전환 검토:
 
@@ -368,14 +377,11 @@ EventChannel 추가로 native 자발적 push 전환 검토:
 
 **왜 분리**: MethodChannel만 쓰면 Flutter가 50-100ms마다 polling 해야 함 → 폴링 자체가 노이즈 원천. 관측은 native 자발적 push가 정답.
 
-**확장 시 추가될 API** (step 1-2에서 구체화):
-- `prepareSource(url)` — 오디오 파일 디코딩 재생
-- `play()` / `pause()` — 재생 제어
-- `setRate(double)` — drift 보정용 재생 속도 조절
+**확장 시 추가될 API**:
+- `setRate(double)` — drift 보정용 재생 속도 조절 (step 1-3 또는 step 4)
 
 **설계 포인트**:
 - **앵커는 native가 관리**, Flutter는 받기만 (play/seek 호출 시 native 갱신)
-- **`setRate`는 본 구현 단계에서 추가** (PoC에선 seek만으로 보정)
 - **에러는 fatal/recoverable 구분**
 
 

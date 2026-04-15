@@ -83,7 +83,7 @@
 | 단계 | 내용 | 상태 |
 |---|---|---|
 | 1-1 | 네이티브 엔진 본체 앱 이식 (Android Oboe + iOS AVAudioEngine) | ✅ 2026-04-15 |
-| 1-2 | Dart 서비스 레이어 (NativeAudioService) + 오디오 파일 디코딩 재생 | |
+| 1-2 | Dart 서비스 레이어 (NativeAudioService) + 오디오 파일 디코딩 재생 | ✅ 2026-04-15 |
 | 1-3 | P2P + clock sync + drift 보정 통합 | |
 | 1-4 | 백그라운드 재생 (audio_service 연동) | |
 | 2 | 1:1 → 1:N 멀티 게스트 확장 | |

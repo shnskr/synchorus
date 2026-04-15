@@ -6,6 +6,9 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 
 | 결정 | 이유 |
 |---|---|
+| Android 파일 디코딩: NDK AMediaCodec 전체 메모리 디코딩 | 스트리밍보다 단순, 150MB 제한으로 ~5분 곡 커버. iOS는 AVAudioPlayerNode가 자체 스트리밍 |
+| iOS 파일 재생: AVAudioPlayerNode + scheduleSegment | AVAudioSourceNode 수동 렌더링 대비 메모리/코드 최소, seek = stop→scheduleSegment→play |
+| virtualFrame/sampleRate는 파일 네이티브 레이트 기준 | 양 플랫폼 동일 단위로 Dart 서비스 레이어 단일화. 시간 변환: `ms = vf * 1000 / sampleRate` |
 | 본체 앱 MethodChannel명 `com.synchorus/native_audio` | PoC(`com.synchorus.poc/native_audio`)와 구분. Android/iOS 동일 채널명으로 Dart 서비스 레이어 단일화 |
 | iOS MethodChannel 인자는 Dart 원시값 직접 전달 | Android Kotlin(`call.arguments as Number`)과 동일 패턴. 딕셔너리 래핑 시 silent fail 위험 (b0415-7 버그) |
 | iOS 출력 지연 = outputLatency + ioBufferDuration | Apple 포럼 합의. `outputPresentationLatency`는 ioBuffer 미포함. 노드 latency도 합산하되 보통 0 |

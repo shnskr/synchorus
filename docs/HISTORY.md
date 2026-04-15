@@ -673,6 +673,30 @@
 
 **다음**: step 1-2 (Dart 서비스 레이어 + 오디오 파일 재생) 또는 drift 과보정 분석
 
+#### 2026-04-15 v3 본체 앱 통합 step 1-2: 오디오 파일 디코딩 재생
+
+**Dart**
+- [x] `lib/services/native_audio_service.dart` 생성 — MethodChannel 래퍼 (loadFile/start/stop/getTimestamp/seekToFrame/getVirtualFrame)
+
+**iOS**
+- [x] `AudioEngine.swift` 전면 교체: AVAudioSourceNode(비프) → AVAudioPlayerNode + AVAudioFile(파일 재생)
+- [x] `scheduleSegment` 기반 seek 구현 (stop → reschedule → play)
+- [x] `playerTime(forNodeTime:)` 기반 virtualFrame 계산 (seekFrameOffset + playerTime.sampleTime)
+- [x] getTimestamp에 totalFrames 추가
+- [x] `AppDelegate.swift`에 loadFile 핸들러 추가
+
+**Android**
+- [x] `oboe_engine.cpp` 전면 교체: 비프 생성 → NDK AMediaExtractor+AMediaCodec 디코딩
+- [x] int16 버퍼 전체 디코딩 (150MB 제한), Oboe callback에서 float 변환
+- [x] Oboe SRC 활성화 (파일 샘플레이트 ≠ 하드웨어 시 자동 변환)
+- [x] `CMakeLists.txt`에 `mediandk` 링크 추가
+- [x] `NativeAudio.kt`에 `nativeLoadFile` JNI, `MainActivity.kt`에 loadFile 핸들러
+- [x] getTimestamp JNI 배열 5→7 확장 (sampleRate, totalFrames 추가)
+
+**양 플랫폼 빌드 통과**, 실기기 파일 재생 테스트 필요
+
+**다음**: 실기기 테스트 → step 1-3 (P2P + clock sync + drift 보정 통합)
+
 #### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
 
 **프로젝트 생성**
