@@ -650,7 +650,28 @@
 - [x] 27분 스파이크: clock sync offset이 +800ms로 급변 (네트워크 일시 장애) → 자동 복구 확인
 
 **다음 작업**
-- [ ] PoC → 본 구현 통합 계획 수립
+- [x] PoC → 본 구현 통합 step 1-1 완료
+
+#### 2026-04-15 v3 본체 앱 통합 step 1-1: 네이티브 오디오 엔진 이식
+
+**Android**
+- [x] `oboe_engine.cpp` 복사 (JNI 함수명 `Java_com_synchorus_synchorus_NativeAudio_*`로 변경)
+- [x] `CMakeLists.txt` + `build.gradle.kts` (Oboe 1.9.0 prefab, NDK arm64-v8a/armeabi-v7a)
+- [x] `NativeAudio.kt` JNI 브릿지, `MainActivity.kt`에 `com.synchorus/native_audio` 채널 추가
+- [x] Android debug 빌드 통과
+
+**iOS**
+- [x] `AudioEngine.swift` 복사 (PoC와 동일, AVAudioEngine + AVAudioSourceNode)
+- [x] `AppDelegate.swift`에 AudioEngine + MethodChannel 추가 (seekToFrame: NSNumber 직접 파싱)
+- [x] `project.pbxproj` 수동 편집 (PBXBuildFile/FileReference/Group/SourcesBuildPhase 4곳)
+- [x] iOS debug 빌드 통과
+
+**MethodChannel 인터페이스** (양 플랫폼 동일)
+- 채널명: `com.synchorus/native_audio`
+- 메서드: start, stop, getTimestamp, seekToFrame, getVirtualFrame
+- seekToFrame: Dart에서 숫자 직접 전달 (딕셔너리 아님)
+
+**다음**: step 1-2 (Dart 서비스 레이어 + 오디오 파일 재생) 또는 drift 과보정 분석
 
 #### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
 
