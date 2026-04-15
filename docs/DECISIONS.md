@@ -6,6 +6,7 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 
 | 결정 | 이유 |
 |---|---|
+| 본체 앱 MethodChannel명 `com.synchorus/native_audio` | PoC(`com.synchorus.poc/native_audio`)와 구분. Android/iOS 동일 채널명으로 Dart 서비스 레이어 단일화 |
 | iOS MethodChannel 인자는 Dart 원시값 직접 전달 | Android Kotlin(`call.arguments as Number`)과 동일 패턴. 딕셔너리 래핑 시 silent fail 위험 (b0415-7 버그) |
 | iOS 출력 지연 = outputLatency + ioBufferDuration | Apple 포럼 합의. `outputPresentationLatency`는 ioBuffer 미포함. 노드 latency도 합산하되 보통 0 |
 | 네이티브 엔진(Oboe/AVAudioEngine) 도입 | just_audio + 플랫폼 채널로는 출력 시각의 sub-ms 측정 불가 |
