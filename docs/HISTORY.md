@@ -588,8 +588,32 @@
 - WiFi 복구 후 TCP 재연결 없음 (PoC에 재연결 미구현) → 호스트 명령 수신 불가
 - **결론**: 동기화 정밀도와 무관한 네트워크 복구 문제. 본 앱(v2)에 자동 재연결/heartbeat 이미 구현되어 있으므로 v3 본 구현에서 재사용.
 
+#### 2026-04-15 iOS PoC Phase 2~6: 크로스플랫폼 싱크 (Android S22 호스트 ↔ iPhone 게스트)
+
+**b0415-1~6: 기본 연결 + 배포 + 지연 보정**
+- [x] Android PoC의 main.dart (Phase 2~6) 복사 → iOS PoC에 적용
+- [x] `mSampleRate` 동적 갱신 (하드웨어 실제 값 사용, 48000Hz 확인)
+- [x] iOS release 빌드/배포 플로우 확립 (`flutter build ios --release` → Xcode Run → Stop debugger → 수동 실행)
+- [x] `AVAudioSession.outputLatency + ioBufferDuration` 동적 보정 (hw=10.3ms + io=5.0ms)
+- [x] CSV 진단 데이터 출력 (drift/sync/audio_obs/guest_ts)
+
+**b0415-7: seekToFrame 파싱 버그 수정 — 1초 콘텐츠 오프셋 해결**
+- [x] **원인**: `AppDelegate.swift` seekToFrame 핸들러가 `call.arguments`를 `[String: Any]` 딕셔너리로 파싱 시도 → Dart는 숫자 직접 전달 → 항상 FlutterError 반환 → seekToFrame 한 번도 성공한 적 없음
+- [x] **증상**: drift 2ms (rate 정확) but 실제 오디오 ~1초 뒤처짐 (virtualFrame 정렬 실패)
+- [x] **수정**: `call.arguments as? NSNumber` 로 변경 (Android Kotlin과 동일 방식)
+- [x] **결과**: 3회 실측 drift mean -5.6ms ~ +1.3ms, 귀로 동시 재생 확인
+
+**실측 데이터 (b0415-7, iPhone ↔ S22)**
+| 세션 | drift 평균 | 범위 | 샘플 |
+|------|-----------|------|------|
+| 21-34 | +1.25ms | -2.2 ~ +4.3ms | 396 |
+| 21-50 | -2.87ms | -7.2 ~ +2.5ms | 386 |
+| 21-52 | -5.61ms | -8.9 ~ +0.0ms | 477 |
+
 **다음 작업**
-- [ ] iOS PoC Phase 2: P2P audio-obs 송수신
+- [ ] drift 평균 -5ms 오프셋 원인 조사 (iOS outputLatency 보정 정밀도 개선 여지)
+- [ ] 호스트 정지/퇴장 시 게스트 자동 정지 (현재 비프음 계속 재생됨)
+- [ ] 30분 stress 테스트
 
 #### 2026-04-15 iOS PoC Phase 0+1: AVAudioEngine + getTimestamp
 

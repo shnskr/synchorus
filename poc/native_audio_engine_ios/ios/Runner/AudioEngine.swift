@@ -7,7 +7,7 @@ class AudioEngine {
     private let engine = AVAudioEngine()
     private var sourceNode: AVAudioSourceNode?
 
-    private let sampleRate: Double = 48000
+    private var sampleRate: Double = 48000  // start()에서 실제 하드웨어 값으로 갱신
     private var _virtualFrame: Int64 = 0
     private let lockPtr: UnsafeMutablePointer<os_unfair_lock>
 
@@ -49,11 +49,17 @@ class AudioEngine {
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
-            try session.setPreferredSampleRate(sampleRate)
+            try session.setPreferredSampleRate(48000)
+            try session.setPreferredIOBufferDuration(0.005)  // 5ms 저지연 버퍼
             try session.setActive(true)
 
+            // 하드웨어가 실제로 적용한 샘플레이트 사용 (48000 요청해도 44100일 수 있음)
+            let hwRate = session.sampleRate
+            sampleRate = hwRate
+            print("[AudioEngine] hw sampleRate=\(hwRate), ioBufferDuration=\(session.ioBufferDuration), outputLatency=\(session.outputLatency)")
+
             guard let format = AVAudioFormat(
-                standardFormatWithSampleRate: sampleRate, channels: 2
+                standardFormatWithSampleRate: hwRate, channels: 2
             ) else { return false }
 
             let beepPeriodFrames = Int(Self.beepPeriodSec * Float(sampleRate))
@@ -137,6 +143,10 @@ class AudioEngine {
 
     /// Android PoC의 nativeGetTimestamp와 동일한 반환 형태:
     /// {framePos, timeNs, wallAtFramePosNs, ok, virtualFrame}
+    ///
+    /// ⚠️ iOS lastRenderTime은 "렌더링 시점"이고, Android Oboe getTimestamp는
+    /// "DAC 출력 시점". iOS에서는 AVAudioSession.outputLatency만큼 보정해야
+    /// 실제 스피커 출력 시점과 일치함.
     func getTimestamp() -> [String: Any] {
         guard let lastRenderTime = engine.outputNode.lastRenderTime,
               lastRenderTime.isSampleTimeValid,
@@ -145,7 +155,19 @@ class AudioEngine {
             return ["ok": false]
         }
 
-        let framePos = lastRenderTime.sampleTime  // AVAudioFramePosition (Int64)
+        // 총 출력 지연 = 하드웨어 출력 지연 + IO 버퍼 지연
+        // (Apple 포럼 합의: lastRenderTime → 스피커까지 outputLatency + ioBufferDuration)
+        // 각 노드 processing latency도 합산 (보통 0이지만 기기별 차이 대비)
+        let session = AVAudioSession.sharedInstance()
+        let outputLatency = session.outputLatency
+        let ioBufDuration = session.ioBufferDuration
+        let nodeLatency = (sourceNode?.latency ?? 0)
+            + engine.mainMixerNode.latency
+            + engine.outputNode.latency
+        let totalLatency = outputLatency + ioBufDuration + nodeLatency
+        let latencyFrames = Int64(totalLatency * sampleRate)
+        let framePos = lastRenderTime.sampleTime - latencyFrames
+
         let hostTime = lastRenderTime.hostTime  // UInt64 (mach_absolute_time 단위)
 
         // hostTime → nanoseconds 변환
@@ -168,6 +190,11 @@ class AudioEngine {
             "wallAtFramePosNs": wallAtFramePosNs,
             "ok": true,
             "virtualFrame": vf,
+            "sampleRate": sampleRate,
+            "outputLatencyMs": outputLatency * 1000,
+            "nodeLatencyMs": nodeLatency * 1000,
+            "totalLatencyMs": totalLatency * 1000,
+            "ioBufferDurationMs": ioBufDuration * 1000,
         ]
     }
 

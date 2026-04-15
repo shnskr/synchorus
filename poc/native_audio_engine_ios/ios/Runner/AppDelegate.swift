@@ -33,8 +33,7 @@ import UIKit
             case "getTimestamp":
                 result(self.audioEngine.getTimestamp())
             case "seekToFrame":
-                guard let args = call.arguments as? [String: Any],
-                      let newFrame = (args["newFrame"] as? NSNumber)?.int64Value
+                guard let newFrame = (call.arguments as? NSNumber)?.int64Value
                 else {
                     result(
                         FlutterError(
