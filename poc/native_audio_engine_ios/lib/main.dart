@@ -113,7 +113,7 @@ class RoleSelectionPage extends StatelessWidget {
   Widget build(BuildContext context) {
     final t = Theme.of(context);
     return Scaffold(
-      appBar: AppBar(title: const Text('PoC Phase 2 · 역할 선택 (b0415-7)')),
+      appBar: AppBar(title: const Text('PoC Phase 2 · 역할 선택 (b0415-8)')),
       body: Padding(
         padding: const EdgeInsets.all(24),
         child: Column(
@@ -1116,9 +1116,11 @@ class _GuestPageState extends State<GuestPage> {
           .listen(
         _onLine,
         onError: (Object e) {
+          unawaited(_stopGuest());
           if (mounted) setState(() => _status = '수신 에러: $e');
         },
         onDone: () {
+          unawaited(_stopGuest());
           if (mounted) setState(() => _status = '연결 종료됨');
         },
         cancelOnError: true,
