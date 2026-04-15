@@ -6,6 +6,8 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 
 | 결정 | 이유 |
 |---|---|
+| iOS MethodChannel 인자는 Dart 원시값 직접 전달 | Android Kotlin(`call.arguments as Number`)과 동일 패턴. 딕셔너리 래핑 시 silent fail 위험 (b0415-7 버그) |
+| iOS 출력 지연 = outputLatency + ioBufferDuration | Apple 포럼 합의. `outputPresentationLatency`는 ioBuffer 미포함. 노드 latency도 합산하되 보통 0 |
 | 네이티브 엔진(Oboe/AVAudioEngine) 도입 | just_audio + 플랫폼 채널로는 출력 시각의 sub-ms 측정 불가 |
 | 전략 D (엔진만 네이티브) | 정밀도 거의 동일, 비용 최소 (UI/P2P/플러그인 재사용) |
 | Android 우선 | 앱스토어 운영 비용 회피, iOS는 동일 패턴 반복 |

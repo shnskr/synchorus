@@ -24,7 +24,7 @@
 |---|---|
 | Android Oboe 네이티브 엔진 | UI 폴리싱 |
 | getTimestamp 폴링 + 로그 파일 | audio_service 플러그인 통합 |
-| 최소 P2P (audio-obs, drift-report) | iOS (별도 task) |
+| 최소 P2P (audio-obs, drift-report) | ~~iOS (별도 task)~~ ✅ |
 | Drift 계산 + seek 보정 | rate 조정 |
 | 광범위한 로깅 | 백그라운드 모드 |
 | 호스트 1 + 게스트 1 | 멀티 게스트 |
@@ -39,10 +39,11 @@
 | 0 | Oboe 래퍼 + 단순 재생 | "소리 나옴" 확인 | ✅ 2026-04-08 S22 통과 |
 | 1 | getTimestamp 폴링 + 파일 로그 | (framePos, ns) 시계열 확보 | ✅ 2026-04-08 S22 통과 |
 | 2 | P2P audio-obs 송수신 | 게스트가 호스트 obs 수신 | ✅ 2026-04-09 S22+S10 통과 |
-| 3 | drift 계산 (선형 보간) + clock sync | drift 시계열 로그, 네트워크 지연 분리 | **다음** |
-| 4 | seek 보정 + drift-report | 보정 전/후 비교 | 대기 |
-| 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor | 대기 |
-| 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 | 대기 |
+| 3 | drift 계산 (선형 보간) + clock sync | drift 시계열 로그, 네트워크 지연 분리 | ✅ |
+| 4 | seek 보정 + drift-report | 보정 전/후 비교 | ✅ |
+| 5 | 정적 노이즈 측정 (재생 후 30s) | 실측 noise floor | ✅ |
+| 6 | S22 30분 stress + 네트워크 블립 | 누적 drift, 글리칭 검증 | ✅ 2026-04-14 |
+| iOS | AVAudioEngine 동일 패턴 | 크로스플랫폼 싱크 ±6ms | ✅ 2026-04-15 (S22↔iPhone) |
 
 각 단계 끝에 로그 분석으로 통과 판정. 다음 단계 가기 전 측정값 확인.
 
