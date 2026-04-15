@@ -5,6 +5,7 @@ object NativeAudio {
         System.loadLibrary("oboe_engine")
     }
 
+    external fun nativeLoadFile(path: String): Boolean
     external fun nativeStart(): Boolean
     external fun nativeStop(): Boolean
     external fun nativeGetTimestamp(): LongArray

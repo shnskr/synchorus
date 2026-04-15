@@ -38,6 +38,14 @@ class MainActivity : AudioServiceActivity() {
         MethodChannel(flutterEngine.dartExecutor.binaryMessenger, "com.synchorus/native_audio")
             .setMethodCallHandler { call, result ->
                 when (call.method) {
+                    "loadFile" -> {
+                        val path = call.arguments as? String
+                        if (path == null) {
+                            result.error("ARG", "path must be a String", null)
+                        } else {
+                            result.success(NativeAudio.nativeLoadFile(path))
+                        }
+                    }
                     "start" -> result.success(NativeAudio.nativeStart())
                     "stop" -> result.success(NativeAudio.nativeStop())
                     "getTimestamp" -> {
@@ -49,6 +57,8 @@ class MainActivity : AudioServiceActivity() {
                                 "wallAtFramePosNs" to arr[2],
                                 "ok" to (arr[3] == 1L),
                                 "virtualFrame" to arr[4],
+                                "sampleRate" to arr[5],
+                                "totalFrames" to arr[6],
                             )
                         )
                     }

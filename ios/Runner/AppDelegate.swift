@@ -24,6 +24,15 @@ import UIKit
         channel.setMethodCallHandler { [weak self] call, result in
             guard let self = self else { return }
             switch call.method {
+            case "loadFile":
+                guard let path = call.arguments as? String else {
+                    result(
+                        FlutterError(
+                            code: "BAD_ARGS", message: "path required",
+                            details: nil))
+                    return
+                }
+                result(self.audioEngine.loadFile(path))
             case "start":
                 result(self.audioEngine.start())
             case "stop":

@@ -9,6 +9,7 @@ add_library(oboe_engine SHARED
 
 target_link_libraries(oboe_engine
     oboe::oboe
+    mediandk
     log
     android
 )
