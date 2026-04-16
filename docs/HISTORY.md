@@ -769,6 +769,7 @@
 **다음**: 에뮬레이터 게스트 테스트 (P2P + drift 검증) → step 1-4 (백그라운드 재생)
 
 #### 알려진 이슈 / 다음에 확인할 것
+- [ ] 네이티브 엔진 `unload` 메서드 추가 — 현재 `stop()`은 재생만 멈추고 `mDecodedData`(PCM 버퍼)는 다음 `loadFile` 또는 앱 종료 시에만 해제됨. 방 나가기 시 명시적으로 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 `unload` JNI 메서드 필요.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
   - iPhone buffer 21ms ≈ 1024 frames @ 48kHz (Apple 표준 IO buffer), S22 192 frames @ 48kHz
   - 측정 통일 후에도 17ms 비대칭 잔존 — 이건 buffer 자체 차이라 "진짜 latency 차이"의 일부
