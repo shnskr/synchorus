@@ -2,13 +2,6 @@
 
 기존 PLAN.md에서 분리. 일자별 작업/버그 수정/PoC 진행 로그.
 
-## 2026-04-16
-
-### lint 경고/에러 정리
-- iOS PoC widget_test.dart: 잘못된 import(`package:native_audio_engine_ios/main.dart`) 및 존재하지 않는 `MyApp` 참조 제거, placeholder 테스트로 교체
-- Android/iOS PoC main.dart: 미사용 필드 제거 (`_cachedVirtualFrame`, `_guestLastTimeNs`, `_guestLastWallMs`) — 값 할당만 되고 읽히지 않음
-- 본체 앱 `native_test_screen.dart`: 미사용 `dart:io` import 제거
-
 ## 현재 진행 상황
 
 ### Phase 1 완료 항목
@@ -727,6 +720,12 @@
 | Monotonic timeNs | ✓ | ✓ |
 
 → 48kHz 정확 일치, Android PoC와 동등한 정밀도 확인
+
+#### 2026-04-16 lint 경고/에러 정리
+
+- iOS PoC widget_test.dart: 잘못된 import(`package:native_audio_engine_ios/main.dart`) 및 존재하지 않는 `MyApp` 참조 제거, placeholder 테스트로 교체
+- Android/iOS PoC main.dart: 미사용 필드 제거 (`_cachedVirtualFrame`, `_guestLastTimeNs`, `_guestLastWallMs`) — 값 할당만 되고 읽히지 않음
+- 본체 앱 `native_test_screen.dart`: 미사용 `dart:io` import 제거
 
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
