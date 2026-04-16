@@ -15,7 +15,7 @@ v2(just_audio + 개방 루프)는 legacy로 동작 유지.
 
 ## 작업 완료 후
 - 작업 내용은 `docs/` 아래 해당 문서에 즉시 반영
-  - 일자별 작업·버그·PoC 로그 → `HISTORY.md`
+  - 일자별 작업·버그·PoC 로그 → `HISTORY.md` (날짜 오름차순, 새 항목은 "알려진 이슈" 바로 위에 추가)
   - 설계/로직 변경 → `ARCHITECTURE.md`
   - 새 설계 결정 → `DECISIONS.md` (표에 한 줄 추가)
   - 계획/일정/기획 변경 → `PLAN.md`
