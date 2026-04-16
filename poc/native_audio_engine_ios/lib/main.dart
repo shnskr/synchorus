@@ -345,8 +345,6 @@ class _HostPageState extends State<HostPage> {
   int? _anchorFramePos;
   int? _anchorTimeNs;
 
-  // ── 호스트 virtual frame 캐시 (broadcast용) ──────────────
-  int _cachedVirtualFrame = 0;
 
   // ── Phase 2: TCP 서버 + broadcast ────────────────────────
   ServerSocket? _server;
@@ -567,7 +565,6 @@ class _HostPageState extends State<HostPage> {
       // framePos와 정합되는 값이라 drift 외삽에 안전.
       final wallAtFramePosNs = (result['wallAtFramePosNs'] as num).toInt();
       final vf = (result['virtualFrame'] as num).toInt();
-      _cachedVirtualFrame = vf;
       // 네이티브에서 실제 하드웨어 sampleRate 수신 → 동적 갱신
       final sr = result['sampleRate'];
       if (sr != null) mSampleRate = (sr as num).toInt();
@@ -984,8 +981,6 @@ class _GuestPageState extends State<GuestPage> {
   int _guestPolls = 0;
   int _guestOkCount = 0;
   int? _guestLastFramePos;
-  int? _guestLastTimeNs;
-  int? _guestLastWallMs;
   // iOS 진단용
   double? _iosOutputLatencyMs;
   double? _iosTotalLatencyMs;
@@ -1373,8 +1368,6 @@ class _GuestPageState extends State<GuestPage> {
       if (ok) {
         _guestOkCount++;
         _guestLastFramePos = framePos;
-        _guestLastTimeNs = timeNs;
-        _guestLastWallMs = wallMs;
         // Phase 4: 앵커 없으면 설정 시도, 있으면 drift 재계산.
         if (_anchorHostObsFrame == null) {
           _tryEstablishAnchor(wallMs, framePos);

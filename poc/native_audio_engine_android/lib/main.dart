@@ -345,8 +345,6 @@ class _HostPageState extends State<HostPage> {
   int? _anchorFramePos;
   int? _anchorTimeNs;
 
-  // ── 호스트 virtual frame 캐시 (broadcast용) ──────────────
-  int _cachedVirtualFrame = 0;
 
   // ── Phase 2: TCP 서버 + broadcast ────────────────────────
   ServerSocket? _server;
@@ -567,7 +565,6 @@ class _HostPageState extends State<HostPage> {
       // framePos와 정합되는 값이라 drift 외삽에 안전.
       final wallAtFramePosNs = (result['wallAtFramePosNs'] as num).toInt();
       final vf = (result['virtualFrame'] as num).toInt();
-      _cachedVirtualFrame = vf;
       final s = Sample(
         framePos: (result['framePos'] as num).toInt(),
         timeNs: (result['timeNs'] as num).toInt(),
@@ -978,8 +975,6 @@ class _GuestPageState extends State<GuestPage> {
   int _guestPolls = 0;
   int _guestOkCount = 0;
   int? _guestLastFramePos;
-  int? _guestLastTimeNs;
-  int? _guestLastWallMs;
 
   // ── Phase 4: drift / seek 보정 ────────────────────────────
   // 가장 최근 audio-obs (drift 계산 시 expected host frame 외삽용)
@@ -1343,8 +1338,6 @@ class _GuestPageState extends State<GuestPage> {
       if (ok) {
         _guestOkCount++;
         _guestLastFramePos = framePos;
-        _guestLastTimeNs = timeNs;
-        _guestLastWallMs = wallMs;
         // Phase 4: 앵커 없으면 설정 시도, 있으면 drift 재계산.
         if (_anchorHostObsFrame == null) {
           _tryEstablishAnchor(wallMs, framePos);
