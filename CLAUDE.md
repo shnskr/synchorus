@@ -3,8 +3,9 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 폐루프 리아키텍처 PoC 진행 중 (Android Phase 0~6 완료, iOS PoC 다음).
-v2(just_audio + 개방 루프)는 legacy로 동작 유지.
+v3 본 구현 진행 중 (step 1-1~1-3 완료, 다음 step 1-4 백그라운드 재생).
+v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체.
+audio_handler.dart는 step 1-4에서 네이티브 엔진 연동으로 교체 예정.
 
 ## 작업 시작 전
 - 설계/결정/이력/계획: **docs/** 아래 4개 문서 확인

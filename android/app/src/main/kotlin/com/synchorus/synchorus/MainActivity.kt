@@ -1,6 +1,8 @@
 package com.synchorus.synchorus
 
 import android.media.AudioManager
+import android.os.Handler
+import android.os.Looper
 import com.ryanheise.audioservice.AudioServiceActivity
 import io.flutter.embedding.engine.FlutterEngine
 import io.flutter.plugin.common.MethodChannel
@@ -43,7 +45,17 @@ class MainActivity : AudioServiceActivity() {
                         if (path == null) {
                             result.error("ARG", "path must be a String", null)
                         } else {
-                            result.success(NativeAudio.nativeLoadFile(path))
+                            // 백그라운드 스레드에서 디코딩 (메인 스레드 블로킹 방지)
+                            val mainHandler = Handler(Looper.getMainLooper())
+                            Thread {
+                                val ok = NativeAudio.nativeLoadFile(path)
+                                if (ok) {
+                                    mainHandler.post { result.success(true) }
+                                } else {
+                                    val err = NativeAudio.nativeGetLastError()
+                                    mainHandler.post { result.error("LOAD_FAILED", err, null) }
+                                }
+                            }.start()
                         }
                     }
                     "start" -> result.success(NativeAudio.nativeStart())

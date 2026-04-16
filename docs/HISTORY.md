@@ -727,6 +727,47 @@
 - Android/iOS PoC main.dart: 미사용 필드 제거 (`_cachedVirtualFrame`, `_guestLastTimeNs`, `_guestLastWallMs`) — 값 할당만 되고 읽히지 않음
 - 본체 앱 `native_test_screen.dart`: 미사용 `dart:io` import 제거
 
+#### 2026-04-16 v3 본체 앱 통합 step 1-3: P2P + clock sync + drift 보정
+
+**설계 결정: v2 교체 (병행 X)**
+- `AudioSyncService` (v2, just_audio 기반 780줄) 삭제 → `NativeAudioSyncService` (v3, 네이티브 엔진) 신규 생성
+- 근거: AudioSyncService가 just_audio API에 깊이 결합 (ProcessingState, buffering watch 등), v2/v3 병행은 코드 중복만 증가, PoC 30분 stress ±20ms 99.9% 검증 완료로 fallback 불필요
+
+**신규 파일**
+- [x] `lib/models/audio_obs.dart` — AudioObs 모델 (PoC 포팅, anchorFramePos/anchorTimeNs 제거)
+- [x] `lib/services/native_audio_sync_service.dart` — v3 오디오 동기화 서비스
+  - 호스트: 네이티브 엔진 재생 + audio-obs 500ms broadcast + HTTP 파일 서빙 + seek-notify
+  - 게스트: HTTP 파일 다운로드 + 네이티브 엔진 재생 + drift 계산 + seek 보정
+  - PoC Phase 4 알고리즘 그대로 포팅: 앵커 외삽, _seekCorrectionAccum, gain=0.8, cooldown 1s
+  - |drift| ≥ 200ms → 앵커 리셋, |drift| ≥ 20ms → seek, _checkContentAlignment (4800 frames)
+
+**수정 파일**
+- [x] `lib/services/native_audio_service.dart` — NativeTimestamp 모델 추가 + 100ms 폴링 타이머 + timestampStream
+- [x] `lib/services/sync_service.dart` — EMA 업그레이드: 30s→1s 주기, 5개 sliding window, EMA α=0.1, `filteredOffsetMs` (double) getter 추가. 초기 핸드셰이크(10-ping)는 유지. 주기 단계 rid를 음수로 분리하여 초기/주기 pong 매칭 구분
+- [x] `lib/providers/app_providers.dart` — audioSyncServiceProvider → nativeAudioSyncServiceProvider
+- [x] `lib/screens/player_screen.dart` — just_audio 의존성 제거, 네이티브 엔진 기반 UI (polled position/duration), 게스트 sync info 카드 (drift/seeks/offset/RTT), volume 컨트롤 제거 (step 별도)
+- [x] `lib/screens/room_screen.dart` — provider 참조 전환, audio-obs 로그 숨김
+- [x] `lib/screens/native_test_screen.dart` — NativeTimestamp 타입 적용 (Map → typed class)
+
+**삭제 파일**
+- [x] `lib/services/audio_service.dart` (v2 AudioSyncService, git에 보존)
+
+**S22 호스트 단독 테스트 (2026-04-16)**
+- 파일 로드 → 재생/정지/seek → 정상 동작 확인
+- seek bar 드래그 → 즉시 반영 (seek override 패턴 적용)
+- 파일 변경 시 seek bar 0으로 리셋 확인
+
+**추가 개선 (S22 테스트 중 발견)**
+- [x] 파일 로드 시 화면 멈춤 → Android loadFile을 백그라운드 스레드에서 실행 (MainActivity.kt)
+- [x] 에러 메시지 구체화 → C++ mLastError + JNI getLastError + Dart 한국어 변환 (TOO_LONG/UNSUPPORTED_FORMAT/NO_AUDIO_TRACK/UNSUPPORTED_CODEC/FILE_OPEN_FAILED)
+- [x] 파일 복사 2x 용량 문제 → file.copy() → file.rename() (같은 파일시스템이면 즉시 이동, 추가 용량 0)
+- [x] seek bar 드래그 중 위치 되돌아감 → _seekOverridePosition 패턴 (500ms간 폴링 position 무시)
+- [x] 파일 변경 시 seek bar 미초기화 → loadFile 진입 시 position/duration 리셋
+- [x] 저장 공간 부족 에러 → 사용자 친화적 메시지 ("저장 공간이 부족합니다")
+
+**빌드**: flutter analyze 0 issues, debug APK 빌드 성공, S22 호스트 단독 테스트 통과
+**다음**: 에뮬레이터 게스트 테스트 (P2P + drift 검증) → step 1-4 (백그라운드 재생)
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
   - iPhone buffer 21ms ≈ 1024 frames @ 48kHz (Apple 표준 IO buffer), S22 192 frames @ 48kHz

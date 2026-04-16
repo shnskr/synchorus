@@ -6,6 +6,7 @@ object NativeAudio {
     }
 
     external fun nativeLoadFile(path: String): Boolean
+    external fun nativeGetLastError(): String
     external fun nativeStart(): Boolean
     external fun nativeStop(): Boolean
     external fun nativeGetTimestamp(): LongArray

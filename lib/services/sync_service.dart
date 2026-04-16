@@ -16,6 +16,22 @@ class SyncResult {
   });
 }
 
+/// clock sync ping/pong 한 쌍. RTT + raw offset 계산.
+class _SyncSample {
+  final int t1; // 게스트 송신 시각
+  final int t2; // 호스트 수신 시각
+  final int t3; // 게스트 수신 시각
+
+  const _SyncSample({required this.t1, required this.t2, required this.t3});
+
+  int get rttMs => t3 - t1;
+  int get rawOffsetMs => t2 - ((t1 + t3) ~/ 2);
+}
+
+// EMA 파라미터 (PoC Phase 3 검증 완료)
+const double _emaAlpha = 0.1; // new 비중 (old 0.9 + new 0.1)
+const int _windowSize = 5; // sliding window 크기
+
 class SyncService {
   final P2PService _p2p;
 
@@ -24,12 +40,18 @@ class SyncService {
   int _bestRtt = 999999;
   bool _synced = false;
 
-  /// 호출별 고유 sync request id (#12): periodic/manual 동시 호출 시 pong 매칭
+  /// EMA 필터링된 offset (double 정밀도, v3 drift 계산용)
+  double _filteredOffsetMs = 0.0;
+
+  /// 호출별 고유 sync request id: periodic/manual 동시 호출 시 pong 매칭
   int _syncRequestSeq = 0;
 
   int get offsetMs => _offsetMs;
   int get bestRtt => _bestRtt;
   bool get isSynced => _synced;
+
+  /// EMA 필터링된 offset (double). drift 계산에서 이 값을 사용.
+  double get filteredOffsetMs => _filteredOffsetMs;
 
   StreamSubscription? _messageSub;
   Timer? _periodicSyncTimer;
@@ -37,11 +59,21 @@ class SyncService {
   /// 진행 중인 syncWithHost 호출의 로컬 listener (경합 방지)
   StreamSubscription? _activeSyncSub;
 
+  /// 주기 단계 sliding window (최근 _windowSize개)
+  final List<_SyncSample> _recentWindow = [];
+
+  /// 주기 단계 pong 수신 listener
+  StreamSubscription? _periodicPongSub;
+
+  /// 주기 단계에서 보낸 ping의 t1 보관 (pong 매칭용)
+  final Map<int, int> _pendingPingT1 = {};
+
   SyncService(this._p2p);
 
   /// 상태 초기화 (방 나가기 시 호출)
   void reset() {
     _offsetMs = 0;
+    _filteredOffsetMs = 0.0;
     _bestRtt = 999999;
     _synced = false;
     _messageSub?.cancel();
@@ -50,6 +82,10 @@ class SyncService {
     _activeSyncSub = null;
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
+    _periodicPongSub?.cancel();
+    _periodicPongSub = null;
+    _recentWindow.clear();
+    _pendingPingT1.clear();
   }
 
   /// 참가자: 호스트와 시간 동기화 시작
@@ -93,6 +129,7 @@ class SyncService {
       if (completed >= count && !completer.isCompleted) {
         _offsetMs = roundOffset;
         _bestRtt = roundBestRtt;
+        _filteredOffsetMs = roundOffset.toDouble();
         _synced = true;
         sub.cancel();
         if (_activeSyncSub == sub) _activeSyncSub = null;
@@ -129,6 +166,7 @@ class SyncService {
         if (completed > 0) {
           _offsetMs = roundOffset;
           _bestRtt = roundBestRtt;
+          _filteredOffsetMs = roundOffset.toDouble();
           _synced = true;
           return SyncResult(
             offsetMs: _offsetMs,
@@ -141,16 +179,61 @@ class SyncService {
     );
   }
 
-  /// 참가자: 백그라운드 주기적 재동기화 시작
-  void startPeriodicSync({Duration interval = const Duration(seconds: 30)}) {
+  /// 참가자: 1초 주기 EMA 동기화 시작.
+  /// 매 1초 단일 ping → pong 수신 시 sliding window에 추가 →
+  /// window 내 min-RTT 샘플의 offset을 EMA로 기존 filtered와 혼합.
+  void startPeriodicSync() {
     _periodicSyncTimer?.cancel();
-    _periodicSyncTimer = Timer.periodic(interval, (_) async {
-      try {
-        final result = await syncWithHost();
-        debugPrint('Periodic sync: offset=${result.offsetMs}ms, RTT=${result.rttMs}ms');
-      } catch (e) {
-        debugPrint('Periodic sync failed: $e');
+    _periodicPongSub?.cancel();
+    _recentWindow.clear();
+    _pendingPingT1.clear();
+
+    // pong 수신 listener
+    _periodicPongSub = _p2p.onMessage.listen((message) {
+      if (message['type'] != 'sync-pong') return;
+      // rid 필터: 주기 단계 ping은 rid를 음수(-)로 사용하여 초기 핸드셰이크와 구분
+      final pongRid = message['data']?['rid'] as int?;
+      if (pongRid == null || pongRid >= 0) return; // 초기 핸드셰이크 pong은 무시
+
+      final t1 = _pendingPingT1.remove(pongRid);
+      if (t1 == null) return; // orphan
+      final t2 = message['data']['hostTime'] as int;
+      final t3 = DateTime.now().millisecondsSinceEpoch;
+
+      final sample = _SyncSample(t1: t1, t2: t2, t3: t3);
+
+      // sliding window 관리
+      _recentWindow.add(sample);
+      if (_recentWindow.length > _windowSize) {
+        _recentWindow.removeAt(0);
       }
+
+      // window 내 min-RTT 샘플의 offset을 EMA로 혼합
+      final minSample =
+          _recentWindow.reduce((a, b) => a.rttMs < b.rttMs ? a : b);
+      _filteredOffsetMs = _filteredOffsetMs * (1 - _emaAlpha) +
+          minSample.rawOffsetMs * _emaAlpha;
+      _offsetMs = _filteredOffsetMs.round();
+      _bestRtt = minSample.rttMs;
+
+      debugPrint('Periodic sync: offset=${_filteredOffsetMs.toStringAsFixed(1)}ms, '
+          'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}');
+    });
+
+    // 1초 주기 ping
+    _periodicSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      final rid = --_syncRequestSeq; // 음수 rid로 주기 단계 구분
+      final t1 = DateTime.now().millisecondsSinceEpoch;
+      _pendingPingT1[rid] = t1;
+      _p2p.sendToHost({
+        'type': 'sync-ping',
+        'data': {
+          't1': t1,
+          'rid': rid,
+        },
+      });
+      // stale ping 정리 (5초 이상 된 것)
+      _pendingPingT1.removeWhere((_, sentT1) => t1 - sentT1 > 5000);
     });
   }
 
@@ -158,12 +241,17 @@ class SyncService {
   void stopPeriodicSync() {
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
+    _periodicPongSub?.cancel();
+    _periodicPongSub = null;
+    _recentWindow.clear();
+    _pendingPingT1.clear();
   }
 
   /// 호스트: sync-ping 메시지를 처리하여 pong 응답
   void startHostHandler() {
     _synced = true; // 호스트는 기준 시간이므로 항상 synced
     _offsetMs = 0;
+    _filteredOffsetMs = 0.0;
 
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen((message) {
@@ -207,5 +295,7 @@ class SyncService {
     _activeSyncSub = null;
     _periodicSyncTimer?.cancel();
     _periodicSyncTimer = null;
+    _periodicPongSub?.cancel();
+    _periodicPongSub = null;
   }
 }

@@ -20,7 +20,7 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
 
   String _status = 'idle';
   String? _fileName;
-  Map<String, dynamic> _ts = {};
+  NativeTimestamp? _ts;
   bool _playing = false;
 
   @override
@@ -61,20 +61,17 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
   }
 
   Future<void> _seek(int deltaSec) async {
-    if (_ts['sampleRate'] == null) return;
-    final sr = (_ts['sampleRate'] as num).toInt();
-    final vf = (_ts['virtualFrame'] as num?)?.toInt() ?? 0;
-    final target = vf + deltaSec * sr;
-    await _engine.seekToFrame(target.clamp(0, _totalFrames));
+    final ts = _ts;
+    if (ts == null || ts.sampleRate <= 0) return;
+    final target = ts.virtualFrame + deltaSec * ts.sampleRate;
+    await _engine.seekToFrame(target.clamp(0, ts.totalFrames));
   }
-
-  int get _totalFrames => (_ts['totalFrames'] as num?)?.toInt() ?? 0;
 
   void _startPolling() {
     _pollTimer?.cancel();
     _pollTimer = Timer.periodic(const Duration(milliseconds: 200), (_) async {
       final ts = await _engine.getTimestamp();
-      if (mounted) setState(() => _ts = ts);
+      if (mounted && ts != null) setState(() => _ts = ts);
     });
   }
 
@@ -88,10 +85,11 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
 
   @override
   Widget build(BuildContext context) {
-    final ok = _ts['ok'] == true;
-    final sr = (_ts['sampleRate'] as num?)?.toInt() ?? 0;
-    final vf = (_ts['virtualFrame'] as num?)?.toInt() ?? 0;
-    final total = _totalFrames;
+    final ts = _ts;
+    final ok = ts?.ok ?? false;
+    final sr = ts?.sampleRate ?? 0;
+    final vf = ts?.virtualFrame ?? 0;
+    final total = ts?.totalFrames ?? 0;
     final posStr = _framesToTime(vf, sr);
     final durStr = _framesToTime(total, sr);
 
@@ -184,19 +182,12 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
                     fontWeight: FontWeight.bold,
                     color: Colors.grey[700])),
             const SizedBox(height: 4),
-            if (ok) ...[
-              _tsRow('virtualFrame', '$vf'),
-              _tsRow('sampleRate', '$sr Hz'),
-              _tsRow('totalFrames', '$total'),
-              _tsRow('framePos', '${_ts['framePos']}'),
-              _tsRow('wallAtFramePosNs',
-                  '${_ts['wallAtFramePosNs']}'),
-              if (_ts['totalLatencyMs'] != null)
-                _tsRow('totalLatency',
-                    '${(_ts['totalLatencyMs'] as num).toStringAsFixed(1)} ms'),
-              if (_ts['outputLatencyMs'] != null)
-                _tsRow('outputLatency',
-                    '${(_ts['outputLatencyMs'] as num).toStringAsFixed(1)} ms'),
+            if (ok && ts != null) ...[
+              _tsRow('virtualFrame', '${ts.virtualFrame}'),
+              _tsRow('sampleRate', '${ts.sampleRate} Hz'),
+              _tsRow('totalFrames', '${ts.totalFrames}'),
+              _tsRow('framePos', '${ts.framePos}'),
+              _tsRow('wallAtFramePosNs', '${ts.wallAtFramePosNs}'),
             ] else
               Text('ok: false',
                   style: TextStyle(color: Colors.red[400])),

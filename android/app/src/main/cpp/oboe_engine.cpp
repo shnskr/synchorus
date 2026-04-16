@@ -26,6 +26,8 @@ namespace {
 
 class OboeEngine : public oboe::AudioStreamDataCallback {
 public:
+    const std::string& lastError() const { return mLastError; }
+
     bool loadFile(const char* path) {
         stop();
 
@@ -34,10 +36,12 @@ public:
         mDecodedSampleRate = 0;
         mDecodedTotalFrames = 0;
         mFileLoaded = false;
+        mLastError.clear();
 
         int fd = open(path, O_RDONLY);
         if (fd < 0) {
             LOGE("loadFile: open failed: %s", path);
+            mLastError = "FILE_OPEN_FAILED";
             return false;
         }
         struct stat st;
@@ -50,6 +54,7 @@ public:
 
         if (status != AMEDIA_OK) {
             LOGE("loadFile: setDataSourceFd: %d", status);
+            mLastError = "UNSUPPORTED_FORMAT";
             AMediaExtractor_delete(extractor);
             return false;
         }
@@ -74,6 +79,7 @@ public:
 
         if (audioTrack < 0) {
             LOGE("loadFile: no audio track");
+            mLastError = "NO_AUDIO_TRACK";
             AMediaExtractor_delete(extractor);
             return false;
         }
@@ -94,6 +100,7 @@ public:
         AMediaCodec* codec = AMediaCodec_createDecoderByType(mime);
         if (!codec) {
             LOGE("loadFile: createDecoder failed: %s", mime);
+            mLastError = "UNSUPPORTED_CODEC";
             AMediaFormat_delete(format);
             AMediaExtractor_delete(extractor);
             return false;
@@ -122,8 +129,10 @@ public:
         int64_t estFrames = (durationUs * sampleRate) / 1000000LL;
         int64_t estBytes = estFrames * channelCount * static_cast<int64_t>(sizeof(int16_t));
         if (estBytes > 150LL * 1024 * 1024) {
-            LOGE("loadFile: too large (%lld MB est)",
-                 static_cast<long long>(estBytes / (1024 * 1024)));
+            int estMinutes = static_cast<int>(durationUs / 60000000LL);
+            LOGE("loadFile: too large (%lld MB est, ~%d min)",
+                 static_cast<long long>(estBytes / (1024 * 1024)), estMinutes);
+            mLastError = "TOO_LONG:" + std::to_string(estMinutes);
             AMediaCodec_stop(codec);
             AMediaCodec_delete(codec);
             AMediaExtractor_delete(extractor);
@@ -363,6 +372,7 @@ private:
     int32_t mDecodedSampleRate = 0;
     int64_t mDecodedTotalFrames = 0;
     bool mFileLoaded = false;
+    std::string mLastError;
 };
 
 OboeEngine& engine() {
@@ -381,6 +391,12 @@ Java_com_synchorus_synchorus_NativeAudio_nativeLoadFile(
     bool ok = engine().loadFile(path);
     env->ReleaseStringUTFChars(jPath, path);
     return ok ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jstring JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeGetLastError(
+    JNIEnv* env, jobject /*thiz*/) {
+    return env->NewStringUTF(engine().lastError().c_str());
 }
 
 JNIEXPORT jboolean JNICALL

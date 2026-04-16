@@ -54,7 +54,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     }
     final sync = ref.read(syncServiceProvider);
 
-    final audio = ref.read(audioSyncServiceProvider);
+    final audio = ref.read(nativeAudioSyncServiceProvider);
 
     if (widget.isHost) {
       _addLog('방 생성 완료 (코드: ${widget.roomCode})');
@@ -170,7 +170,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       }
 
       // 대량 메시지는 로그에서 제외
-      const hiddenTypes = {'sync-ping', 'sync-pong', 'sync-position', 'audio-request', 'state-request', 'state-response', 'welcome', 'peer-joined', 'peer-left'};
+      const hiddenTypes = {'sync-ping', 'sync-pong', 'sync-position', 'audio-obs', 'audio-request', 'state-request', 'state-response', 'welcome', 'peer-joined', 'peer-left'};
       if (!hiddenTypes.contains(type)) {
         _addLog('메시지: $type');
       }
@@ -206,8 +206,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       sync.startPeriodicSync();
 
       // 동기화 완료 후 호스트에게 현재 오디오 요청
-      final audio = ref.read(audioSyncServiceProvider);
-      audio.requestCurrentAudio();
+      ref.read(p2pServiceProvider).sendToHost({'type': 'audio-request', 'data': {}});
     } catch (e) {
       _addLog('동기화 실패: $e');
       if (!mounted) return;
@@ -272,8 +271,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       sync.startPeriodicSync();
 
       // 호스트에게 현재 오디오+재생 상태 요청 → 자동 복원
-      final audio = ref.read(audioSyncServiceProvider);
-      audio.requestCurrentAudio();
+      final p2p = ref.read(p2pServiceProvider);
+      p2p.sendToHost({'type': 'audio-request', 'data': {}});
     } catch (e) {
       _addLog('재동기화 실패: $e');
       if (!mounted) return;
@@ -355,7 +354,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);
-    final audio = ref.read(audioSyncServiceProvider);
+    final audio = ref.read(nativeAudioSyncServiceProvider);
     final sync = ref.read(syncServiceProvider);
 
     // 정리 완료 후 이동 (구독 취소했으므로 블로킹 없음)
@@ -382,7 +381,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     // _leaveRoom이 정상 경로로 이미 정리한 경우 중복 cleanupSync 호출 방지 (#13)
     if (!_leaving) {
-      final audio = ref.read(audioSyncServiceProvider);
+      final audio = ref.read(nativeAudioSyncServiceProvider);
       audio.cleanupSync();
     }
 
