@@ -214,6 +214,7 @@ class NativeAudioSyncService {
 
     // 네이티브 엔진에 로드
     bool ok;
+    final sw = Stopwatch()..start();
     try {
       ok = await _engine.loadFile(stableFile.path);
     } on PlatformException catch (e) {
@@ -222,6 +223,8 @@ class NativeAudioSyncService {
       _errorController.add(NativeAudioService.errorToMessage(e.message ?? ''));
       return;
     }
+    sw.stop();
+    debugPrint('[DECODE-HOST] loadFile took ${sw.elapsedMilliseconds}ms');
     if (!ok) {
       _isLoading = false;
       _loadingController.add(false);
@@ -436,6 +439,7 @@ class NativeAudioSyncService {
       final safeName = _currentFileName ?? 'audio_download';
       final tempFile = File('${tempDir.path}/$safeName');
 
+      final swDownload = Stopwatch()..start();
       final client = HttpClient();
       final request = await client.getUrl(Uri.parse(url));
       final response = await request.close();
@@ -444,9 +448,14 @@ class NativeAudioSyncService {
       }
       await response.pipe(tempFile.openWrite());
       client.close();
+      swDownload.stop();
+      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms');
 
       // 네이티브 엔진에 로드
+      final swDecode = Stopwatch()..start();
       final ok = await _engine.loadFile(tempFile.path);
+      swDecode.stop();
+      debugPrint('[DECODE-GUEST] loadFile took ${swDecode.elapsedMilliseconds}ms');
       if (!ok) {
         _errorController.add('파일 로드 실패');
         _isLoading = false;

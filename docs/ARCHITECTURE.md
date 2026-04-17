@@ -355,8 +355,11 @@ drift = observedP_g - expectedP_at_Tg
 | `getVirtualFrame` | 없음 | `int64` | 현재 콘텐츠 위치 조회 |
 
 **네이티브 구현**:
-- Android: NDK AMediaCodec 전체 디코딩 → int16 버퍼 → Oboe float 콜백 (`oboe_engine.cpp`)
-- iOS: AVAudioPlayerNode + AVAudioFile 스트리밍 재생 (`AudioEngine.swift`)
+- Android: NDK AMediaCodec **스트리밍 디코딩** → int16 사전할당 버퍼 ��� Oboe float 콜백 (`oboe_engine.cpp`)
+  - 최소 1초 디코드 후 loadFile 반환, 백그라운드 스레드에서 나머지 디코딩 계속
+  - 2-range 추적: `[0, seqEnd)` + `[seekStart, seekEnd)` → `isFrameDecoded()` 체크
+  - seek-in-decode (Method A): 미디코딩 영역 seek → 디코드 스레드 점프 → fillGaps
+- iOS: AVAudioPlayerNode + AVAudioFile 스트리밍 재생 (`AudioEngine.swift`) — 네이티브 스트리밍
 
 **파일 위치**:
 - Dart: `lib/services/native_audio_service.dart`
@@ -364,7 +367,7 @@ drift = observedP_g - expectedP_at_Tg
 - iOS: `ios/Runner/AudioEngine.swift` + `AppDelegate.swift`
 
 **제한**:
-- Android: 전체 파일 메모리 디코딩 (150MB 제한, ~5분 곡). 향후 스트리밍 디코딩 전환 가능
+- Android: 사전할당 메모리 디��딩 (150MB 제한, ~5분 곡). 스트리밍 디코드로 loadFile ~0.5-0.7s 반환
 - sampleRate/virtualFrame은 파일 네이티브 샘플레이트 기준
 
 #### 5-2. 향후 확장 계획 (step 1-3+)

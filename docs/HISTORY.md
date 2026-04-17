@@ -804,6 +804,36 @@
 
 **빌드**: v0.0.8, flutter analyze 통과, S22 + 에뮬레이터 테스트 완료
 
+### 2026-04-17 (2) — Android 스트리밍 디코드 최적화
+
+**배경**: S22 실측 loadFile (전체 디코드) 소요 시간 11초(콜드)/6.6초(웜). 파일 로드 UX 병목.
+
+**Android `oboe_engine.cpp` 스트리밍 디코드 리팩터링**
+- [x] 전체 파일 디코드 대기 → 최소 1초 분량 디코드 후 즉시 반환 (백그라운드 디코드 계속)
+- [x] 사전 할당 PCM 버퍼 (silence로 초기화) + 디코드 범위 2-range 추적 (`mSeqDecodeEnd`, `mSeekDecodeStart/End`)
+- [x] `onAudioReady`: 디코드 완료 프레임만 출력, 미디코딩 영역은 silence
+- [x] seek-in-decode (Method A): 미디코딩 영역 seek 시 디코드 스레드가 해당 위치로 점프 → 디코드 → 갭은 나중에 `fillGaps`로 채움
+- [x] `std::thread` + `std::condition_variable` 기반 백그라운드 디코드, `atomic` 기반 스레드 안전 범위 추적
+- [x] iOS는 `AVAudioFile` + `scheduleSegment`가 이미 스트리밍 방식이라 변경 불필요
+
+**S22 실측 결과**:
+
+| 항목 | 이전 | 이후 |
+|---|---|---|
+| loadFile 소요 | 11,000ms (콜드) | **548~736ms** |
+| 체감 개선 | - | **~15-20배** |
+
+| 파일 | loadFile | 전체 디코드 |
+|---|---|---|
+| 368s MP3 48kHz | 548ms | ~22s (seek 3회 포함) |
+| 352.5s MP3 48kHz | 582ms | ~10s |
+| 523.4s MP3 44.1kHz | 689ms | ~15s |
+
+- seek-in-decode 동작 확인: 미디코딩 영역 3회 연속 seek → fillGaps 정상 완료
+- 재생 품질: 끊김/노이즈 없음 (호스트 단독 확인)
+
+**빌드**: v0.0.9, S22 + 에뮬레이터 테스트 완료
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
