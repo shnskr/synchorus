@@ -241,7 +241,11 @@ class NativeAudioSyncService {
     // 게스트에게 URL 전달
     _p2p.broadcastToAll({
       'type': 'audio-url',
-      'data': {'url': urlWithCacheBust, 'playing': _playing},
+      'data': {
+        'url': urlWithCacheBust,
+        'playing': _playing,
+        'fileName': originalName,
+      },
     });
 
     // 엔진 폴링 시작 (UI position 업데이트용)
@@ -265,6 +269,21 @@ class NativeAudioSyncService {
 
   Future<void> syncPlay() async {
     if (!_audioReady) return;
+
+    // play 직전 position 캡처 (start 직후 첫 poll까지 seek bar 0:00 점프 방지)
+    final ts = _engine.latest;
+    final vf = await _engine.getVirtualFrame();
+    final sr = ts?.sampleRate ?? 0;
+    if (sr > 0) {
+      final pos = Duration(milliseconds: (vf * 1000 / sr).round());
+      _seekOverridePosition = pos;
+      _positionController.add(pos);
+      _seekOverrideTimer?.cancel();
+      _seekOverrideTimer = Timer(const Duration(milliseconds: 500), () {
+        _seekOverridePosition = null;
+      });
+    }
+
     final ok = await _engine.start();
     if (!ok) return;
     _playing = true;
@@ -357,7 +376,11 @@ class NativeAudioSyncService {
     if (fromId == null || _currentUrl == null) return;
     _p2p.sendToPeer(fromId, {
       'type': 'audio-url',
-      'data': {'url': _currentUrl, 'playing': _playing},
+      'data': {
+        'url': _currentUrl,
+        'playing': _playing,
+        'fileName': _currentFileName,
+      },
     });
   }
 
@@ -392,10 +415,15 @@ class NativeAudioSyncService {
     _loadingController.add(true);
 
     try {
-      // URL에서 파일명 추출
-      final pathPart = url.split('/').last;
-      final cleanPath = pathPart.split('?').first;
-      _currentFileName = Uri.decodeComponent(cleanPath);
+      // 호스트가 보낸 원본 파일명 사용 (없으면 URL에서 추출)
+      final hostFileName = data['fileName'] as String?;
+      if (hostFileName != null && hostFileName.isNotEmpty) {
+        _currentFileName = hostFileName;
+      } else {
+        final pathPart = url.split('/').last;
+        final cleanPath = pathPart.split('?').first;
+        _currentFileName = Uri.decodeComponent(cleanPath);
+      }
     } catch (_) {
       _currentFileName = url.split('/').last;
     }

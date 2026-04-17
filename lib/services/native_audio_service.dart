@@ -108,6 +108,16 @@ class NativeAudioService {
     return await _channel.invokeMethod<int>('getVirtualFrame') ?? 0;
   }
 
+  /// 음소거 설정.
+  Future<void> setMuted(bool muted) async {
+    await _channel.invokeMethod('setMuted', muted);
+  }
+
+  /// 음소거 상태 조회.
+  Future<bool> isMuted() async {
+    return await _channel.invokeMethod<bool>('isMuted') ?? false;
+  }
+
   /// 주기적 타임스탬프 폴링 시작.
   void startPolling({Duration interval = const Duration(milliseconds: 100)}) {
     stopPolling();

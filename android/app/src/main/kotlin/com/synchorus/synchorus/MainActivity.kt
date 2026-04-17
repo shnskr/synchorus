@@ -85,6 +85,14 @@ class MainActivity : AudioServiceActivity() {
                     "getVirtualFrame" -> {
                         result.success(NativeAudio.nativeGetVirtualFrame())
                     }
+                    "setMuted" -> {
+                        val muted = call.arguments as? Boolean ?: false
+                        NativeAudio.nativeSetMuted(muted)
+                        result.success(null)
+                    }
+                    "isMuted" -> {
+                        result.success(NativeAudio.nativeIsMuted())
+                    }
                     else -> result.notImplemented()
                 }
             }

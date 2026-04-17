@@ -768,6 +768,42 @@
 **빌드**: flutter analyze 0 issues, debug APK 빌드 성공, S22 호스트 단독 테스트 통과
 **다음**: 에뮬레이터 게스트 테스트 (P2P + drift 검증) → step 1-4 (백그라운드 재생)
 
+#### 2026-04-17 v3 본체 앱 통합 step 1-4: 백그라운드 재생 + UI 개선
+
+**audio_service 연동 (백그라운드 재생 + 미디어 컨트롤)**
+- [x] `audio_handler.dart` 신규 생성 — `NativeAudioHandler` (BaseAudioHandler + SeekHandler)
+  - 네이티브 엔진(NativeAudioSyncService)과 audio_service 플러그인 연결
+  - `positionStream` 구독으로 `_lastPosition` 항상 최신 유지 (engine.latest 직접 읽기의 타이밍 문제 해결)
+  - 호스트: 재생/정지/seek 미디어 컨트롤 표시
+  - 게스트: 곡 정보 + 재생 상태만 표시 (controls 비어있지만 Android 13+ 시스템이 강제 표시)
+  - 게스트 버튼 눌렀을 때 `_emitPlaybackState()` 재전송으로 아이콘 복원 시도
+- [x] `main.dart`에 `AudioService.init()` + `AudioSession` 설정 추가
+- [x] `app_providers.dart`에 `audioHandlerProvider` 추가
+- [x] `room_screen.dart`에서 호스트/게스트 모두 handler attach (isHost 파라미터로 구분)
+- [x] AndroidManifest에 `WAKE_LOCK` 퍼미션 추가 (화면 꺼짐 시 호스트 킬 방지)
+
+**seek bar 0:00 점프 버그 수정**
+- [x] 원인: `audio_handler._capturePosition()`이 `engine.latest`에서 `ok` 체크 없이 `virtualFrame=0` 사용
+- [x] 근본 수정: `_capturePosition()` 제거 → `positionStream` 구독으로 `_lastPosition` 항상 최신 유지
+- [x] syncPlay()의 position override도 positionStream으로 전달되어 handler가 정확한 위치 사용
+
+**게스트 파일명 표시 수정**
+- [x] 호스트가 `audio-url` 메시지에 원본 `fileName` 포함
+- [x] 게스트가 URL의 safe name 대신 원본 파일명 사용
+
+**음소거 버튼 추가**
+- [x] Android C++ (Oboe): `mMuted` atomic flag → `onAudioReady`에서 silence 출력
+- [x] Android Kotlin: `nativeSetMuted`/`nativeIsMuted` JNI + MethodChannel
+- [x] iOS Swift: `engine.mainMixerNode.outputVolume` 0/1 토글
+- [x] Flutter `NativeAudioService`: `setMuted`/`isMuted` 메서드
+- [x] `player_screen.dart`: 재생 컨트롤 가운데 정렬 유지, 음소거 버튼 오른쪽 분리 배치
+
+**Android 13+ 미디어 알림 제한 확인**
+- 재생/정지 버튼은 시스템이 강제 표시 (controls 비워도 제거 불가)
+- 커스텀 액션(mute 등) 알림에 추가 불가 (표준 MediaSession 액션만 지원)
+
+**빌드**: v0.0.8, flutter analyze 통과, S22 + 에뮬레이터 테스트 완료
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`

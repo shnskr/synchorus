@@ -1,14 +1,32 @@
+import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'providers/app_providers.dart';
 import 'screens/home_screen.dart';
+import 'services/audio_handler.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
-  runApp(const ProviderScope(child: SynchorusApp()));
+
+  final audioHandler = await AudioService.init(
+    builder: () => NativeAudioHandler(),
+    config: AudioServiceConfig(
+      androidNotificationChannelId: 'com.synchorus.audio',
+      androidNotificationChannelName: 'Synchorus',
+      androidStopForegroundOnPause: false,
+    ),
+  );
+
+  runApp(ProviderScope(
+    overrides: [
+      audioHandlerProvider.overrideWithValue(audioHandler),
+    ],
+    child: const SynchorusApp(),
+  ));
 }
 
 class SynchorusApp extends StatelessWidget {

@@ -321,6 +321,14 @@ public:
         return mVirtualFrame.load(std::memory_order_relaxed);
     }
 
+    void setMuted(bool muted) {
+        mMuted.store(muted, std::memory_order_relaxed);
+    }
+
+    bool isMuted() const {
+        return mMuted.load(std::memory_order_relaxed);
+    }
+
     bool seekToFrame(int64_t newFrame) {
         if (!mFileLoaded) return false;
         int64_t clamped = std::max(
@@ -342,12 +350,13 @@ public:
 
         auto* output = static_cast<float*>(audioData);
         const int outCh = stream->getChannelCount();
+        const bool muted = mMuted.load(std::memory_order_relaxed);
         int64_t vf = mVirtualFrame.load(std::memory_order_relaxed);
 
         for (int i = 0; i < numFrames; ++i) {
             for (int ch = 0; ch < outCh; ++ch) {
                 float sample = 0.0f;
-                if (mFileLoaded && vf >= 0 && vf < mDecodedTotalFrames) {
+                if (!muted && mFileLoaded && vf >= 0 && vf < mDecodedTotalFrames) {
                     int srcCh = std::min(ch, mDecodedChannels - 1);
                     int64_t idx = vf * mDecodedChannels + srcCh;
                     sample = static_cast<float>(mDecodedData[idx]) / 32768.0f;
@@ -365,6 +374,7 @@ private:
     std::shared_ptr<oboe::AudioStream> mStream;
     int32_t mStreamSampleRate = 48000;
     std::atomic<int64_t> mVirtualFrame{0};
+    std::atomic<bool> mMuted{false};
     std::mutex mLock;
 
     std::vector<int16_t> mDecodedData;
@@ -437,6 +447,18 @@ JNIEXPORT jlong JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeGetVirtualFrame(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return static_cast<jlong>(engine().getVirtualFrame());
+}
+
+JNIEXPORT void JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeSetMuted(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean muted) {
+    engine().setMuted(muted == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeIsMuted(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().isMuted() ? JNI_TRUE : JNI_FALSE;
 }
 
 }

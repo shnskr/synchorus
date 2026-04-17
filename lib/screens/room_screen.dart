@@ -56,6 +56,11 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     final audio = ref.read(nativeAudioSyncServiceProvider);
 
+    // 백그라운드 재생 핸들러 연결 (알림바/잠금화면 미디어 컨트롤)
+    // 호스트: 재생/정지/seek 컨트롤 표시, 게스트: 곡 정보+재생 상태만 표시
+    final handler = ref.read(audioHandlerProvider);
+    handler.attachSyncService(audio, isHost: widget.isHost);
+
     if (widget.isHost) {
       _addLog('방 생성 완료 (코드: ${widget.roomCode})');
       _addLog('참가자를 기다리는 중...');
@@ -357,7 +362,12 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     final audio = ref.read(nativeAudioSyncServiceProvider);
     final sync = ref.read(syncServiceProvider);
 
-    // 정리 완료 후 이동 (구독 취소했으므로 블로킹 없음)
+    // 백그라운드 재생 핸들러 분리 + 알림 제거
+    final handler = ref.read(audioHandlerProvider);
+    handler.detachSyncService();
+    await handler.stop();
+
+    // 정리 완료 후 이동 (구독 ���소했으므로 블로킹 없음)
     sync.reset();
     discovery.stop();
     await p2p.disconnect();
@@ -381,6 +391,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     // _leaveRoom이 정상 경로로 이미 정리한 경우 중복 cleanupSync 호출 방지 (#13)
     if (!_leaving) {
+      final handler = ref.read(audioHandlerProvider);
+      handler.detachSyncService();
       final audio = ref.read(nativeAudioSyncServiceProvider);
       audio.cleanupSync();
     }

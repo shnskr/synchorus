@@ -20,6 +20,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   final _urlController = TextEditingController();
   bool _isDragging = false;
   double _dragValue = 0;
+  bool _muted = false;
 
   NativeAudioSyncService get _audio =>
       ref.read(nativeAudioSyncServiceProvider);
@@ -66,6 +67,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     } else {
       _audio.syncPlay();
     }
+  }
+
+  void _toggleMute() {
+    setState(() => _muted = !_muted);
+    _audio.engine.setMuted(_muted);
   }
 
   String _formatDuration(Duration d) {
@@ -232,31 +238,46 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         final playing = snapshot.data ?? false;
         final hasAudio = _audio.currentFileName != null;
 
-        return Row(
-          mainAxisAlignment: MainAxisAlignment.center,
+        return Stack(
+          alignment: Alignment.center,
           children: [
-            IconButton(
-              iconSize: 40,
-              onPressed:
-                  (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
-              icon: const Icon(Icons.replay_5),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.center,
+              children: [
+                IconButton(
+                  iconSize: 40,
+                  onPressed:
+                      (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
+                  icon: const Icon(Icons.replay_5),
+                ),
+                const SizedBox(width: 16),
+                IconButton(
+                  iconSize: 64,
+                  onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
+                  icon: Icon(
+                    playing
+                        ? Icons.pause_circle_filled
+                        : Icons.play_circle_filled,
+                  ),
+                ),
+                const SizedBox(width: 16),
+                IconButton(
+                  iconSize: 40,
+                  onPressed:
+                      (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
+                  icon: const Icon(Icons.forward_5),
+                ),
+              ],
             ),
-            const SizedBox(width: 16),
-            IconButton(
-              iconSize: 64,
-              onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
-              icon: Icon(
-                playing
-                    ? Icons.pause_circle_filled
-                    : Icons.play_circle_filled,
+            Positioned(
+              right: 0,
+              child: IconButton(
+                iconSize: 28,
+                onPressed: hasAudio ? _toggleMute : null,
+                icon: Icon(
+                  _muted ? Icons.volume_off : Icons.volume_up,
+                ),
               ),
-            ),
-            const SizedBox(width: 16),
-            IconButton(
-              iconSize: 40,
-              onPressed:
-                  (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
-              icon: const Icon(Icons.forward_5),
             ),
           ],
         );

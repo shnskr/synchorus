@@ -1,9 +1,14 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import '../services/audio_handler.dart';
 import '../services/p2p_service.dart';
 import '../services/discovery_service.dart';
 import '../services/sync_service.dart';
 import '../services/native_audio_sync_service.dart';
+
+final audioHandlerProvider = Provider<NativeAudioHandler>((ref) {
+  throw UnimplementedError('audioHandlerProvider must be overridden in main.dart');
+});
 
 final p2pServiceProvider = Provider<P2PService>((ref) {
   final service = P2PService();

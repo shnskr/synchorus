@@ -12,4 +12,6 @@ object NativeAudio {
     external fun nativeGetTimestamp(): LongArray
     external fun nativeSeekToFrame(newFrame: Long): Boolean
     external fun nativeGetVirtualFrame(): Long
+    external fun nativeSetMuted(muted: Boolean)
+    external fun nativeIsMuted(): Boolean
 }

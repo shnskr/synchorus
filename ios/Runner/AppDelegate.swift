@@ -51,6 +51,12 @@ import UIKit
                 result(self.audioEngine.seekToFrame(newFrame))
             case "getVirtualFrame":
                 result(self.audioEngine.getVirtualFrame())
+            case "setMuted":
+                let muted = call.arguments as? Bool ?? false
+                self.audioEngine.setMuted(muted)
+                result(nil)
+            case "isMuted":
+                result(self.audioEngine.isMuted())
             default:
                 result(FlutterMethodNotImplemented)
             }

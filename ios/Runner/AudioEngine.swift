@@ -150,6 +150,14 @@ class AudioEngine {
         ]
     }
 
+    func setMuted(_ muted: Bool) {
+        engine.mainMixerNode.outputVolume = muted ? 0.0 : 1.0
+    }
+
+    func isMuted() -> Bool {
+        return engine.mainMixerNode.outputVolume == 0.0
+    }
+
     // MARK: - Private
 
     private func scheduleAndPlay(from frame: Int64) {
