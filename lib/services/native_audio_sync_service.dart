@@ -367,14 +367,15 @@ class NativeAudioSyncService {
 
   void _broadcastObs() {
     final ts = _engine.latest;
-    if (ts == null || !ts.ok) return;
+    if (ts == null) return;
 
+    // ok=false (HAL timestamp 실패)여도 virtualFrame + wallMs는 유효
+    // → 게스트가 fallback alignment으로 싱크 가능
     final obs = AudioObs(
       seq: _obsBroadcastSeq++,
-      // hostTimeMs는 framePos가 측정된 시각 (네이티브에서 원자적 캡처)
       hostTimeMs: ts.wallMs,
-      framePos: ts.framePos,
-      timeNs: ts.timeNs,
+      framePos: ts.ok ? ts.framePos : -1,
+      timeNs: ts.ok ? ts.timeNs : -1,
       virtualFrame: ts.virtualFrame,
       playing: _playing,
     );
@@ -699,6 +700,8 @@ class NativeAudioSyncService {
     final offset = _sync.filteredOffsetMs;
     final obs = _latestObs;
     if (obs == null || !obs.playing) return;
+    // 호스트 HAL timestamp 없으면 정밀 앵커 불가 → fallback에 맡김
+    if (obs.framePos < 0) return;
 
     // 앵커 순간의 호스트 wall clock = 게스트 wall + offset
     final anchorHostWall = ts.wallMs + offset;

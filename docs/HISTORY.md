@@ -958,6 +958,32 @@ Oboe `getTimestamp(CLOCK_MONOTONIC)`가 `ok=false` 반환하는 극단 환경 (B
 
 **빌드**: v0.0.14, APK 빌드 성공
 
+### 2026-04-17 (7) — 호스트 HAL timestamp 실패 시 fallback obs 전송
+
+**문제**: 호스트 `_broadcastObs()`가 `ts.ok=false`이면 obs를 아예 안 보냄 → 게스트 싱크 불가. 게스트 fallback은 구현했지만 호스트 측은 비대칭으로 남아있었음.
+
+**수정**:
+- `_broadcastObs()`: `ts.ok=false`여도 `virtualFrame` + `wallMs` 기반 obs 전송 (`framePos`는 -1)
+- `_tryEstablishAnchor()`: `obs.framePos < 0`이면 정밀 앵커 스킵 → fallback alignment에 위임
+
+기존 정밀 싱크 경로 (양쪽 HAL ok)는 동일. 호스트 HAL 실패 환경 (블루투스 DAC, 저가폰, 에뮬레이터)에서만 새 경로 활성화.
+
+**빌드**: v0.0.15
+
+### 2026-04-17 (8) — step 2: 1:N 멀티 게스트 아키텍처 검토
+
+코드 전면 리뷰 결과, 이미 1:N으로 동작하는 구조:
+- P2PService: `List<Peer>` + `broadcastToAll()` + `sendToPeer(fromId)` — N개 피어 지원
+- HTTP 파일 서버: shelf_static이 동시 N 클라이언트 스트리밍 지원
+- clock sync: 호스트 `startHostHandler()`가 각 게스트 ping에 개별 응답
+- audio-obs: broadcast → 모든 게스트 수신, 각자 독립 drift 계산
+- audio-url, seek-notify: `broadcastToAll()`로 전체 전송
+- audio-request, state-request: `sendToPeer(fromId)`로 개별 응답
+
+1게스트 제한 코드 없음. 코드 변경 없이 N게스트 동작 가능 → **멀티 기기 실측 테스트로 검증 필요.**
+
+PLAN.md step 2 → step 3(HTTP 전송) 이미 완료 확인, 상태 업데이트.
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [x] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 `unload()`로 PCM 메모리 해제. Android: `stop()` + `stopDecodeThread()` + `resetState()`, iOS: `stop()` + `audioFile=nil`. Dart: `clearTempFiles()` / `dispose()`에서 호출.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
