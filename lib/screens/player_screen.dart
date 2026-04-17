@@ -17,7 +17,6 @@ class PlayerScreen extends ConsumerStatefulWidget {
 }
 
 class _PlayerScreenState extends ConsumerState<PlayerScreen> {
-  final _urlController = TextEditingController();
   bool _isDragging = false;
   double _dragValue = 0;
   bool _muted = false;
@@ -27,7 +26,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   void dispose() {
-    _urlController.dispose();
     super.dispose();
   }
 

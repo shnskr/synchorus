@@ -373,6 +373,13 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
     await p2p.disconnect();
     await audio.clearTempFiles();
 
+    // Provider 무효화: 다음 방 입장 시 새 인스턴스 생성 보장
+    // invalidate → onDispose 콜백 → service.dispose() 호출됨
+    ref.invalidate(nativeAudioSyncServiceProvider);
+    ref.invalidate(syncServiceProvider);
+    ref.invalidate(p2pServiceProvider);
+    ref.invalidate(discoveryServiceProvider);
+
     if (mounted) {
       Navigator.of(context).popUntil((route) => route.isFirst);
     }
@@ -389,12 +396,18 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     _logScrollController.dispose();
 
-    // _leaveRoom이 정상 경로로 이미 정리한 경우 중복 cleanupSync 호출 방지 (#13)
+    // _leaveRoom이 정상 경로로 이미 정리한 경우 중복 cleanup 방지 (#13)
     if (!_leaving) {
       final handler = ref.read(audioHandlerProvider);
       handler.detachSyncService();
       final audio = ref.read(nativeAudioSyncServiceProvider);
       audio.cleanupSync();
+
+      // 비정상 종료 경로에서도 provider 무효화
+      ref.invalidate(nativeAudioSyncServiceProvider);
+      ref.invalidate(syncServiceProvider);
+      ref.invalidate(p2pServiceProvider);
+      ref.invalidate(discoveryServiceProvider);
     }
 
     super.dispose();

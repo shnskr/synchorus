@@ -158,6 +158,13 @@ class AudioEngine {
         return engine.mainMixerNode.outputVolume == 0.0
     }
 
+    func unload() -> Bool {
+        if isEngineRunning { stop() }
+        audioFile = nil
+        seekFrameOffset = 0
+        return true
+    }
+
     // MARK: - Private
 
     private func scheduleAndPlay(from frame: Int64) {

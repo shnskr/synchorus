@@ -93,6 +93,7 @@ class MainActivity : AudioServiceActivity() {
                     "isMuted" -> {
                         result.success(NativeAudio.nativeIsMuted())
                     }
+                    "unload" -> result.success(NativeAudio.nativeUnload())
                     else -> result.notImplemented()
                 }
             }

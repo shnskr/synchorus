@@ -118,6 +118,11 @@ class NativeAudioService {
     return await _channel.invokeMethod<bool>('isMuted') ?? false;
   }
 
+  /// PCM 버퍼 및 파일 상태 해제 (방 나가기/앱 종료 시).
+  Future<bool> unload() async {
+    return await _channel.invokeMethod<bool>('unload') ?? false;
+  }
+
   /// 주기적 타임스탬프 폴링 시작.
   void startPolling({Duration interval = const Duration(milliseconds: 100)}) {
     stopPolling();

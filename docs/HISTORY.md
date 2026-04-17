@@ -925,8 +925,41 @@ Oboe `getTimestamp(CLOCK_MONOTONIC)`가 `ok=false` 반환하는 극단 환경 (B
 
 **빌드**: v0.0.12, 에뮬레이터 확인 완료
 
+### 2026-04-17 (6) — 네이티브 엔진 unload + 라이프사이클 전면 리뷰
+
+#### 네이티브 엔진 `unload` 메서드 추가
+- Android C++: `unload()` = `stop()` + `stopDecodeThread()` + `resetState()` + `mVirtualFrame=0`
+- iOS Swift: `unload()` = `stop()` + `audioFile=nil` + `seekFrameOffset=0`
+- JNI/MethodChannel/Dart 전 레이어 관통 추가
+- `clearTempFiles()`, `cleanupSync()`, `dispose()`에서 호출
+
+#### 라이프사이클/리소스 정리 전면 리뷰 — CRITICAL 3건 + HIGH 8건 수정
+
+**CRITICAL 1: Provider 싱글턴 재사용 버그**
+- 문제: 방 나가기 → 서비스 dispose → 다시 방 입장 시 이미 dispose된 서비스 재사용
+- 원인: Riverpod `Provider`가 캐시된 인스턴스를 반환, `ref.invalidate()` 없음
+- 수정: `_leaveRoom()` + `dispose()` 양쪽에서 전체 서비스 provider `ref.invalidate()` 호출
+  - `nativeAudioSyncServiceProvider`, `syncServiceProvider`, `p2pServiceProvider`, `discoveryServiceProvider`
+
+**CRITICAL 2: 다운로드 중 HttpClient/Sink 누수**
+- 문제: HTTP 에러 또는 네트워크 끊김 시 `client.close()` / `sink.close()` 미도달 → 소켓/파일 핸들 누수
+- 수정: `_handleAudioUrl` 다운로드를 중첩 try-finally로 감싸 항상 `sink.close()` → `client.close()` 보장
+
+**CRITICAL 3: 다운로드 중 방 나가기 레이스**
+- 문제: 게스트 파일 다운 중 cleanup → 다운로드와 엔진 정리가 동시 실행 → 상태 꼬임
+- 수정: `_downloadAborted` 플래그 도입. `clearTempFiles()`/`cleanupSync()`에서 `true` 설정, 다운로드 루프에서 매 청크마다 체크 후 break, 로드 스킵
+
+**HIGH: dispose 이중 호출 방지**
+- 문제: `_leaveRoom()` async 진행 중 `dispose()` 호출되면 cleanup 이중 실행
+- 수정: `_leaving` 플래그 + `dispose()` fallback 경로에서도 provider invalidation 추가
+
+**기타 정리**
+- `player_screen.dart`: 미사용 `_urlController` (TextEditingController) 제거
+
+**빌드**: v0.0.14, APK 빌드 성공
+
 #### 알려진 이슈 / 다음에 확인할 것
-- [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
+- [x] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 `unload()`로 PCM 메모리 해제. Android: `stop()` + `stopDecodeThread()` + `resetState()`, iOS: `stop()` + `audioFile=nil`. Dart: `clearTempFiles()` / `dispose()`에서 호출.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
   - iPhone buffer 21ms ≈ 1024 frames @ 48kHz (Apple 표준 IO buffer), S22 192 frames @ 48kHz
   - 측정 통일 후에도 17ms 비대칭 잔존 — 이건 buffer 자체 차이라 "진짜 latency 차이"의 일부

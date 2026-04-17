@@ -14,4 +14,5 @@ object NativeAudio {
     external fun nativeGetVirtualFrame(): Long
     external fun nativeSetMuted(muted: Boolean)
     external fun nativeIsMuted(): Boolean
+    external fun nativeUnload(): Boolean
 }

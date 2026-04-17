@@ -37,6 +37,7 @@ class NativeAudioSyncService {
   bool _playing = false;
   bool _audioReady = false;
   bool _isLoading = false;
+  bool _downloadAborted = false;
   String? _currentFileName;
   String? _storedSafeName;
   String? _currentUrl;
@@ -452,6 +453,7 @@ class NativeAudioSyncService {
     }
 
     _currentUrl = url;
+    _downloadAborted = false;
 
     // HTTP 다운로드 → temp 파일
     try {
@@ -461,34 +463,49 @@ class NativeAudioSyncService {
 
       final swDownload = Stopwatch()..start();
       final client = HttpClient();
-      final request = await client.getUrl(Uri.parse(url));
-      final response = await request.close();
-      if (response.statusCode != 200) {
-        throw Exception('HTTP ${response.statusCode}');
-      }
-      final totalBytes = response.contentLength; // -1 if unknown
-      int receivedBytes = 0;
-      final sink = tempFile.openWrite();
-      await for (final chunk in response) {
-        sink.add(chunk);
-        receivedBytes += chunk.length;
-        if (totalBytes > 0) {
-          _downloadProgressController.add(receivedBytes / totalBytes);
+      try {
+        final request = await client.getUrl(Uri.parse(url));
+        final response = await request.close();
+        if (response.statusCode != 200) {
+          throw Exception('HTTP ${response.statusCode}');
         }
+        final totalBytes = response.contentLength; // -1 if unknown
+        int receivedBytes = 0;
+        final sink = tempFile.openWrite();
+        try {
+          await for (final chunk in response) {
+            if (_downloadAborted) break;
+            sink.add(chunk);
+            receivedBytes += chunk.length;
+            if (totalBytes > 0) {
+              _downloadProgressController.add(receivedBytes / totalBytes);
+            }
+          }
+        } finally {
+          await sink.close();
+        }
+      } finally {
+        client.close();
       }
-      await sink.close();
-      client.close();
       swDownload.stop();
-      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms'
-          ' ($receivedBytes bytes)');
+
+      // cleanup 중 다운로드가 중단된 경우 로드 스킵
+      if (_downloadAborted) {
+        debugPrint('[GUEST] download aborted, skipping load');
+        _isLoading = false;
+        _loadingController.add(false);
+        return;
+      }
+
+      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms');
 
       // 네이티브 엔진에 로드
       final swDecode = Stopwatch()..start();
       final ok = await _engine.loadFile(tempFile.path);
       swDecode.stop();
       debugPrint('[DECODE-GUEST] loadFile took ${swDecode.elapsedMilliseconds}ms');
-      if (!ok) {
-        _errorController.add('파일 로드 실패');
+      if (!ok || _downloadAborted) {
+        if (!_downloadAborted) _errorController.add('파일 로드 실패');
         _isLoading = false;
         _loadingController.add(false);
         return;
@@ -517,7 +534,9 @@ class NativeAudioSyncService {
       }
     } catch (e) {
       debugPrint('Audio download/load error: $e');
-      _errorController.add('오디오 다운로드 실패');
+      if (!_downloadAborted) {
+        _errorController.add('오디오 다운로드 실패');
+      }
       _isLoading = false;
       _loadingController.add(false);
     }
@@ -793,6 +812,7 @@ class NativeAudioSyncService {
   }
 
   Future<void> clearTempFiles() async {
+    _downloadAborted = true;
     _isLoading = false;
     _loadingController.add(false);
     _audioReady = false;
@@ -800,6 +820,7 @@ class NativeAudioSyncService {
     _playingController.add(false);
     _engine.stopPolling();
     await _engine.stop();
+    await _engine.unload();
     _stopObsBroadcast();
     await _stopFileServer();
 
@@ -814,6 +835,7 @@ class NativeAudioSyncService {
   }
 
   void cleanupSync() {
+    _downloadAborted = true;
     _isLoading = false;
     _audioReady = false;
     _playing = false;
@@ -825,6 +847,8 @@ class NativeAudioSyncService {
     _timestampSub = null;
     _stopObsBroadcast();
     _engine.stopPolling();
+    unawaited(_engine.stop());
+    unawaited(_engine.unload());
     _resetDriftState();
     _storedSafeName = null;
     _currentFileName = null;
@@ -840,6 +864,7 @@ class NativeAudioSyncService {
     _downloadProgressController.close();
     _errorController.close();
     await _stopFileServer();
+    await _engine.unload();
     await _engine.dispose();
   }
 }

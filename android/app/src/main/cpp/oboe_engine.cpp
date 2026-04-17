@@ -241,6 +241,14 @@ public:
         return true;
     }
 
+    bool unload() {
+        stop();
+        stopDecodeThread();
+        resetState();
+        mVirtualFrame.store(0, std::memory_order_relaxed);
+        return true;
+    }
+
     bool getLatestTimestamp(
         int64_t* outFramePos,
         int64_t* outTimeNs,
@@ -809,6 +817,12 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeIsMuted(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().isMuted() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeUnload(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().unload() ? JNI_TRUE : JNI_FALSE;
 }
 
 }

@@ -57,6 +57,8 @@ import UIKit
                 result(nil)
             case "isMuted":
                 result(self.audioEngine.isMuted())
+            case "unload":
+                result(self.audioEngine.unload())
             default:
                 result(FlutterMethodNotImplemented)
             }
