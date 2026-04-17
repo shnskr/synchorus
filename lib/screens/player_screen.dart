@@ -195,6 +195,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Widget _buildSeekBar() {
     return StreamBuilder<Duration?>(
       stream: _audio.durationStream,
+      initialData: _audio.currentDuration,
       builder: (context, durationSnap) {
         final duration = durationSnap.data ?? Duration.zero;
         return StreamBuilder<Duration>(

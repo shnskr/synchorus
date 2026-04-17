@@ -17,9 +17,8 @@ import 'sync_service.dart';
 const double _driftSeekThresholdMs = 20.0;
 const double _seekCorrectionGain = 0.8;
 const Duration _seekCooldown = Duration(milliseconds: 1000);
-const double _idealFramesPerMs = 48.0; // 48kHz 가정 (계산용 상수)
+const double _defaultFramesPerMs = 48.0; // fallback (실제 sampleRate 미확인 시)
 const double _reAnchorThresholdMs = 200.0;
-const int _contentAlignThreshold = 4800; // 100ms @ 48kHz
 
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
@@ -66,6 +65,7 @@ class NativeAudioSyncService {
   // ── UI 스트림 ─────────────────────────────────────────────
   final _positionController = StreamController<Duration>.broadcast();
   final _durationController = StreamController<Duration?>.broadcast();
+  Duration? _currentDuration;
   final _playingController = StreamController<bool>.broadcast();
   final _loadingController = StreamController<bool>.broadcast();
   final _downloadProgressController = StreamController<double>.broadcast();
@@ -73,6 +73,7 @@ class NativeAudioSyncService {
 
   Stream<Duration> get positionStream => _positionController.stream;
   Stream<Duration?> get durationStream => _durationController.stream;
+  Duration? get currentDuration => _currentDuration;
   Stream<bool> get playingStream => _playingController.stream;
   Stream<bool> get loadingStream => _loadingController.stream;
   /// 다운로드 진행률 (0.0 ~ 1.0). 호스트는 emit 없음.
@@ -86,6 +87,12 @@ class NativeAudioSyncService {
   double? get latestDriftMs => _latestDriftMs;
   int get seekCount => _seekCount;
   NativeAudioService get engine => _engine;
+
+  /// 현재 파일의 frames/ms (실제 sampleRate 기반, 미확인 시 48.0 fallback)
+  double get _framesPerMs {
+    final sr = _engine.latest?.sampleRate ?? 0;
+    return sr > 0 ? sr / 1000.0 : _defaultFramesPerMs;
+  }
 
   NativeAudioSyncService(this._p2p, this._sync);
 
@@ -179,6 +186,7 @@ class NativeAudioSyncService {
       _stopObsBroadcast();
     }
     _positionController.add(Duration.zero);
+    _currentDuration = null;
     _durationController.add(null);
 
     _audioReady = false;
@@ -262,11 +270,9 @@ class NativeAudioSyncService {
     // duration 전파
     final ts = await _engine.getTimestamp();
     if (ts != null && ts.sampleRate > 0) {
-      _durationController.add(
-        Duration(
-            milliseconds:
-                (ts.totalFrames * 1000 / ts.sampleRate).round()),
-      );
+      _currentDuration = Duration(
+          milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
+      _durationController.add(_currentDuration);
     }
   }
 
@@ -499,11 +505,9 @@ class NativeAudioSyncService {
       // duration 전파
       final ts = await _engine.getTimestamp();
       if (ts != null && ts.sampleRate > 0) {
-        _durationController.add(
-          Duration(
-              milliseconds:
-                  (ts.totalFrames * 1000 / ts.sampleRate).round()),
-        );
+        _currentDuration = Duration(
+            milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
+        _durationController.add(_currentDuration);
       }
 
       // 호스트가 재생 중이면 엔진 시작
@@ -592,7 +596,7 @@ class NativeAudioSyncService {
     _anchorGuestFrame = null;
     _seekCorrectionAccum = 0;
     _seekCooldownUntilMs = 0;
-    _contentAlignCooldownUntilMs = 0;
+    _fallbackAlignCooldownMs = 0;
     _latestDriftMs = null;
     _driftSampleCount = 0;
   }
@@ -602,24 +606,13 @@ class NativeAudioSyncService {
   // ═══════════════════════════════════════════════════════════
 
   int _tsFailCount = 0;
+  int _fallbackAlignCooldownMs = 0;
 
   void _startTimestampWatch() {
     _tsFailCount = 0;
     _timestampSub?.cancel();
     _timestampSub = _engine.timestampStream.listen((ts) {
-      if (!ts.ok) {
-        _tsFailCount++;
-        if (_tsFailCount <= 3 || _tsFailCount % 50 == 0) {
-          debugPrint('[TS] ok=false (count=$_tsFailCount, playing=$_playing, host=$_isHost)');
-        }
-        return;
-      }
-      if (_tsFailCount > 0) {
-        debugPrint('[TS] ok recovered after $_tsFailCount failures (vf=${ts.virtualFrame})');
-        _tsFailCount = 0;
-      }
-
-      // UI position 업데이트 (seek override 중에는 폴링 position 무시)
+      // UI position 업데이트 — virtualFrame은 ok 여부와 무관하게 유효
       if (ts.sampleRate > 0 && _seekOverridePosition == null) {
         _positionController.add(
           Duration(
@@ -628,16 +621,52 @@ class NativeAudioSyncService {
         );
       }
 
-      // 게스트: drift 계산
+      if (!ts.ok) {
+        _tsFailCount++;
+        if (_tsFailCount <= 3 || _tsFailCount % 50 == 0) {
+          debugPrint('[TS] ok=false (count=$_tsFailCount, playing=$_playing, host=$_isHost)');
+        }
+        // fallback: virtualFrame 기반 간단 정렬
+        if (!_isHost && _playing) {
+          _fallbackAlignment(ts);
+        }
+        return;
+      }
+      if (_tsFailCount > 0) {
+        debugPrint('[TS] ok recovered after $_tsFailCount failures (vf=${ts.virtualFrame})');
+        _tsFailCount = 0;
+      }
+
+      // 게스트: 정밀 drift 보정 (HAL framePos 기반)
       if (!_isHost && _playing) {
         if (_anchorHostFrame == null) {
           _tryEstablishAnchor(ts);
         } else {
           _recomputeDrift(ts);
         }
-        _checkContentAlignment(ts);
       }
     });
+  }
+
+  /// HAL timestamp 없을 때 virtualFrame으로 간단 정렬 (에뮬레이터, 블루투스 등)
+  void _fallbackAlignment(NativeTimestamp ts) {
+    if (!_sync.isSynced) return;
+    final obs = _latestObs;
+    if (obs == null || !obs.playing) return;
+    if (ts.wallMs < _fallbackAlignCooldownMs) return;
+
+    final offset = _sync.filteredOffsetMs;
+    final hostWallNow = ts.wallMs + offset;
+    final expectedHostVf = obs.virtualFrame +
+        ((hostWallNow - obs.hostTimeMs) * _framesPerMs).round();
+
+    final diff = (expectedHostVf - ts.virtualFrame).abs();
+    // 2400 frames (50ms) 이상 차이나면 보정, 쿨다운 2초
+    if (diff > 2400) {
+      unawaited(_engine.seekToFrame(expectedHostVf));
+      _fallbackAlignCooldownMs = ts.wallMs + 2000;
+      debugPrint('[FALLBACK] align: diff=$diff, seekTo=$expectedHostVf');
+    }
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -656,11 +685,11 @@ class NativeAudioSyncService {
     final anchorHostWall = ts.wallMs + offset;
     // obs는 최대 500ms 오래된 값 → 앵커 시점으로 외삽
     final anchorHostFrame = obs.framePos +
-        ((anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs).round();
+        ((anchorHostWall - obs.hostTimeMs) * _framesPerMs).round();
 
     // 콘텐츠 정렬: 게스트를 호스트 virtualFrame 위치로 점프
     final hostContentFrame = obs.virtualFrame +
-        ((anchorHostWall - obs.hostTimeMs) * _idealFramesPerMs).round();
+        ((anchorHostWall - obs.hostTimeMs) * _framesPerMs).round();
     final currentEffective = ts.framePos + _seekCorrectionAccum;
     final initialCorrection = anchorHostFrame - currentEffective;
     unawaited(_engine.seekToFrame(hostContentFrame));
@@ -685,7 +714,7 @@ class NativeAudioSyncService {
     // 호스트의 현재 예상 frame (obs 외삽)
     final hostWallNow = ts.wallMs + offset;
     final expectedHostFrameNow =
-        obs.framePos + (hostWallNow - obs.hostTimeMs) * _idealFramesPerMs;
+        obs.framePos + (hostWallNow - obs.hostTimeMs) * _framesPerMs;
     final dH = expectedHostFrameNow - anchorHF;
 
     // 게스트의 effective frame (seek 보정 포함)
@@ -693,7 +722,7 @@ class NativeAudioSyncService {
     final dG = (effectiveGuestFrame - anchorGF).toDouble();
 
     final driftFrame = dG - dH; // 양수: 게스트 앞섬
-    final driftMs = driftFrame / _idealFramesPerMs;
+    final driftMs = driftFrame / _framesPerMs;
 
     _latestDriftMs = driftMs;
     _driftSampleCount++;
@@ -727,7 +756,7 @@ class NativeAudioSyncService {
 
     // drift > 0 (게스트 앞섬) → correction < 0 (뒤로)
     final correctionFrames =
-        (-driftMs * _seekCorrectionGain * _idealFramesPerMs).round();
+        (-driftMs * _seekCorrectionGain * _framesPerMs).round();
     final newVf = currentVf + correctionFrames;
 
     try {
@@ -740,31 +769,6 @@ class NativeAudioSyncService {
     _seekCount++;
     _seekCooldownUntilMs = wallMs + _seekCooldown.inMilliseconds;
     _seekCorrectionAccum += correctionFrames;
-  }
-
-  /// 콘텐츠 정렬: 게스트 virtualFrame ≈ 호스트 virtualFrame인지 확인.
-  /// 4800 frames(100ms) 이상 차이나면 보정. 쿨다운 1초.
-  int _contentAlignCooldownUntilMs = 0;
-
-  void _checkContentAlignment(NativeTimestamp ts) {
-    final obs = _latestObs;
-    final offset = _sync.filteredOffsetMs;
-    if (obs == null || !obs.playing) return;
-    if (ts.wallMs < _contentAlignCooldownUntilMs) return;
-
-    final framesPerMs = ts.sampleRate > 0
-        ? ts.sampleRate / 1000.0
-        : _idealFramesPerMs;
-    final hostWallNow = ts.wallMs + offset;
-    final expectedHostVf = obs.virtualFrame +
-        ((hostWallNow - obs.hostTimeMs) * framesPerMs).round();
-
-    final diff = (expectedHostVf - ts.virtualFrame).abs();
-    if (diff > _contentAlignThreshold) {
-      unawaited(_engine.seekToFrame(expectedHostVf));
-      _contentAlignCooldownUntilMs = ts.wallMs + 1000;
-      debugPrint('content align: diff=$diff frames, seekTo=$expectedHostVf');
-    }
   }
 
   // ═══════════════════════════════════════════════════════════

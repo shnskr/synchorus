@@ -247,12 +247,21 @@ public:
         int64_t* outWallAtFramePosNs,
         int64_t* outVirtualFrame) {
 
+        // virtualFrame은 항상 유효 (오디오 콜백이 매 프레임 갱신)
+        *outVirtualFrame = mVirtualFrame.load(std::memory_order_relaxed);
+
+        // wall clock도 항상 제공 (fallback sync에 사용)
+        struct timespec wallTs, monoTs;
+        clock_gettime(CLOCK_REALTIME, &wallTs);
+        clock_gettime(CLOCK_MONOTONIC, &monoTs);
+        const int64_t wallNow =
+            static_cast<int64_t>(wallTs.tv_sec) * 1000000000LL + wallTs.tv_nsec;
+
         std::lock_guard<std::mutex> lock(mLock);
         if (!mStream) {
             *outFramePos = -1;
             *outTimeNs = -1;
-            *outWallAtFramePosNs = -1;
-            *outVirtualFrame = 0;
+            *outWallAtFramePosNs = wallNow;
             return false;
         }
 
@@ -263,23 +272,16 @@ public:
         if (result != oboe::Result::OK) {
             *outFramePos = -1;
             *outTimeNs = -1;
-            *outWallAtFramePosNs = -1;
-            *outVirtualFrame = 0;
+            *outWallAtFramePosNs = wallNow;
             return false;
         }
 
-        struct timespec wallTs, monoTs;
-        clock_gettime(CLOCK_REALTIME, &wallTs);
-        clock_gettime(CLOCK_MONOTONIC, &monoTs);
-        const int64_t wallNow =
-            static_cast<int64_t>(wallTs.tv_sec) * 1000000000LL + wallTs.tv_nsec;
         const int64_t monoNow =
             static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
 
         *outFramePos = framePos;
         *outTimeNs = timeNs;
         *outWallAtFramePosNs = wallNow - (monoNow - timeNs);
-        *outVirtualFrame = mVirtualFrame.load(std::memory_order_relaxed);
         return true;
     }
 

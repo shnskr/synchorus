@@ -884,6 +884,47 @@ LAN 환경에서 다운로드 100~500ms이므로 병목이 크지 않아 현재 
 
 **빌드**: v0.0.11, S22 + 에뮬레이터 테스트 완료
 
+### 2026-04-17 (5) — content alignment 제거 + fallback sync + duration 버그 수정
+
+#### `_checkContentAlignment` 완전 제거
+
+**증상**: content alignment seek와 drift correction seek가 동시 작동하며 위치 발산 (수백만 프레임 diff 핑퐁).
+
+**근본 원인**: 3개 seek 메커니즘 (`_tryEstablishAnchor`, `_performSeek`, `_checkContentAlignment`)이 서로의 보정을 덮어쓰면서 경합.
+- `_checkContentAlignment`는 virtualFrame 기준으로 seek → `_seekCorrectionAccum` 미갱신 → drift 계산 회계 파탄
+- drift correction의 re-anchor (drift >200ms → 앵커 리셋 → 재정렬)가 이미 모든 정렬 시나리오 처리 가능
+
+**수정**: `_checkContentAlignment` 메서드 및 호출부 완전 삭제. `_contentAlignThreshold` 상수 제거.
+
+#### `_framesPerMs` getter 도입
+
+**문제**: `_idealFramesPerMs = 48.0` 상수가 44.1kHz 파일에서 8.8% 오차 유발 (외삽 20ms 구간에서 ~1.8ms 에러).
+
+**수정**: `_idealFramesPerMs` 상수 → `_framesPerMs` getter로 교체. `ts.sampleRate`에서 실제 값 계산 (`sr / 1000.0`). sampleRate 미확보 시 `_defaultFramesPerMs = 48.0` fallback.
+
+#### fallback alignment (HAL timestamp 실패 환경 대응)
+
+Oboe `getTimestamp(CLOCK_MONOTONIC)`가 `ok=false` 반환하는 극단 환경 (Bluetooth, 에뮬레이터, 특정 DAC) 대비.
+
+**네이티브 수정** (`oboe_engine.cpp`):
+- `getLatestTimestamp`가 `ok=false`일 때도 항상 `virtualFrame` + `wallClock` 반환 (이전엔 -1 반환)
+
+**Dart 수정** (`native_audio_sync_service.dart`):
+- position UI 업데이트를 `ts.ok` 체크 밖으로 이동 (virtualFrame은 항상 유효)
+- `_fallbackAlignment()` 신규: `ts.ok=false` + 재생 중일 때 virtualFrame 기반 coarse alignment (diff > 2400 frames ≈ 50ms 시 seek, 2초 쿨다운)
+
+#### duration 0:00 표시 버그 수정
+
+**증상**: 게스트가 플레이어 화면에 진입하기 전에 파일 로드 완료되면 duration이 0:00으로 표시.
+
+**원인**: broadcast `StreamController`의 late subscriber 문제 — 이미 emit된 duration 이벤트를 못 받음.
+
+**수정**:
+- `_currentDuration` 필드로 마지막 duration 캐싱
+- `player_screen.dart` duration StreamBuilder에 `initialData: _audio.currentDuration` 추가
+
+**빌드**: v0.0.12, 에뮬레이터 확인 완료
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
