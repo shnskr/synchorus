@@ -146,20 +146,35 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       builder: (context, loadingSnap) {
         final isLoading = loadingSnap.data ?? false;
         final fileName = _audio.currentFileName;
-        final title = isLoading
-            ? '파일 수신 중...'
-            : fileName ??
-                (widget.isHost ? '오디오를 선택하세요' : '음악 대기 중');
+
+        return StreamBuilder<double>(
+          stream: _audio.downloadProgressStream,
+          initialData: 0.0,
+          builder: (context, progressSnap) {
+            final progress = progressSnap.data ?? 0.0;
+            final progressPct = (progress * 100).round();
+
+            final title = isLoading
+                ? (progress > 0 && progress < 1.0
+                    ? '파일 수신 중... $progressPct%'
+                    : '파일 수신 중...')
+                : fileName ??
+                    (widget.isHost ? '오디오를 선택하세요' : '음악 대기 중');
 
         return Card(
           child: ListTile(
             leading: isLoading
-                ? const SizedBox(
+                ? SizedBox(
                     width: 40,
                     height: 40,
                     child: Padding(
-                      padding: EdgeInsets.all(8),
-                      child: CircularProgressIndicator(strokeWidth: 3),
+                      padding: const EdgeInsets.all(8),
+                      child: CircularProgressIndicator(
+                        strokeWidth: 3,
+                        value: progress > 0 && progress < 1.0
+                            ? progress
+                            : null,
+                      ),
                     ),
                   )
                 : const Icon(Icons.music_note, size: 40),
@@ -170,6 +185,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             ),
             subtitle: Text(widget.isHost ? '호스트' : '참가자'),
           ),
+        );
+          },
         );
       },
     );

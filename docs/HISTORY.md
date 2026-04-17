@@ -865,6 +865,25 @@ diff=5307855 seekTo=11660076  ← 발산
 
 **빌드**: v0.0.10, S22 + 에뮬레이터 테스트 완료
 
+### 2026-04-17 (4) — 게스트 다운로드 진행률 표시 + 최적화 2 조사
+
+#### 최적화 2 (게스트 다운로드+디코드 병렬화) 조사 결과
+
+`AMediaExtractor`(Android), `AVAudioFile`(iOS) 모두 완전한 seekable 파일 필요 → 다운로드 중 디코드 시작 불가.
+- `AMediaExtractor_setDataSourceFd(fd, offset, size)`: 전체 크기 필요, 파이프/FIFO 불가
+- MP3 헤더(Xing/VBRI), MP4 moov atom 등 컨테이너 메타데이터 파싱에 완전한 파일 필수
+
+LAN 환경에서 다운로드 100~500ms이므로 병목이 크지 않아 현재 구조 유지.
+
+#### 게스트 다운로드 진행률 UI 추가
+
+- `_downloadProgressController` 스트림 추가 (0.0~1.0)
+- `response.pipe()` → 수동 청크 읽기로 교체, `Content-Length` 기반 진행률 계산
+- UI: `CircularProgressIndicator(value: progress)` + "파일 수신 중... 47%" 텍스트
+- 다운로드 완료 후 디코딩 중에는 기존 무한 스피너
+
+**빌드**: v0.0.11, S22 + 에뮬레이터 테스트 완료
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`

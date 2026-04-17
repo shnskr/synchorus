@@ -68,12 +68,16 @@ class NativeAudioSyncService {
   final _durationController = StreamController<Duration?>.broadcast();
   final _playingController = StreamController<bool>.broadcast();
   final _loadingController = StreamController<bool>.broadcast();
+  final _downloadProgressController = StreamController<double>.broadcast();
   final _errorController = StreamController<String>.broadcast();
 
   Stream<Duration> get positionStream => _positionController.stream;
   Stream<Duration?> get durationStream => _durationController.stream;
   Stream<bool> get playingStream => _playingController.stream;
   Stream<bool> get loadingStream => _loadingController.stream;
+  /// 다운로드 진행률 (0.0 ~ 1.0). 호스트는 emit 없음.
+  Stream<double> get downloadProgressStream =>
+      _downloadProgressController.stream;
   Stream<String> get errorStream => _errorController.stream;
 
   String? get currentFileName => _currentFileName;
@@ -456,10 +460,21 @@ class NativeAudioSyncService {
       if (response.statusCode != 200) {
         throw Exception('HTTP ${response.statusCode}');
       }
-      await response.pipe(tempFile.openWrite());
+      final totalBytes = response.contentLength; // -1 if unknown
+      int receivedBytes = 0;
+      final sink = tempFile.openWrite();
+      await for (final chunk in response) {
+        sink.add(chunk);
+        receivedBytes += chunk.length;
+        if (totalBytes > 0) {
+          _downloadProgressController.add(receivedBytes / totalBytes);
+        }
+      }
+      await sink.close();
       client.close();
       swDownload.stop();
-      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms');
+      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms'
+          ' ($receivedBytes bytes)');
 
       // 네이티브 엔진에 로드
       final swDecode = Stopwatch()..start();
@@ -818,6 +833,7 @@ class NativeAudioSyncService {
     _durationController.close();
     _playingController.close();
     _loadingController.close();
+    _downloadProgressController.close();
     _errorController.close();
     await _stopFileServer();
     await _engine.dispose();
