@@ -414,6 +414,16 @@ class NativeAudioSyncService {
       url = url.replaceFirst(RegExp(r'http://[^:/]+'), 'http://$connectedIp');
     }
 
+    // 새 파일 로드 전 기존 재생 상태 정리
+    // _audioReady를 먼저 false로 해야 _handleAudioObs가 start()를 호출하지 않음
+    _audioReady = false;
+    if (_playing) {
+      _playing = false;
+      _playingController.add(false);
+      await _engine.stop();
+    }
+    _resetDriftState();
+
     _isLoading = true;
     _loadingController.add(true);
 
@@ -482,6 +492,7 @@ class NativeAudioSyncService {
       }
 
       // 호스트가 재생 중이면 엔진 시작
+      debugPrint('[GUEST] loadFile done, hostPlaying=$hostPlaying, audioReady=$_audioReady');
       if (hostPlaying) {
         await _startGuestPlayback();
       }
@@ -504,6 +515,7 @@ class NativeAudioSyncService {
 
       if (obs.playing) {
         if (!_playing && _audioReady) {
+          debugPrint('[GUEST] obs→startPlayback (playing=$_playing, ready=$_audioReady)');
           unawaited(_startGuestPlayback());
         }
       } else {
@@ -538,8 +550,13 @@ class NativeAudioSyncService {
   // ═══════════════════════════════════════════════════════════
 
   Future<void> _startGuestPlayback() async {
-    if (_playing) return;
+    if (_playing) {
+      debugPrint('[GUEST] _startGuestPlayback: already playing, skip');
+      return;
+    }
+    debugPrint('[GUEST] _startGuestPlayback: calling engine.start()');
     final ok = await _engine.start();
+    debugPrint('[GUEST] _startGuestPlayback: engine.start() → $ok');
     if (!ok) return;
     _playing = true;
     _playingController.add(true);
@@ -560,6 +577,7 @@ class NativeAudioSyncService {
     _anchorGuestFrame = null;
     _seekCorrectionAccum = 0;
     _seekCooldownUntilMs = 0;
+    _contentAlignCooldownUntilMs = 0;
     _latestDriftMs = null;
     _driftSampleCount = 0;
   }
@@ -568,10 +586,23 @@ class NativeAudioSyncService {
   // 타임스탬프 감시 (호스트/게스트 공통)
   // ═══════════════════════════════════════════════════════════
 
+  int _tsFailCount = 0;
+
   void _startTimestampWatch() {
+    _tsFailCount = 0;
     _timestampSub?.cancel();
     _timestampSub = _engine.timestampStream.listen((ts) {
-      if (!ts.ok) return;
+      if (!ts.ok) {
+        _tsFailCount++;
+        if (_tsFailCount <= 3 || _tsFailCount % 50 == 0) {
+          debugPrint('[TS] ok=false (count=$_tsFailCount, playing=$_playing, host=$_isHost)');
+        }
+        return;
+      }
+      if (_tsFailCount > 0) {
+        debugPrint('[TS] ok recovered after $_tsFailCount failures (vf=${ts.virtualFrame})');
+        _tsFailCount = 0;
+      }
 
       // UI position 업데이트 (seek override 중에는 폴링 position 무시)
       if (ts.sampleRate > 0 && _seekOverridePosition == null) {
@@ -697,19 +728,26 @@ class NativeAudioSyncService {
   }
 
   /// 콘텐츠 정렬: 게스트 virtualFrame ≈ 호스트 virtualFrame인지 확인.
-  /// 4800 frames(100ms) 이상 차이나면 즉시 보정.
+  /// 4800 frames(100ms) 이상 차이나면 보정. 쿨다운 1초.
+  int _contentAlignCooldownUntilMs = 0;
+
   void _checkContentAlignment(NativeTimestamp ts) {
     final obs = _latestObs;
     final offset = _sync.filteredOffsetMs;
     if (obs == null || !obs.playing) return;
+    if (ts.wallMs < _contentAlignCooldownUntilMs) return;
 
+    final framesPerMs = ts.sampleRate > 0
+        ? ts.sampleRate / 1000.0
+        : _idealFramesPerMs;
     final hostWallNow = ts.wallMs + offset;
     final expectedHostVf = obs.virtualFrame +
-        ((hostWallNow - obs.hostTimeMs) * _idealFramesPerMs).round();
+        ((hostWallNow - obs.hostTimeMs) * framesPerMs).round();
 
     final diff = (expectedHostVf - ts.virtualFrame).abs();
     if (diff > _contentAlignThreshold) {
       unawaited(_engine.seekToFrame(expectedHostVf));
+      _contentAlignCooldownUntilMs = ts.wallMs + 1000;
       debugPrint('content align: diff=$diff frames, seekTo=$expectedHostVf');
     }
   }

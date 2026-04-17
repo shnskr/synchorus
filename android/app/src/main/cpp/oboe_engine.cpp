@@ -189,7 +189,10 @@ public:
 
     bool start() {
         std::lock_guard<std::mutex> lock(mLock);
-        if (mStream) return true;
+        if (mStream) {
+            LOGI("start: stream already exists, returning true");
+            return true;
+        }
         if (!mFileLoaded) {
             LOGE("start: no file loaded");
             return false;

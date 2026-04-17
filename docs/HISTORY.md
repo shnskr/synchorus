@@ -834,6 +834,37 @@
 
 **빌드**: v0.0.9, S22 + 에뮬레이터 테스트 완료
 
+### 2026-04-17 (3) — 게스트 재생 실패 버그 수정 + content alignment 안정화
+
+#### 버그: 호스트 트랙 변경 시 게스트 `start: no file loaded` 반복
+
+**증상**: 호스트가 파일을 변경하면 게스트에서 500ms마다 `start: no file loaded` 에러 반복. 재생 불가.
+
+**원인**: `_handleAudioUrl`에서 새 파일 로드 시 `_audioReady = false`로 리셋하지 않음.
+- 파일 A 로드 완료 → `_audioReady = true`
+- 파일 B 로드 시작 → native `resetState()` → `mFileLoaded = false`
+- `_handleAudioObs`가 `_audioReady == true`(stale)로 보고 `start()` 반복 호출
+- native `start()`는 `mFileLoaded == false`라서 매번 실패
+
+**수정**: `_handleAudioUrl` 진입 시 `_audioReady = false` + 기존 재생 정지 + drift 상태 리셋.
+
+#### content alignment 진동 수정
+
+**증상**: 로그에서 diff가 수백만 프레임으로 발산하며 seekTo가 핑퐁.
+```
+diff=567050  seekTo=6831470
+diff=5310497 seekTo=6328285   ← 진동
+diff=5307855 seekTo=11660076  ← 발산
+```
+
+**원인**: 100ms poll마다 content alignment seek → seek 반영 전 또 seek → 위치 발산.
+
+**수정**:
+- content alignment에 1초 쿨다운 추가 (seek 후 1초간 재정렬 안 함)
+- 하드코딩 `_idealFramesPerMs=48.0` 대신 `ts.sampleRate`에서 실제 framesPerMs 계산 (44.1kHz 파일 대응)
+
+**빌드**: v0.0.10, S22 + 에뮬레이터 테스트 완료
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [ ] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 명시적으로 PCM 메모리를 해제하려면 C++ `mDecodedData.clear()` + `mFileLoaded=false`를 호출하는 별도 `unload` JNI 메서드 필요. `loadFile` 진입 시에는 이미 `clear()` 호출함.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
