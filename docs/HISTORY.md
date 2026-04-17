@@ -984,6 +984,32 @@ Oboe `getTimestamp(CLOCK_MONOTONIC)`가 `ok=false` 반환하는 극단 환경 (B
 
 PLAN.md step 2 → step 3(HTTP 전송) 이미 완료 확인, 상태 업데이트.
 
+### 2026-04-17 (9) — iOS 접속 불가 해결 + IP 표시 개선 + 키보드 UX
+
+**문제**: 아이폰에서 방 만들기/참가 모두 불가. `connectivity_plus`의 `checkConnectivity()`가 iOS에서 WiFi를 정상 보고하지 않아 `_isWifiConnected()` 체크에서 차단됨. mDNS 검색은 네이티브 Bonjour라 정상 동작하지만 TCP 연결 시도 자체가 차단.
+
+**원인 분석**: `NetworkInterface.list()`는 iOS에서 정상 동작 (`en0: 192.168.x.x` 반환). IP 감지 문제가 아니라 `connectivity_plus` WiFi 감지 false negative가 근본 원인.
+
+**수정**:
+- `_isWifiConnected()` 체크 완전 제거 (home_screen.dart의 `_createRoom`, `_joinRoom`, `_joinByIp`, `_startDiscovery` 모두). 연결 실패 시 catch에서 실제 에러 표시.
+- `network_info_plus` → `dart:io` `NetworkInterface.list()` 교체 (이전 대화에서 수정, 이번에 사설 IP 필터링 추가). 192.0.0.x 같은 비사설 주소 무시.
+- room_screen IP 표시를 별도 줄 + bold로 변경 (한 줄에 넣으면 줄��꿈으로 가려지는 문제)
+- room_screen WiFi 끊김 감지도 `.ethernet`/`.other` 허용으로 완화
+- 홈 화면 IP 입력: 빈 곳 터치 시 키보드 dismiss (`GestureDetector` + `FocusScope.unfocus()`) + `textInputAction: TextInputAction.done`
+
+**검증**: S22(호스트)↔iPhone 12 Pro(게스트) 양방향 접속 성공. mDNS 검색, IP 직접 입력 모두 동작.
+
+**빌드**: v0.0.16
+
+### 2026-04-17 (10) — 실기기 크로스 플랫폼 테스트 (S22 ↔ iPhone 12 Pro)
+
+S22 + iPhone 12 Pro 양방향 호스트/게스트 테스트 수행. 접속·검색·방 참가 정상 동작 확인.
+
+**발견된 이슈** (다음 작업에서 수정):
+- 게스트 파일 다운로드 속도 체감상 느림 (HTTP shelf_static 서버, 개선 여지 확인 필요)
+- 호스트가 다운로드 중 파일을 여러 번 빠르게 바꾸면: 오디오 다운로드 실패 / 게스트에서 이전 곡 재생되는 경우 발생 (파일 교체 race condition)
+- seek 연타 시 싱크 틀어짐 (seek cooldown/보정 로직 개선 필요)
+
 #### 알려진 이슈 / 다음에 확인할 것
 - [x] 네이티브 엔진 `unload` 메서드 추가 — `stop()`은 재생 정지만 하고 `mDecodedData`(PCM 버퍼)는 유지함 (재생/정지 토글에 쓰이므로 정상). 방 나가기·앱 종료 시 `unload()`로 PCM 메모리 해제. Android: `stop()` + `stopDecodeThread()` + `resetState()`, iOS: `stop()` + `audioFile=nil`. Dart: `clearTempFiles()` / `dispose()`에서 호출.
 - [ ] **(2026-04-07 실측)** v0.0.4 측정값: S22(호스트) buf=4ms, iPhone(게스트) buf=21ms / rawOut=15ms → `comp = +17ms`
@@ -997,6 +1023,10 @@ PLAN.md step 2 → step 3(HTTP 전송) 이미 완료 확인, 상태 업데이트
 - [ ] 호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성 (추가 테스트 필요)
 - [ ] Android↔iOS 싱크 정확도 검증 — `_safeFileName` + iOS MethodChannel 적용 후 실측 필요
 - [x] iOS 게스트가 한글/공백 파일명 URL 로드 실패 → `_safeFileName` 해시명으로 해결
+- [ ] 게스트 파일 다운로드 속도 개선 (HTTP shelf_static, 청크 크기/버퍼 등 확인)
+- [ ] 호스트 파일 빠른 교체 시 race condition — 게스트 다운로드 실패, 이전 곡 재생 등
+- [ ] seek 연타 시 싱크 틀어짐 — cooldown/보정 로직 개선 필요
+- [ ] iOS 게스트에서 총 재생시간(duration) 0:00으로 표시 — Android는 정상. iOS AudioEngine의 totalFrames/sampleRate 반환값 확인 필요
 - [x] 대용량 파일 전송 중 TCP 연결 끊김 (청크 32KB, 딜레이 20ms로 조정, 20MB 테스트 통과)
 - [x] 호스트가 재생 중 파일 로드 시 가끔 호스트만 재생 안 되는 현상 (원인: file_picker 캐시 삭제 → 앱 임시 디렉토리에 복사하여 해결)
 - [x] 에뮬레이터 ↔ 실기기 간 네트워크 (UDP 브로드캐스트 불가 → IP 직접 입력으로 연결 가능)

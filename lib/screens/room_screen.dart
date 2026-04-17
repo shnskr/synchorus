@@ -1,10 +1,10 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 
 import '../providers/app_providers.dart';
 import 'player_screen.dart';
@@ -119,12 +119,17 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
     // WiFi 끊김 감지 (stale/일시적 이벤트 필터링)
     _connectivitySub = Connectivity().onConnectivityChanged.listen((result) async {
-      if (!result.contains(ConnectivityResult.wifi)) {
+      if (!result.contains(ConnectivityResult.wifi) &&
+          !result.contains(ConnectivityResult.ethernet) &&
+          !result.contains(ConnectivityResult.other)) {
         // 잠시 대기 후 실제 상태 재확인 (stale/일시적 이벤트 방지)
         await Future.delayed(const Duration(seconds: 1));
         if (!mounted) return;
         final current = await Connectivity().checkConnectivity();
-        if (!current.contains(ConnectivityResult.wifi) && mounted) {
+        final hasLocal = current.contains(ConnectivityResult.wifi) ||
+            current.contains(ConnectivityResult.ethernet) ||
+            current.contains(ConnectivityResult.other);
+        if (!hasLocal && mounted) {
           if (widget.isHost) {
             // 호스트: WiFi 끊기면 방 유지 불가
             _addLog('WiFi 연결이 끊어졌습니다');
@@ -184,11 +189,39 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
 
   Future<void> _loadHostIp() async {
     try {
-      final ip = await NetworkInfo().getWifiIP();
-      if (mounted && ip != null) {
-        setState(() => _hostIp = ip);
+      String? privateAddr;
+      for (final iface in await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      )) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback || addr.isLinkLocal) continue;
+          final name = iface.name.toLowerCase();
+          if ((name.startsWith('wlan') || name.startsWith('en')) &&
+              _isPrivateIP(addr.address)) {
+            if (mounted) setState(() => _hostIp = addr.address);
+            return;
+          }
+          if (privateAddr == null && _isPrivateIP(addr.address)) {
+            privateAddr = addr.address;
+          }
+        }
+      }
+      if (privateAddr != null && mounted) {
+        setState(() => _hostIp = privateAddr);
       }
     } catch (_) {}
+  }
+
+  /// 사설 IP 대역 확인 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+  static bool _isPrivateIP(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) return false;
+    final a = int.tryParse(parts[0]) ?? 0;
+    final b = int.tryParse(parts[1]) ?? 0;
+    if (a == 10) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 192 && b == 168) return true;
+    return false;
   }
 
   /// 참가자: 시간 동기화 수행
@@ -441,10 +474,14 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
                   color: widget.isHost ? Colors.amber : Colors.blue,
                 ),
                 title: Text(widget.isHost ? '호스트' : '참가자'),
-                subtitle: Text(
-                  widget.isHost && _hostIp != null
-                      ? '방 코드: ${widget.roomCode}  |  IP: $_hostIp'
-                      : '방 코드: ${widget.roomCode}',
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('방 코드: ${widget.roomCode}'),
+                    if (widget.isHost && _hostIp != null)
+                      Text('IP: $_hostIp',
+                          style: const TextStyle(fontWeight: FontWeight.bold)),
+                  ],
                 ),
                 trailing: widget.isHost && _hostIp != null
                     ? IconButton(

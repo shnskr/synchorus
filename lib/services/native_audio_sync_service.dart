@@ -3,7 +3,6 @@ import 'dart:io';
 
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
-import 'package:network_info_plus/network_info_plus.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:shelf/shelf_io.dart' as shelf_io;
 import 'package:shelf_static/shelf_static.dart';
@@ -144,7 +143,7 @@ class NativeAudioSyncService {
       _httpServer =
           await shelf_io.serve(handler, InternetAddress.anyIPv4, 0);
     }
-    final ip = await NetworkInfo().getWifiIP();
+    final ip = await _getLocalIP();
     if (ip == null) {
       await _stopFileServer();
       return null;
@@ -156,6 +155,41 @@ class NativeAudioSyncService {
   Future<void> _stopFileServer() async {
     await _httpServer?.close();
     _httpServer = null;
+  }
+
+  /// WiFi IP 조회. NetworkInterface.list()에서 WiFi 인터페이스명(wlan/en) + 사설 IP 우선.
+  static Future<String?> _getLocalIP() async {
+    try {
+      String? privateAddr;
+      for (final iface in await NetworkInterface.list(
+        type: InternetAddressType.IPv4,
+      )) {
+        for (final addr in iface.addresses) {
+          if (addr.isLoopback || addr.isLinkLocal) continue;
+          final name = iface.name.toLowerCase();
+          if (name.startsWith('wlan') || name.startsWith('en')) {
+            if (_isPrivateIP(addr.address)) return addr.address;
+          }
+          if (privateAddr == null && _isPrivateIP(addr.address)) {
+            privateAddr = addr.address;
+          }
+        }
+      }
+      return privateAddr;
+    } catch (_) {}
+    return null;
+  }
+
+  /// 사설 IP 대역 확인 (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16)
+  static bool _isPrivateIP(String ip) {
+    final parts = ip.split('.');
+    if (parts.length != 4) return false;
+    final a = int.tryParse(parts[0]) ?? 0;
+    final b = int.tryParse(parts[1]) ?? 0;
+    if (a == 10) return true;
+    if (a == 172 && b >= 16 && b <= 31) return true;
+    if (a == 192 && b == 168) return true;
+    return false;
   }
 
   // ═══════════════════════════════════════════════════════════
