@@ -11,6 +11,7 @@ import '../models/audio_obs.dart';
 import 'native_audio_service.dart';
 import 'p2p_service.dart';
 import 'sync_service.dart';
+import 'sync_measurement_logger.dart';
 
 // ── drift / seek 파라미터 (PoC Phase 4 검증 완료) ──────────────
 const double _driftSeekThresholdMs = 20.0;
@@ -18,6 +19,7 @@ const double _seekCorrectionGain = 0.8;
 const Duration _seekCooldown = Duration(milliseconds: 1000);
 const double _defaultFramesPerMs = 48.0; // fallback (실제 sampleRate 미확인 시)
 const double _reAnchorThresholdMs = 200.0;
+const double _offsetDriftThresholdMs = 5.0; // 앵커 후 offset 변화 허용치
 
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
@@ -26,6 +28,7 @@ class NativeAudioSyncService {
   final P2PService _p2p;
   final SyncService _sync;
   final NativeAudioService _engine = NativeAudioService();
+  final SyncMeasurementLogger _logger = SyncMeasurementLogger();
 
   StreamSubscription? _messageSub;
   Timer? _obsBroadcastTimer;
@@ -42,11 +45,15 @@ class NativeAudioSyncService {
   String? _currentUrl;
   int _obsBroadcastSeq = 0;
 
+  // ── 게스트: drift report 전송 주기 ────────────────────────
+  int _lastDriftReportMs = 0;
+
   // ── 게스트: drift 보정 상태 ────────────────────────────────
   AudioObs? _latestObs;
   // 앵커: drift=0 기준선
   int? _anchorHostFrame;
   int? _anchorGuestFrame;
+  double? _offsetAtAnchor; // 앵커 설정 시점의 filteredOffsetMs
   // 최신 drift
   double? _latestDriftMs;
   // ignore: unused_field
@@ -100,6 +107,9 @@ class NativeAudioSyncService {
   // 초기화
   // ═══════════════════════════════════════════════════════════
 
+  /// 측정 로그 파일 경로 (호스트 전용).
+  String? get measurementLogPath => _logger.logFilePath;
+
   Future<void> startListening({required bool isHost}) async {
     _isHost = isHost;
     _messageSub?.cancel();
@@ -107,6 +117,7 @@ class NativeAudioSyncService {
 
     if (isHost) {
       await _cleanupTempDir();
+      await _logger.start();
     }
   }
 
@@ -123,6 +134,8 @@ class NativeAudioSyncService {
         _handleAudioRequest(message['_from']);
       } else if (type == 'state-request' && _isHost) {
         _handleStateRequest(message['_from']);
+      } else if (type == 'drift-report' && _isHost) {
+        _handleDriftReport(message);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -367,15 +380,13 @@ class NativeAudioSyncService {
 
     final targetFrame =
         (position.inMilliseconds * ts.sampleRate / 1000).round();
-    final currentVf = ts.virtualFrame;
-    final deltaFrames = targetFrame - currentVf;
 
     await _engine.seekToFrame(targetFrame.clamp(0, ts.totalFrames));
 
-    // seek-notify 전송
+    // seek-notify 전송 (절대 위치 ms — 몇 번 수신해도 같은 위치로 seek)
     _p2p.broadcastToAll({
       'type': 'seek-notify',
-      'data': {'deltaFrames': deltaFrames},
+      'data': {'targetMs': position.inMilliseconds},
     });
 
     // 즉시 obs broadcast (seek 후 위치 알림)
@@ -411,6 +422,7 @@ class NativeAudioSyncService {
       framePos: ts.ok ? ts.framePos : -1,
       timeNs: ts.ok ? ts.timeNs : -1,
       virtualFrame: ts.virtualFrame,
+      sampleRate: ts.sampleRate,
       playing: _playing,
     );
 
@@ -444,6 +456,28 @@ class NativeAudioSyncService {
         'sampleRate': ts?.sampleRate ?? 0,
       },
     });
+  }
+
+  // ═══════════════════════════════════════════════════════════
+  // 호스트: drift-report 수신 → 측정 로그 기록
+  // ═══════════════════════════════════════════════════════════
+
+  void _handleDriftReport(Map<String, dynamic> message) {
+    final from = message['_from'] as String?;
+    final data = message['data'] as Map<String, dynamic>?;
+    if (from == null || data == null) return;
+
+    _logger.log(
+      wallMs: (data['wallMs'] as num?)?.toInt() ??
+          DateTime.now().millisecondsSinceEpoch,
+      guestId: from,
+      driftMs: (data['driftMs'] as num?)?.toDouble() ?? 0,
+      offsetMs: (data['offsetMs'] as num?)?.toDouble() ?? 0,
+      hostVf: (data['hostVf'] as num?)?.toInt() ?? 0,
+      guestVf: (data['guestVf'] as num?)?.toInt() ?? 0,
+      seekCount: (data['seekCount'] as num?)?.toInt() ?? 0,
+      event: data['event'] as String? ?? 'drift',
+    );
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -606,16 +640,15 @@ class NativeAudioSyncService {
   // ═══════════════════════════════════════════════════════════
 
   void _handleSeekNotify(Map<String, dynamic> message) {
-    final delta = (message['data']?['deltaFrames'] as num?)?.toInt();
-    if (delta == null || !_playing) return;
-    unawaited(_applyHostSeek(delta));
-  }
-
-  Future<void> _applyHostSeek(int deltaFrames) async {
-    try {
-      final vf = await _engine.getVirtualFrame();
-      await _engine.seekToFrame(vf + deltaFrames);
-    } catch (_) {}
+    final targetMs = (message['data']?['targetMs'] as num?)?.toDouble();
+    if (targetMs == null || !_playing) return;
+    // 절대 위치 → 게스트 frame 변환. 몇 번 와도 같은 위치 (멱등)
+    final targetGuestVf = (targetMs * _framesPerMs).round();
+    unawaited(_engine.seekToFrame(targetGuestVf));
+    // 앵커 무효화 + 쿨다운: fresh obs 도착 대기 후 re-anchor
+    _anchorHostFrame = null;
+    _anchorGuestFrame = null;
+    _seekCooldownUntilMs = DateTime.now().millisecondsSinceEpoch + 1000;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -648,6 +681,7 @@ class NativeAudioSyncService {
   void _resetDriftState() {
     _anchorHostFrame = null;
     _anchorGuestFrame = null;
+    _offsetAtAnchor = null;
     _seekCorrectionAccum = 0;
     _seekCooldownUntilMs = 0;
     _fallbackAlignCooldownMs = 0;
@@ -691,9 +725,12 @@ class NativeAudioSyncService {
         _tsFailCount = 0;
       }
 
-      // 게스트: 정밀 drift 보정 (HAL framePos 기반)
+      // 게스트: drift 보정
       if (!_isHost && _playing) {
-        if (_anchorHostFrame == null) {
+        if (!_sync.isOffsetStable) {
+          // 수렴 전: fallback으로 즉시 대략 정렬
+          _fallbackAlignment(ts);
+        } else if (_anchorHostFrame == null) {
           _tryEstablishAnchor(ts);
         } else {
           _recomputeDrift(ts);
@@ -705,21 +742,43 @@ class NativeAudioSyncService {
   /// HAL timestamp 없을 때 virtualFrame으로 간단 정렬 (에뮬레이터, 블루투스 등)
   void _fallbackAlignment(NativeTimestamp ts) {
     if (!_sync.isSynced) return;
+    // stability gate 없음 — 초기 offset으로도 즉시 대략 정렬 (±8ms)
+    // 정밀 보정은 anchor 경로(isOffsetStable 필요)가 담당
     final obs = _latestObs;
     if (obs == null || !obs.playing) return;
-    if (ts.wallMs < _fallbackAlignCooldownMs) return;
 
     final offset = _sync.filteredOffsetMs;
     final hostWallNow = ts.wallMs + offset;
-    final expectedHostVf = obs.virtualFrame +
-        ((hostWallNow - obs.hostTimeMs) * _framesPerMs).round();
+    final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
 
-    final diff = (expectedHostVf - ts.virtualFrame).abs();
-    // 2400 frames (50ms) 이상 차이나면 보정, 쿨다운 2초
-    if (diff > 2400) {
-      unawaited(_engine.seekToFrame(expectedHostVf));
-      _fallbackAlignCooldownMs = ts.wallMs + 2000;
-      debugPrint('[FALLBACK] align: diff=$diff, seekTo=$expectedHostVf');
+    // ms 단위로 통일하여 cross-rate 비교 (호스트 48kHz ↔ 게스트 44.1kHz 등)
+    final elapsedMs = (hostWallNow - obs.hostTimeMs).toDouble();
+    final expectedPositionMs = obs.virtualFrame / hostFpMs + elapsedMs;
+    final guestPositionMs = ts.virtualFrame / _framesPerMs;
+    final driftMs = guestPositionMs - expectedPositionMs;
+
+    // 500ms마다 drift report (fallback mode)
+    if (ts.wallMs - _lastDriftReportMs >= 500) {
+      _lastDriftReportMs = ts.wallMs;
+      _sendDriftReport(
+        wallMs: ts.wallMs,
+        driftMs: driftMs,
+        offsetMs: offset,
+        hostVf: obs.virtualFrame,
+        guestVf: ts.virtualFrame,
+        event: 'fallback',
+      );
+    }
+
+    if (ts.wallMs < _fallbackAlignCooldownMs) return;
+
+    // 30ms 이상 차이나면 보정, 쿨다운 1초
+    if (driftMs.abs() > 30) {
+      // 게스트 frame 공간으로 변환하여 seek
+      final targetGuestVf = (expectedPositionMs * _framesPerMs).round();
+      unawaited(_engine.seekToFrame(targetGuestVf));
+      _fallbackAlignCooldownMs = ts.wallMs + 1000;
+      debugPrint('[FALLBACK] align: drift=${driftMs.toStringAsFixed(1)}ms, seekTo=$targetGuestVf');
     }
   }
 
@@ -731,6 +790,8 @@ class NativeAudioSyncService {
   /// obs를 앵커 시점으로 외삽하여 시간축 정합.
   void _tryEstablishAnchor(NativeTimestamp ts) {
     if (!_sync.isSynced) return;
+    if (!_sync.isOffsetStable) return; // offset 수렴 전 앵커 설정 방지
+    if (ts.wallMs < _seekCooldownUntilMs) return; // seek 직후 stale obs 방지
     final offset = _sync.filteredOffsetMs;
     final obs = _latestObs;
     if (obs == null || !obs.playing) return;
@@ -740,23 +801,50 @@ class NativeAudioSyncService {
     // 앵커 순간의 호스트 wall clock = 게스트 wall + offset
     final anchorHostWall = ts.wallMs + offset;
     // obs는 최대 500ms 오래된 값 → 앵커 시점으로 외삽
+    // 호스트 frame 외삽은 호스트의 sampleRate 사용
+    final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
     final anchorHostFrame = obs.framePos +
-        ((anchorHostWall - obs.hostTimeMs) * _framesPerMs).round();
+        ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
 
-    // 콘텐츠 정렬: 게스트를 호스트 virtualFrame 위치로 점프
+    // 콘텐츠 정렬: 호스트 콘텐츠 위치(ms)를 게스트 frame으로 변환하여 seek
     final hostContentFrame = obs.virtualFrame +
-        ((anchorHostWall - obs.hostTimeMs) * _framesPerMs).round();
+        ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
+    final hostContentMs = hostContentFrame / hostFpMs;
+    final targetGuestVf = (hostContentMs * _framesPerMs).round();
     final currentEffective = ts.framePos + _seekCorrectionAccum;
-    final initialCorrection = anchorHostFrame - currentEffective;
-    unawaited(_engine.seekToFrame(hostContentFrame));
+    final initialCorrection = targetGuestVf - currentEffective;
+    unawaited(_engine.seekToFrame(targetGuestVf));
     _seekCorrectionAccum += initialCorrection;
 
     _anchorHostFrame = anchorHostFrame;
-    // 초기 정렬 후 anchorGF == anchorHF
     _anchorGuestFrame = ts.framePos + _seekCorrectionAccum;
+    _offsetAtAnchor = offset; // 앵커 시점의 offset 기록
 
     // HAL 버퍼 안정화 쿨다운
     _seekCooldownUntilMs = ts.wallMs + _seekCooldown.inMilliseconds;
+  }
+
+  /// 게스트 → 호스트로 drift report 전송 (500ms 주기).
+  void _sendDriftReport({
+    required int wallMs,
+    required double driftMs,
+    required double offsetMs,
+    required int hostVf,
+    required int guestVf,
+    required String event,
+  }) {
+    _p2p.sendToHost({
+      'type': 'drift-report',
+      'data': {
+        'wallMs': wallMs,
+        'driftMs': driftMs,
+        'offsetMs': offsetMs,
+        'hostVf': hostVf,
+        'guestVf': guestVf,
+        'seekCount': _seekCount,
+        'event': event,
+      },
+    });
   }
 
   /// 매 poll마다 drift(ms) 재계산.
@@ -767,21 +855,48 @@ class NativeAudioSyncService {
     final offset = _sync.filteredOffsetMs;
     if (obs == null || anchorHF == null || anchorGF == null) return;
 
-    // 호스트의 현재 예상 frame (obs 외삽)
+    // offset이 앵커 시점에서 크게 변했으면 앵커 무효화 (EMA 수렴 중)
+    if (_offsetAtAnchor != null &&
+        (offset - _offsetAtAnchor!).abs() > _offsetDriftThresholdMs) {
+      debugPrint('[DRIFT] anchor invalidated: offset drifted '
+          '${(offset - _offsetAtAnchor!).toStringAsFixed(1)}ms since anchor');
+      _anchorHostFrame = null;
+      _anchorGuestFrame = null;
+      _offsetAtAnchor = null;
+      return;
+    }
+
+    // 호스트의 현재 예상 frame (obs 외삽) — 호스트 sampleRate 사용
     final hostWallNow = ts.wallMs + offset;
+    final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
     final expectedHostFrameNow =
-        obs.framePos + (hostWallNow - obs.hostTimeMs) * _framesPerMs;
+        obs.framePos + (hostWallNow - obs.hostTimeMs) * hostFpMs;
     final dH = expectedHostFrameNow - anchorHF;
 
     // 게스트의 effective frame (seek 보정 포함)
     final effectiveGuestFrame = ts.framePos + _seekCorrectionAccum;
     final dG = (effectiveGuestFrame - anchorGF).toDouble();
 
-    final driftFrame = dG - dH; // 양수: 게스트 앞섬
-    final driftMs = driftFrame / _framesPerMs;
+    // 각각의 sampleRate로 ms 변환 후 비교 (cross-rate 안전)
+    final dHms = dH / hostFpMs;
+    final dGms = dG / _framesPerMs;
+    final driftMs = dGms - dHms; // 양수: 게스트 앞섬
 
     _latestDriftMs = driftMs;
     _driftSampleCount++;
+
+    // 500ms마다 drift report 전송
+    if (ts.wallMs - _lastDriftReportMs >= 500) {
+      _lastDriftReportMs = ts.wallMs;
+      _sendDriftReport(
+        wallMs: ts.wallMs,
+        driftMs: driftMs,
+        offsetMs: offset,
+        hostVf: obs.virtualFrame,
+        guestVf: ts.virtualFrame,
+        event: 'drift',
+      );
+    }
 
     // seek 판단
     _maybeTriggerSeek(ts.wallMs, driftMs);
@@ -825,6 +940,16 @@ class NativeAudioSyncService {
     _seekCount++;
     _seekCooldownUntilMs = wallMs + _seekCooldown.inMilliseconds;
     _seekCorrectionAccum += correctionFrames;
+
+    // seek 이벤트 report
+    _sendDriftReport(
+      wallMs: wallMs,
+      driftMs: driftMs,
+      offsetMs: _sync.filteredOffsetMs,
+      hostVf: _latestObs?.virtualFrame ?? 0,
+      guestVf: currentVf + correctionFrames,
+      event: 'seek',
+    );
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -890,6 +1015,7 @@ class NativeAudioSyncService {
     _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
+    unawaited(_logger.stop());
   }
 
   Future<void> dispose() async {
@@ -903,5 +1029,6 @@ class NativeAudioSyncService {
     await _stopFileServer();
     await _engine.unload();
     await _engine.dispose();
+    await _logger.dispose();
   }
 }

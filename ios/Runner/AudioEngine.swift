@@ -135,8 +135,16 @@ class AudioEngine {
         let vf = getVirtualFrame()
         let totalFrames = Int64(audioFile?.length ?? 0)
 
+        // outputNode의 sampleTime은 세션(hw) rate로 카운트될 수 있음.
+        // VF/totalFrames/sampleRate와 일관되도록 파일 rate로 정규화.
+        var framePos = lastRenderTime.sampleTime
+        let hwRate = session.sampleRate
+        if hwRate > 0 && sampleRate > 0 && abs(hwRate - sampleRate) > 1 {
+            framePos = Int64(Double(framePos) * sampleRate / hwRate)
+        }
+
         return [
-            "framePos": lastRenderTime.sampleTime,
+            "framePos": framePos,
             "timeNs": timeNs,
             "wallAtFramePosNs": wallAtFramePosNs,
             "ok": true,

@@ -287,6 +287,13 @@ public:
         const int64_t monoNow =
             static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
 
+        // HAL framePos는 스트림 rate(예: 48kHz)로 카운트되지만
+        // VF/totalFrames/sampleRate는 파일 rate(예: 44.1kHz).
+        // 일관성을 위해 framePos도 파일 rate로 변환.
+        if (mStreamSampleRate > 0 && mDecodedSampleRate > 0 &&
+            mStreamSampleRate != mDecodedSampleRate) {
+            framePos = framePos * mDecodedSampleRate / mStreamSampleRate;
+        }
         *outFramePos = framePos;
         *outTimeNs = timeNs;
         *outWallAtFramePosNs = wallNow - (monoNow - timeNs);

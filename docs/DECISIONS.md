@@ -11,6 +11,10 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 | 게스트 파일 다운로드: dart:io HttpClient | 네이티브 엔진은 로컬 파일 경로 필요, http/dio 패키지 불필요, 새 의존성 없음 |
 | Android 파일 디코딩: NDK AMediaCodec 전체 메모리 디코딩 | 스트리밍보다 단순, 150MB 제한으로 ~5분 곡 커버. iOS는 AVAudioPlayerNode가 자체 스트리밍 |
 | iOS 파일 재생: AVAudioPlayerNode + scheduleSegment | AVAudioSourceNode 수동 렌더링 대비 메모리/코드 최소, seek = stop→scheduleSegment→play |
+| framePos는 네이티브에서 파일 rate로 정규화 | HAL은 hw rate(48kHz)로 카운트하지만 VF/sampleRate는 파일 rate(44.1kHz). Dart에서 하면 양쪽 rate를 알아야 하므로 C++/Swift에서 변환 |
+| cross-rate 비교는 항상 ms 단위로 통일 | frame 직접 비교는 rate가 다르면 틀림. `frames / (sampleRate/1000)` → ms 변환 후 비교 |
+| seek-notify는 absolute targetMs (deltaFrames 아님) | delta 기반은 비동기 seek 중첩 시 누적 오차 발생. absolute는 멱등(idempotent) |
+| fallback은 isOffsetStable gate 없이 즉시 동작 | 초기 offset이 부정확해도 ±30ms 이상 차이만 보정하므로 대략 정렬에 충분 |
 | virtualFrame/sampleRate는 파일 네이티브 레이트 기준 | 양 플랫폼 동일 단위로 Dart 서비스 레이어 단일화. 시간 변환: `ms = vf * 1000 / sampleRate` |
 | 본체 앱 MethodChannel명 `com.synchorus/native_audio` | PoC(`com.synchorus.poc/native_audio`)와 구분. Android/iOS 동일 채널명으로 Dart 서비스 레이어 단일화 |
 | iOS MethodChannel 인자는 Dart 원시값 직접 전달 | Android Kotlin(`call.arguments as Number`)과 동일 패턴. 딕셔너리 래핑 시 silent fail 위험 (b0415-7 버그) |

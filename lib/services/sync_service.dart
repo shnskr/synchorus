@@ -28,9 +28,13 @@ class _SyncSample {
   int get rawOffsetMs => t2 - ((t1 + t3) ~/ 2);
 }
 
-// EMA 파라미터 (PoC Phase 3 검증 완료)
-const double _emaAlpha = 0.1; // new 비중 (old 0.9 + new 0.1)
+// EMA 파라미터 (PoC Phase 3 검증 완료, 초기 수렴 가속 추가)
+const double _emaAlphaFast = 0.5; // 초기 수렴용 (처음 10 샘플)
+const double _emaAlphaSlow = 0.1; // 안정 후 (new 0.1)
+const int _fastPhaseCount = 10; // 빠른 수렴 샘플 수
 const int _windowSize = 5; // sliding window 크기
+const double _stableThresholdMs = 2.0; // offset 안정 판정 기준 (ms)
+const int _stableRequiredCount = 5; // 연속 안정 횟수
 
 class SyncService {
   final P2PService _p2p;
@@ -68,6 +72,16 @@ class SyncService {
   /// 주기 단계에서 보낸 ping의 t1 보관 (pong 매칭용)
   final Map<int, int> _pendingPingT1 = {};
 
+  /// 주기 단계 EMA 업데이트 횟수 (빠른/느린 alpha 전환용)
+  int _periodicSampleCount = 0;
+
+  /// offset 안정성 추적
+  double _prevFilteredOffset = 0.0;
+  int _stableCount = 0;
+
+  /// offset이 안정화되었는지 여부. drift 보정은 이 값이 true일 때만 활성화.
+  bool get isOffsetStable => _stableCount >= _stableRequiredCount;
+
   SyncService(this._p2p);
 
   /// 상태 초기화 (방 나가기 시 호출)
@@ -86,11 +100,14 @@ class SyncService {
     _periodicPongSub = null;
     _recentWindow.clear();
     _pendingPingT1.clear();
+    _periodicSampleCount = 0;
+    _prevFilteredOffset = 0.0;
+    _stableCount = 0;
   }
 
   /// 참가자: 호스트와 시간 동기화 시작
   /// ping을 [count]회 보내서 가장 RTT가 작은 샘플로 offset 확정
-  Future<SyncResult> syncWithHost({int count = 10}) async {
+  Future<SyncResult> syncWithHost({int count = 30}) async {
     // 이전 진행 중인 sync가 있으면 취소
     _activeSyncSub?.cancel();
     _activeSyncSub = null;
@@ -211,13 +228,31 @@ class SyncService {
       // window 내 min-RTT 샘플의 offset을 EMA로 혼합
       final minSample =
           _recentWindow.reduce((a, b) => a.rttMs < b.rttMs ? a : b);
-      _filteredOffsetMs = _filteredOffsetMs * (1 - _emaAlpha) +
-          minSample.rawOffsetMs * _emaAlpha;
+
+      // 초기 10샘플은 alpha=0.3 (빠른 수렴), 이후 0.1 (안정 유지)
+      _periodicSampleCount++;
+      final alpha = _periodicSampleCount <= _fastPhaseCount
+          ? _emaAlphaFast
+          : _emaAlphaSlow;
+      _filteredOffsetMs = _filteredOffsetMs * (1 - alpha) +
+          minSample.rawOffsetMs * alpha;
       _offsetMs = _filteredOffsetMs.round();
       _bestRtt = minSample.rttMs;
 
+      // offset 안정성 추적 — fast phase 동안은 수렴 중이므로 카운트 안 함
+      final delta = (_filteredOffsetMs - _prevFilteredOffset).abs();
+      _prevFilteredOffset = _filteredOffsetMs;
+      if (_periodicSampleCount <= _fastPhaseCount) {
+        _stableCount = 0; // fast convergence 중에는 안정 판정 금지
+      } else if (delta < _stableThresholdMs) {
+        _stableCount++;
+      } else {
+        _stableCount = 0;
+      }
+
       debugPrint('Periodic sync: offset=${_filteredOffsetMs.toStringAsFixed(1)}ms, '
-          'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}');
+          'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}, '
+          'stable=$_stableCount, alpha=${alpha.toStringAsFixed(1)}');
     });
 
     // 1초 주기 ping

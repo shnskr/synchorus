@@ -22,6 +22,9 @@ class AudioObs {
   /// 게스트는 이 값으로 콘텐츠 정렬(어떤 음을 재생 중인지)을 확인.
   final int virtualFrame;
 
+  /// 호스트의 엔진 sampleRate (Hz). 게스트가 호스트 frame 외삽 시 사용.
+  final int sampleRate;
+
   /// 호스트 재생 상태.
   final bool playing;
 
@@ -31,6 +34,7 @@ class AudioObs {
     required this.framePos,
     required this.timeNs,
     required this.virtualFrame,
+    required this.sampleRate,
     required this.playing,
   });
 
@@ -41,6 +45,7 @@ class AudioObs {
         'framePos': framePos,
         'timeNs': timeNs,
         'virtualFrame': virtualFrame,
+        'sampleRate': sampleRate,
         'playing': playing,
       };
 
@@ -50,6 +55,7 @@ class AudioObs {
         framePos: (m['framePos'] as num).toInt(),
         timeNs: (m['timeNs'] as num).toInt(),
         virtualFrame: (m['virtualFrame'] as num).toInt(),
+        sampleRate: (m['sampleRate'] as num?)?.toInt() ?? 0,
         playing: m['playing'] as bool,
       );
 
