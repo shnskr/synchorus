@@ -45,6 +45,11 @@ class NativeAudioSyncService {
   String? _currentUrl;
   int _obsBroadcastSeq = 0;
 
+  /// 게스트: 현재 다운로드 세션 ID. 새 audio-url마다 증가, 이전 다운로드 무효화용.
+  int _downloadSessionId = 0;
+  /// 게스트: 진행 중인 HttpClient (취소용)
+  HttpClient? _activeHttpClient;
+
   // ── 게스트: drift report 전송 주기 ────────────────────────
   int _lastDriftReportMs = 0;
 
@@ -115,8 +120,10 @@ class NativeAudioSyncService {
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen(_onMessage);
 
+    // 이전 세션의 잔여 temp 파일 정리 (호스트: audio_*, 게스트: dl_*)
+    await _cleanupTempDir();
+
     if (isHost) {
-      await _cleanupTempDir();
       await _logger.start();
     }
   }
@@ -498,6 +505,11 @@ class NativeAudioSyncService {
     var url = data['url'] as String;
     final hostPlaying = data['playing'] as bool? ?? false;
 
+    // ── 이전 다운로드 취소 ──────────────────────────────────────
+    _downloadAborted = true;
+    _activeHttpClient?.close(force: true);
+    final mySession = ++_downloadSessionId;
+
     // URL의 호스트를 실제 연결 IP로 치환 (에뮬레이터 등)
     final connectedIp = _p2p.connectedHostIp;
     if (connectedIp != null) {
@@ -534,14 +546,16 @@ class NativeAudioSyncService {
     _currentUrl = url;
     _downloadAborted = false;
 
-    // HTTP 다운로드 → temp 파일
+    // HTTP 다운로드 → temp 파일 (세션별 고유 파일명)
+    File? tempFile;
     try {
       final tempDir = await getTemporaryDirectory();
       final safeName = _currentFileName ?? 'audio_download';
-      final tempFile = File('${tempDir.path}/$safeName');
+      tempFile = File('${tempDir.path}/dl_${mySession}_$safeName');
 
       final swDownload = Stopwatch()..start();
       final client = HttpClient();
+      _activeHttpClient = client;
       try {
         final request = await client.getUrl(Uri.parse(url));
         final response = await request.close();
@@ -553,7 +567,7 @@ class NativeAudioSyncService {
         final sink = tempFile.openWrite();
         try {
           await for (final chunk in response) {
-            if (_downloadAborted) break;
+            if (_downloadAborted || _downloadSessionId != mySession) break;
             sink.add(chunk);
             receivedBytes += chunk.length;
             if (totalBytes > 0) {
@@ -565,12 +579,15 @@ class NativeAudioSyncService {
         }
       } finally {
         client.close();
+        if (_activeHttpClient == client) _activeHttpClient = null;
       }
       swDownload.stop();
 
-      // cleanup 중 다운로드가 중단된 경우 로드 스킵
-      if (_downloadAborted) {
-        debugPrint('[GUEST] download aborted, skipping load');
+      // 다운로드 중 새 파일 요청이 들어온 경우 → 이 세션은 무효
+      if (_downloadAborted || _downloadSessionId != mySession) {
+        debugPrint('[GUEST] download stale (session=$mySession, current=$_downloadSessionId)');
+        try { tempFile.deleteSync(); } catch (_) {}
+        if (_downloadSessionId != mySession) return; // 새 세션이 UI 상태 관리
         _isLoading = false;
         _loadingController.add(false);
         return;
@@ -583,8 +600,17 @@ class NativeAudioSyncService {
       final loadResult = await _engine.loadFile(tempFile.path);
       swDecode.stop();
       debugPrint('[DECODE-GUEST] loadFile took ${swDecode.elapsedMilliseconds}ms');
+
+      // 디코드 완료 후 세션 유효성 재확인
+      if (_downloadSessionId != mySession) {
+        debugPrint('[GUEST] decode done but session stale ($mySession != $_downloadSessionId)');
+        try { tempFile.deleteSync(); } catch (_) {}
+        return;
+      }
+
       if (!loadResult.ok || _downloadAborted) {
         if (!_downloadAborted) _errorController.add('파일 로드 실패');
+        try { tempFile.deleteSync(); } catch (_) {}
         _isLoading = false;
         _loadingController.add(false);
         return;
@@ -602,11 +628,10 @@ class NativeAudioSyncService {
       _startTimestampWatch();
 
       // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서
-      if (_currentDuration == null) {
+      if (_currentDuration == null && _downloadSessionId == mySession) {
         final ts = await _engine.getTimestamp();
         if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
-          _currentDuration = Duration(
-              milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
+          _currentDuration = _calcDuration(ts.totalFrames, ts.sampleRate.toDouble());
           _durationController.add(_currentDuration);
         }
       }
@@ -618,11 +643,17 @@ class NativeAudioSyncService {
       }
     } catch (e) {
       debugPrint('Audio download/load error: $e');
-      if (!_downloadAborted) {
+      // 에러 시 temp 파일 정리
+      if (tempFile != null) {
+        try { tempFile.deleteSync(); } catch (_) {}
+      }
+      if (_downloadSessionId == mySession && !_downloadAborted) {
         _errorController.add('오디오 다운로드 실패');
       }
-      _isLoading = false;
-      _loadingController.add(false);
+      if (_downloadSessionId == mySession) {
+        _isLoading = false;
+        _loadingController.add(false);
+      }
     }
   }
 
@@ -985,7 +1016,7 @@ class NativeAudioSyncService {
       for (final f in files) {
         if (f is File) {
           final name = f.uri.pathSegments.last;
-          if (name.startsWith('audio_')) {
+          if (name.startsWith('audio_') || name.startsWith('dl_')) {
             try {
               await f.delete();
             } catch (_) {}
@@ -997,6 +1028,8 @@ class NativeAudioSyncService {
 
   Future<void> clearTempFiles() async {
     _downloadAborted = true;
+    _activeHttpClient?.close(force: true);
+    _activeHttpClient = null;
     _isLoading = false;
     _loadingController.add(false);
     _audioReady = false;
@@ -1008,11 +1041,8 @@ class NativeAudioSyncService {
     _stopObsBroadcast();
     await _stopFileServer();
 
-    if (_storedSafeName != null) {
-      final tempDir = await getTemporaryDirectory();
-      final file = File('${tempDir.path}/$_storedSafeName');
-      if (await file.exists()) await file.delete();
-    }
+    // 호스트 파일 + 게스트 dl_* 파일 모두 정리
+    await _cleanupTempDir();
     _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
@@ -1020,6 +1050,8 @@ class NativeAudioSyncService {
 
   void cleanupSync() {
     _downloadAborted = true;
+    _activeHttpClient?.close(force: true);
+    _activeHttpClient = null;
     _isLoading = false;
     _audioReady = false;
     _playing = false;

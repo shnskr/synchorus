@@ -52,8 +52,12 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 ### 빌드/배포/테스트
 - flutter run 백그라운드 실행 후 불필요하게 상태 계속 확인하지 말 것. 빌드 진행 중이면 간단히 알려주고 기다릴 것.
 - 에뮬/기기의 앱/프로세스 재시작·종료 전 반드시 사용자 확인.
-- **본체 앱**: APK 설치 시 Galaxy S22 (R3CT60D20XE) + 에뮬레이터 (emulator-5554) 항상 둘 다 설치.
 - **PoC**: 실기기 우선. 에뮬은 알고리즘 로직 verify 목적에서만 선택적 추가.
+
+#### 실기기 빌드/설치 (CLI, Xcode 불필요)
+- **Galaxy S22** (R3CT60D20XE): `flutter build apk --debug` → `flutter install --debug --device-id R3CT60D20XE`
+- **iPhone 12 Pro** (00008101-00063C963C52001E): `flutter run --device-id 00008101-00063C963C52001E` (iOS는 flutter install 불가, 항상 flutter run)
+- 실기기 테스트 시 에뮬레이터는 불필요 — S22(호스트) + iPhone(게스트) 조합으로 진행
 
 ### 에뮬레이터 네트워크
 에뮬레이터 테스트 시 adb forward 포트포워딩 필수 (에뮬은 192.168.x.x 직접 접근 불가):
