@@ -19,7 +19,7 @@ class AudioEngine {
 
     // MARK: - Public API
 
-    func loadFile(_ path: String) -> Bool {
+    func loadFile(_ path: String) -> [String: Any] {
         if isEngineRunning { stop() }
 
         let url = URL(fileURLWithPath: path)
@@ -29,10 +29,14 @@ class AudioEngine {
             sampleRate = file.processingFormat.sampleRate
             seekFrameOffset = 0
             print("[AudioEngine] loaded: sr=\(sampleRate), frames=\(file.length), ch=\(file.processingFormat.channelCount), path=\(path)")
-            return true
+            return [
+                "ok": true,
+                "totalFrames": file.length,
+                "sampleRate": sampleRate,
+            ]
         } catch {
             print("[AudioEngine] loadFile error: \(error)")
-            return false
+            return ["ok": false]
         }
     }
 

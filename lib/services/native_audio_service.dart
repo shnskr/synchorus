@@ -3,6 +3,14 @@ import 'dart:async';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 
+/// loadFile 반환값.
+class LoadResult {
+  final bool ok;
+  final int? totalFrames;
+  final double? sampleRate;
+  const LoadResult({required this.ok, this.totalFrames, this.sampleRate});
+}
+
 /// 네이티브 getTimestamp 결과를 담는 불변 객체.
 class NativeTimestamp {
   final int framePos;
@@ -55,9 +63,21 @@ class NativeAudioService {
   Stream<NativeTimestamp> get timestampStream => _timestampController.stream;
 
   /// 오디오 파일 로드 (디코딩). path는 로컬 파일 절대경로.
-  /// 성공 시 true, 실패 시 PlatformException throw (message에 에러 코드).
-  Future<bool> loadFile(String path) async {
-    return await _channel.invokeMethod<bool>('loadFile', path) ?? false;
+  /// 성공 시 {ok, totalFrames, sampleRate} 반환, 실패 시 PlatformException throw.
+  Future<LoadResult> loadFile(String path) async {
+    final result = await _channel.invokeMethod('loadFile', path);
+    // Android: bool, iOS: Map {ok, totalFrames, sampleRate}
+    if (result is bool) {
+      return LoadResult(ok: result);
+    } else if (result is Map) {
+      final m = Map<String, dynamic>.from(result);
+      return LoadResult(
+        ok: m['ok'] as bool? ?? false,
+        totalFrames: (m['totalFrames'] as num?)?.toInt(),
+        sampleRate: (m['sampleRate'] as num?)?.toDouble(),
+      );
+    }
+    return LoadResult(ok: false);
   }
 
   /// 네이티브 에러 코드를 사용자 메시지로 변환.

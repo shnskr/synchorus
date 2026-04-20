@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -142,8 +143,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     } catch (e) {
       if (mounted) {
+        final msg = e is TimeoutException
+            ? '호스트 응답 없음 (시간 초과)'
+            : e is SocketException
+                ? '호스트에 연결할 수 없습니다'
+                : '연결 실패: $e';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('연결 실패: $e')),
+          SnackBar(content: Text(msg)),
         );
       }
     } finally {
@@ -330,8 +336,13 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       }
     } catch (e) {
       if (mounted) {
+        final msg = e is TimeoutException
+            ? '호스트 응답 없음 (시간 초과)'
+            : e is SocketException
+                ? '호스트에 연결할 수 없습니다'
+                : '연결 실패: $e';
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('연결 실패: $e')),
+          SnackBar(content: Text(msg)),
         );
       }
     } finally {

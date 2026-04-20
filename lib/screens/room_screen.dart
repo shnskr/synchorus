@@ -246,7 +246,10 @@ class _RoomScreenState extends ConsumerState<RoomScreen> {
       // 동기화 완료 후 호스트에게 현재 오디오 요청
       ref.read(p2pServiceProvider).sendToHost({'type': 'audio-request', 'data': {}});
     } catch (e) {
-      _addLog('동기화 실패: $e');
+      final msg = e is TimeoutException
+          ? '호스트 응답 없음 (시간 초과)'
+          : '동기화 실패: $e';
+      _addLog(msg);
       if (!mounted) return;
       setState(() {
         _syncing = false;

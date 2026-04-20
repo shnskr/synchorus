@@ -38,8 +38,8 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
     _fileName = result.files.single.name;
     setState(() => _status = 'loading...');
 
-    final ok = await _engine.loadFile(path);
-    setState(() => _status = ok ? 'loaded' : 'load failed');
+    final lr = await _engine.loadFile(path);
+    setState(() => _status = lr.ok ? 'loaded' : 'load failed');
   }
 
   Future<void> _start() async {

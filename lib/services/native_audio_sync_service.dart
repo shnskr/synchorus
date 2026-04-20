@@ -273,10 +273,10 @@ class NativeAudioSyncService {
     }
 
     // 네이티브 엔진에 로드
-    bool ok;
+    LoadResult loadResult;
     final sw = Stopwatch()..start();
     try {
-      ok = await _engine.loadFile(stableFile.path);
+      loadResult = await _engine.loadFile(stableFile.path);
     } on PlatformException catch (e) {
       _isLoading = false;
       _loadingController.add(false);
@@ -285,12 +285,15 @@ class NativeAudioSyncService {
     }
     sw.stop();
     debugPrint('[DECODE-HOST] loadFile took ${sw.elapsedMilliseconds}ms');
-    if (!ok) {
+    if (!loadResult.ok) {
       _isLoading = false;
       _loadingController.add(false);
       _errorController.add('파일 로드 실패');
       return;
     }
+
+    // loadFile 반환값에서 duration 즉시 계산 (iOS: 반환값 포함, Android: getTimestamp fallback)
+    _setDurationFromLoadResult(loadResult);
 
     _storedSafeName = safeName;
     _currentFileName = originalName;
@@ -315,12 +318,13 @@ class NativeAudioSyncService {
     _engine.startPolling();
     _startTimestampWatch();
 
-    // duration 전파
-    final ts = await _engine.getTimestamp();
-    if (ts != null && ts.sampleRate > 0) {
-      _currentDuration = Duration(
-          milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
-      _durationController.add(_currentDuration);
+    // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서
+    if (_currentDuration == null) {
+      final ts = await _engine.getTimestamp();
+      if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
+        _currentDuration = _calcDuration(ts.totalFrames, ts.sampleRate.toDouble());
+        _durationController.add(_currentDuration);
+      }
     }
   }
 
@@ -331,10 +335,16 @@ class NativeAudioSyncService {
   Future<void> syncPlay() async {
     if (!_audioReady) return;
 
-    // play 직전 position 캡처 (start 직후 첫 poll까지 seek bar 0:00 점프 방지)
-    final ts = _engine.latest;
-    final vf = await _engine.getVirtualFrame();
+    // 재생 완료 상태에서 play → 처음으로 되돌리기
+    var ts = _engine.latest;
+    var vf = await _engine.getVirtualFrame();
     final sr = ts?.sampleRate ?? 0;
+    if (ts != null && ts.totalFrames > 0 && vf >= ts.totalFrames) {
+      await syncSeek(Duration.zero);
+      vf = 0;
+    }
+
+    // play 직전 position 캡처 (start 직후 첫 poll까지 seek bar 0:00 점프 방지)
     if (sr > 0) {
       final pos = Duration(milliseconds: (vf * 1000 / sr).round());
       _seekOverridePosition = pos;
@@ -570,15 +580,18 @@ class NativeAudioSyncService {
 
       // 네이티브 엔진에 로드
       final swDecode = Stopwatch()..start();
-      final ok = await _engine.loadFile(tempFile.path);
+      final loadResult = await _engine.loadFile(tempFile.path);
       swDecode.stop();
       debugPrint('[DECODE-GUEST] loadFile took ${swDecode.elapsedMilliseconds}ms');
-      if (!ok || _downloadAborted) {
+      if (!loadResult.ok || _downloadAborted) {
         if (!_downloadAborted) _errorController.add('파일 로드 실패');
         _isLoading = false;
         _loadingController.add(false);
         return;
       }
+
+      // loadFile 반환값에서 duration 즉시 계산
+      _setDurationFromLoadResult(loadResult);
 
       _audioReady = true;
       _isLoading = false;
@@ -588,12 +601,14 @@ class NativeAudioSyncService {
       _engine.startPolling();
       _startTimestampWatch();
 
-      // duration 전파
-      final ts = await _engine.getTimestamp();
-      if (ts != null && ts.sampleRate > 0) {
-        _currentDuration = Duration(
-            milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
-        _durationController.add(_currentDuration);
+      // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서
+      if (_currentDuration == null) {
+        final ts = await _engine.getTimestamp();
+        if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
+          _currentDuration = Duration(
+              milliseconds: (ts.totalFrames * 1000 / ts.sampleRate).round());
+          _durationController.add(_currentDuration);
+        }
       }
 
       // 호스트가 재생 중이면 엔진 시작
@@ -707,6 +722,13 @@ class NativeAudioSyncService {
               milliseconds:
                   (ts.virtualFrame * 1000 / ts.sampleRate).round()),
         );
+      }
+
+      // 재생 완료 감지: VF가 totalFrames 이상이면 자동 정지 (호스트만)
+      if (_isHost && _playing && ts.totalFrames > 0 &&
+          ts.virtualFrame >= ts.totalFrames) {
+        debugPrint('[HOST] end of file reached (vf=${ts.virtualFrame}, total=${ts.totalFrames})');
+        unawaited(syncPause());
       }
 
       if (!ts.ok) {
@@ -1016,6 +1038,23 @@ class NativeAudioSyncService {
     _currentFileName = null;
     _currentUrl = null;
     unawaited(_logger.stop());
+  }
+
+  void _setDurationFromLoadResult(LoadResult lr) {
+    final frames = lr.totalFrames;
+    final rate = lr.sampleRate;
+    if (frames != null && frames > 0 && rate != null && rate > 0) {
+      _currentDuration = _calcDuration(frames, rate);
+      _durationController.add(_currentDuration);
+    }
+  }
+
+  /// totalFrames/sampleRate → Duration (ms 정밀도, 초 단위 반올림)
+  static Duration _calcDuration(int totalFrames, double sampleRate) {
+    final ms = (totalFrames * 1000 / sampleRate).round();
+    // 초 단위 반올림: 299980ms → 300s, 300020ms → 300s (표시 통일)
+    final seconds = ((ms + 500) ~/ 1000);
+    return Duration(seconds: seconds);
   }
 
   Future<void> dispose() async {
