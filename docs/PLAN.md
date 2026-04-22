@@ -182,3 +182,8 @@ Phase 4:   확장 기능 추가
 - [ ] QR 코드로 방 참가
 - [ ] 이퀄라이저
 - [ ] 블루투스 레이턴시 수동 보정 슬라이더
+- [ ] 파일 전송 대역폭 개선 후보 (현 TCP over 공유 WiFi 구조에선 소프트웨어로 낼 수 있는 수치 도달, 체감 향상은 링크 계층 변경 필요):
+    - [ ] TCP `SO_SNDBUF` 조정 — 저비용, 효과 편차 큼
+    - [ ] multi-stream 다운로드 (같은 파일 N개 TCP 병렬) — 중간 비용, AP가 WiFi 6+ 일 때 효과
+    - [ ] Wi-Fi Direct / iOS MultipeerConnectivity — 공유기 거치지 않고 기기 간 직접 연결 (AirDrop급 속도). 크로스플랫폼 호환 위해 양 네이티브 플러그인 직접 구현 필요
+    - [ ] HTTP 다운로드를 별도 Isolate로 분리 — 속도보다는 heartbeat 처리 안정성 목적 (v0.0.23 노트 참고)
