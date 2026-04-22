@@ -10,7 +10,9 @@ import '../models/peer.dart';
 class P2PService {
   static const int defaultPort = 41235;
   static const int _heartbeatIntervalSec = 3;
-  static const int _heartbeatTimeoutMs = 9000;
+  // 대용량 다운로드 중 게스트 이벤트 루프가 바쁘면 heartbeat-ack 처리가 지연되어
+  // 9초(3회 miss) 안에 못 돌아오는 경우가 잦아 연결이 끊겼음. 5회 miss(15초)로 완화.
+  static const int _heartbeatTimeoutMs = 15000;
 
   ServerSocket? _serverSocket;
   Socket? _hostSocket;

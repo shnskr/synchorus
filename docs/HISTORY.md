@@ -1115,6 +1115,18 @@ TTFB는 정상(<250ms)이지만 transfer 구간이 WiFi 이론치(5~50 MB/s)의 
 
 **빌드**: v0.0.22
 
+### 2026-04-22 (16) — heartbeat timeout 완화 (v0.0.23)
+
+**증상**: 대용량 파일 다운로드 중 호스트가 게스트를 `Heartbeat timeout`으로 끊어버림. 게스트 측에서는 `Connection reset by peer`(errno=104) 수신 후 재접속 시도, 때로는 `Connection refused`(errno=111)로 3회 재시도 실패.
+
+**원인**: 호스트 `_heartbeatIntervalSec=3s` / `_heartbeatTimeoutMs=9000` 구조 — 게스트가 9초 내 heartbeat-ack을 못 보내면 dead peer로 판정. 게스트가 HTTP 다운로드로 이벤트 루프 바쁘거나 네이티브 디코딩 중이면 3회 연속 miss가 쉽게 발생.
+
+**수정** (`p2p_service.dart:13`):
+- `_heartbeatTimeoutMs` 9000 → 15000 (5회 miss 허용).
+- 호스트 송신 간격은 3초 유지 → 정상 상태에서 감지 시간 영향 없음, 일시적 지연만 관대화.
+
+**빌드**: v0.0.23
+
 #### 미해결 이슈
 
 **싱크/재생**
