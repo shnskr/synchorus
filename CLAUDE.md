@@ -3,9 +3,26 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중 (step 1-1~1-4 완료, 다음 step 2 멀티 게스트).
-v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체.
-audio_handler.dart: NativeAudioHandler (audio_service + 네이티브 엔진 연동 완료).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.23** (2026-04-22).
+
+- **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
+- **Step 2 멀티 게스트**: 실기기 3대(S22 호스트 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 사실상 검증. 코드 변경 없이 1:N 동작 확인 완료
+- **Step 3 HTTP 전송**: 완료 (v0.0.22에서 shelf 제거, dart:io HttpServer 직접 + 1MB chunk)
+
+v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handler.dart: NativeAudioHandler.
+
+### 최근 해결 (2026-04-22)
+- v0.0.20: seek-notify 가드(`!_playing`→`!_audioReady`) + 태블릿 가로모드 UI 스크롤
+- v0.0.22: HTTP 서버 재구현 (shelf 제거 + Content-Length + 1MB chunk) + 다운로드 측정 인프라 (`download-report` P2P 메시지)
+- v0.0.23: heartbeat timeout 9→15초. 파일 선택 창/백그라운드 시 끊김 재현 실패
+
+### 다음 세션 재개 포인트 (우선순위 제안)
+1. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
+2. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+3. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+4. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+
+상세: `docs/HISTORY.md` (#14~#16 섹션), `docs/PLAN.md`
 
 ## 작업 시작 전
 - 설계/결정/이력/계획: **docs/** 아래 4개 문서 확인
@@ -34,10 +51,23 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 
 ## 협업 원칙
 
-### 검증 후 답변 (추측 금지)
-- 외부 API/라이브러리/플랫폼 SDK 관련 답변 시 "제 기억으로는..." 금지
-- WebSearch/문서 조회로 검증 후 출처(URL) 명시
+### 근거 기반 답변 (추측 금지)
+
+**외부 API/라이브러리/플랫폼 SDK에 대한 답변**
+- "제 기억으로는..." 금지
+- WebSearch/context7 문서 조회로 검증 후 출처(URL) 명시
 - 사용자가 다른 곳에서 들은 정보도 반드시 검증 후 동의/반박/보강
+
+**프로젝트 내부 코드/동작에 대한 답변**
+- 설명은 반드시 근거와 함께:
+  - **코드 라인 번호** (`file.dart:123`)
+  - **주석·커밋 메시지·git log/blame** 인용
+  - **로그(logcat/flutter 콘솔)** 발췌
+  - **실측 수치** (다운로드 속도, drift ms, 타이밍 등)
+- 근거 없는 확신형 단정("~해서 이렇게 된다") 금지. 근거가 부족하면 **"가설"/"추측"임을 명시**.
+- 설명한 가설이 사용자 관찰(실기기 동작, 로그, 재현 결과)과 어긋나면 즉시 **가설 철회 + 재탐색**. 억지로 기존 설명을 방어하지 말 것.
+- 동작이 불확실한 구간은 "확정 못 함"으로 정직하게 기록. HISTORY/DECISIONS 문서에는 **관찰 사실**과 **가설**을 구분해서 적음.
+- "~덕분에 해결된 걸로 보임" 같은 추정성 결론은 "재현 실패" 등 실측 기반 표현으로 대체.
 
 ### 설명 방식
 - **낯선 도메인** (DSP/신호처리/제어이론): 전문 용어는 한 번에 하나씩, 짧은 비유·풀이 곁들이기. Claude가 먼저 쉬운 그림 그리고 사용자 확인.
