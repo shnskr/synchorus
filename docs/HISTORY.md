@@ -1219,7 +1219,24 @@ v0.0.24는 drift 완화 실험 과정에서만 존재한 빌드(패치 없이 v0
 
 **추가**: `native_audio_service.dart:87` `${minutes}` → `$minutes` (flutter analyze info 정리).
 
-**검증 보류**: Android 기기 USB 연결이 테스트 시점에 끊겨 있어 오늘 세션에서는 설치·실측 못 함. APK 빌드는 성공. 복귀 후 T4(재생 중 → 앱 스위처 스와이프 종료) 재검증 필요. 기대: **2분 → 1~2초 내 게스트 홈 복귀**.
+**검증 완료** (세션 후반 재연결 후 실측, S22 + A7 Lite):
+
+재생 중 S22 앱 스위처 스와이프 종료 → 게스트 홈 복귀까지 **1.4초**.
+
+실측 로그:
+```
+23:32:19.522  호스트 paused (스위처 진입) → broadcast host-paused
+23:32:20.131  호스트 detached (앱 종료)
+              [LIFECYCLE] HOST detached → broadcast host-closed (best-effort)
+              [P2P] broadcastHostClosedBestEffort peers=1
+23:32:20.913  게스트 received host-paused
+23:32:21.550  게스트 received host-closed  ← !!
+23:32:21.637  게스트 Connection closed: host → _leaveRoom
+```
+
+v0.0.25의 동일 시나리오가 **watchdog 의존 ~2분**이었던 것과 대비 → 약 **85배 단축**.
+
+**재생 전 종료 / iOS 강제 종료**는 detached 도달이 보장 안 되므로 여전히 기존 watchdog(2분)이 fallback. 이 두 경로는 별도 검증 없이 v0.0.25 동작 유지됨 (v0.0.26이 해당 경로를 건드리지 않음).
 
 **빌드**: v0.0.26
 

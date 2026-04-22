@@ -17,7 +17,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.22: HTTP 서버 재구현 (shelf 제거 + Content-Length + 1MB chunk) + 다운로드 측정 인프라 (`download-report` P2P 메시지)
 - v0.0.23: heartbeat timeout 9→15초. 다운로드 중 끊김 해결
 - v0.0.25: **호스트 라이프사이클 프로토콜** (host-paused/resumed/closed) + 게스트 자리비움 배너 + 주기적 재접속 Timer + watchdog(12회/~2분). drift 노이즈 완화(C: 중앙값, A: clock sync window 10). 상세: `docs/LIFECYCLE.md`의 "앱 라이프사이클 / errno / 연결 복구 전략" 섹션
-- v0.0.26: **detached에서 host-closed best-effort broadcast** — 재생 중 호스트 종료 시 게스트 복구 2분 → 1~2초 단축 기대. Android 기기 연결 끊겨 오늘은 빌드만, 설치·실측은 다음 세션
+- v0.0.26: **detached에서 host-closed best-effort broadcast** — 재생 중 호스트 종료 시 게스트 복구 2분 → **실측 1.4초 확인** (S22 + A7 Lite). 재생 전 종료 / iOS 강제 종료는 detached 미도달 가능성 있어 watchdog fallback 유지
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
 1. **라이프사이클·연결 추가 개선** — `RoomLifecycleCoordinator` 클래스 추출, detached에서 host-closed, errno=111 빠른 포기, iOS 실기기 재검증. 상세는 `docs/PLAN.md` Phase 4 "라이프사이클·연결 추가 개선 후보" + `docs/LIFECYCLE.md`
