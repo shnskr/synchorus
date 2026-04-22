@@ -123,6 +123,22 @@ class P2PService {
     await disconnect();
   }
 
+  /// 호스트: detached(앱 종료 직전) 콜백에서 호출. await 없이 best-effort로
+  /// host-closed를 브로드캐스트 + flush 트리거만 한다. Dart isolate가 곧
+  /// 사라질 수 있어서 await을 기대할 수 없음. 메시지가 OS 소켓 버퍼까지
+  /// 내려가면 커널이 프로세스 종료 시 마저 보낸다(best-effort).
+  void broadcastHostClosedBestEffort() {
+    debugPrint('[P2P] broadcastHostClosedBestEffort peers=${_peers.length}');
+    broadcastToAll({'type': 'host-closed'});
+    for (final peer in _peers) {
+      try {
+        // flush()는 Future지만 await 안 함 — 호출로 "send" 유도만
+        // ignore: discarded_futures
+        peer.socket.flush();
+      } catch (_) {}
+    }
+  }
+
   /// 호스트: 응답 없는 피어 제거
   void _removeDeadPeers() {
     final now = DateTime.now().millisecondsSinceEpoch;

@@ -323,6 +323,15 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
       debugPrint('[LIFECYCLE] HOST resumed → broadcast host-resumed + resumeHeartbeat');
       _addLog('[라이프사이클] resumed — host-resumed broadcast + heartbeat 재개');
       p2p.resumeHeartbeat();
+    } else if (state == AppLifecycleState.detached) {
+      // 재생 중 호스트 종료 케이스: foreground service 덕에 detached까지 Dart
+      // 코드 도달 가능 → 게스트가 watchdog 2분 대신 즉시 홈 화면으로 돌아갈
+      // 수 있도록 best-effort로 host-closed 전송. iOS 강제 종료처럼 detached
+      // 자체가 도달 못 하는 경우에는 기존 watchdog이 받아준다.
+      debugPrint('[LIFECYCLE] HOST detached → broadcast host-closed (best-effort)');
+      _addLog('[라이프사이클] detached — host-closed best-effort 전송');
+      _hostClosed = true;
+      p2p.broadcastHostClosedBestEffort();
     }
   }
 

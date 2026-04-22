@@ -1195,7 +1195,7 @@ v0.0.24는 drift 완화 실험 과정에서만 존재한 빌드(패치 없이 v0
 
 **아직 미구현(추후 보완 후보, 상세는 `docs/LIFECYCLE.md` + `docs/PLAN.md`)**:
 - `RoomLifecycleCoordinator` 클래스 추출 (현재 room_screen에 로직 혼재)
-- `detached`에서 `host-closed` broadcast (재생 중 종료 복구 2분 → 즉시)
+- ~~`detached`에서 `host-closed` broadcast~~ — v0.0.26에서 구현
 - errno=111 refused 감지 시 watchdog 빠른 포기 (재생 전 종료 2분 → ~10초)
 - errno=113/101 시 connectivity_plus 연동
 
@@ -1203,6 +1203,25 @@ v0.0.24는 drift 완화 실험 과정에서만 존재한 빌드(패치 없이 v0
 - `docs/LIFECYCLE.md` 대폭 확장 — "앱 라이프사이클 (AppLifecycleState)", "소켓 에러 코드 (errno)", "연결 복구 전략 (3중 안전망)" 섹션 추가. 이 3섹션이 앞으로 라이프사이클/연결 이슈 작업할 때 참조할 단일 소스.
 
 **빌드**: v0.0.25
+
+### 2026-04-22 (18) — 호스트 detached 시 host-closed 즉시 broadcast (v0.0.26)
+
+**배경**: v0.0.25에서 T4(호스트 강제 종료) 복구가 watchdog 의존(~2분)이었다. 재생 중 호스트 종료 시 foreground service 덕에 `AppLifecycleState.detached`까지 Dart 코드가 도달함을 오늘 세션 실측으로 확인 → 이 window에서 `host-closed`를 best-effort로 보내면 게스트가 즉시 홈 화면 복귀 가능.
+
+**구현**:
+- `p2p_service.dart` `broadcastHostClosedBestEffort()`: `host-closed` broadcast + `socket.flush()`만 트리거 (await 없음). Dart isolate가 곧 소멸될 수 있어 동기 호출로만 구성.
+- `room_screen.dart:didChangeAppLifecycleState`에 `detached` 분기 추가: 호스트일 때 `_hostClosed=true` + `broadcastHostClosedBestEffort()` 호출.
+
+**한계 (기록)**:
+- **iOS 앱 스위처 스와이프 종료**는 여전히 detached 도달 안 함 → 이 경로는 기존 watchdog이 받아줌
+- **재생 전 상태에서 강제 종료**는 foreground service 없어 detached 도달 확률 낮음 → 기존 watchdog 유지
+- flush는 async 함수 호출만 하고 완료 대기 X → OS가 프로세스 종료 시 커널 측 TCP 버퍼에 남은 데이터를 얼마나 보내주느냐에 의존 (best-effort)
+
+**추가**: `native_audio_service.dart:87` `${minutes}` → `$minutes` (flutter analyze info 정리).
+
+**검증 보류**: Android 기기 USB 연결이 테스트 시점에 끊겨 있어 오늘 세션에서는 설치·실측 못 함. APK 빌드는 성공. 복귀 후 T4(재생 중 → 앱 스위처 스와이프 종료) 재검증 필요. 기대: **2분 → 1~2초 내 게스트 홈 복귀**.
+
+**빌드**: v0.0.26
 
 #### 미해결 이슈
 

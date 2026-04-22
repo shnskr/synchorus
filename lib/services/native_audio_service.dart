@@ -84,7 +84,7 @@ class NativeAudioService {
   static String errorToMessage(String code) {
     if (code.startsWith('TOO_LONG:')) {
       final minutes = code.split(':').last;
-      return '파일이 너무 깁니다 (약 ${minutes}분, 최대 약 14분)';
+      return '파일이 너무 깁니다 (약 $minutes분, 최대 약 14분)';
     }
     switch (code) {
       case 'FILE_OPEN_FAILED':
