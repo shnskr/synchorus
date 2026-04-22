@@ -9,6 +9,7 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 | v2 AudioSyncService 교체 (병행 X) | just_audio에 깊이 결합(780줄), 병행은 P2P/HTTP/파일 로직 중복, PoC 30분 ±20ms 검증으로 fallback 불필요 |
 | SyncService in-place 업그레이드 (교체 X) | clock sync는 v2에서도 별도 서비스, v3 알고리즘은 상위 호환 (EMA 추가) |
 | 게스트 파일 다운로드: dart:io HttpClient | 네이티브 엔진은 로컬 파일 경로 필요, http/dio 패키지 불필요, 새 의존성 없음 |
+| 호스트 파일 서버: dart:io HttpServer 직접 (shelf 제거) | shelf_static 기본 동작이 작은 chunk 스트림 → throughput 저하. Content-Length + 1MB chunk 직접 구현으로 40~50% 개선, 의존성도 줄어듦 |
 | Android 파일 디코딩: NDK AMediaCodec 전체 메모리 디코딩 | 스트리밍보다 단순, 150MB 제한으로 ~5분 곡 커버. iOS는 AVAudioPlayerNode가 자체 스트리밍 |
 | iOS 파일 재생: AVAudioPlayerNode + scheduleSegment | AVAudioSourceNode 수동 렌더링 대비 메모리/코드 최소, seek = stop→scheduleSegment→play |
 | framePos는 네이티브에서 파일 rate로 정규화 | HAL은 hw rate(48kHz)로 카운트하지만 VF/sampleRate는 파일 rate(44.1kHz). Dart에서 하면 양쪽 rate를 알아야 하므로 C++/Swift에서 변환 |

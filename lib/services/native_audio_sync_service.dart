@@ -4,8 +4,6 @@ import 'dart:io';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:path_provider/path_provider.dart';
-import 'package:shelf/shelf_io.dart' as shelf_io;
-import 'package:shelf_static/shelf_static.dart';
 
 import '../models/audio_obs.dart';
 import 'native_audio_service.dart';
@@ -143,6 +141,8 @@ class NativeAudioSyncService {
         _handleStateRequest(message['_from']);
       } else if (type == 'drift-report' && _isHost) {
         _handleDriftReport(message);
+      } else if (type == 'download-report' && _isHost) {
+        _handleDownloadReport(message);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -155,14 +155,17 @@ class NativeAudioSyncService {
 
   Future<String?> _startFileServer(String dirPath, String fileName) async {
     await _stopFileServer();
-    final handler = createStaticHandler(dirPath);
     try {
-      _httpServer =
-          await shelf_io.serve(handler, InternetAddress.anyIPv4, 41236);
+      _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 41236);
     } catch (_) {
-      _httpServer =
-          await shelf_io.serve(handler, InternetAddress.anyIPv4, 0);
+      _httpServer = await HttpServer.bind(InternetAddress.anyIPv4, 0);
     }
+    // chunked transfer encoding 회피를 위해 매 요청에서 Content-Length를 설정하고
+    // bufferOutput=false로 TCP 패킷 즉시 flush. 256KB 청크로 직접 raw write.
+    _httpServer!.listen(
+      (request) => _serveFile(request, dirPath),
+      onError: (e) => debugPrint('HTTP server error: $e'),
+    );
     final ip = await _getLocalIP();
     if (ip == null) {
       await _stopFileServer();
@@ -172,8 +175,63 @@ class NativeAudioSyncService {
     return 'http://$ip:${_httpServer!.port}/$encodedName';
   }
 
+  static const int _fileServerChunkSize = 1024 * 1024; // 1MB
+
+  Future<void> _serveFile(HttpRequest request, String dirPath) async {
+    try {
+      if (request.uri.pathSegments.isEmpty) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      final name = Uri.decodeComponent(request.uri.pathSegments.last);
+      // 디렉토리 이탈 방지
+      if (name.contains('/') || name.contains('..')) {
+        request.response.statusCode = HttpStatus.forbidden;
+        await request.response.close();
+        return;
+      }
+      final file = File('$dirPath/$name');
+      if (!await file.exists()) {
+        request.response.statusCode = HttpStatus.notFound;
+        await request.response.close();
+        return;
+      }
+      final length = await file.length();
+      request.response
+        ..statusCode = HttpStatus.ok
+        ..headers.contentType = ContentType('application', 'octet-stream')
+        ..headers.contentLength = length;
+      final raf = await file.open();
+      try {
+        final buffer = Uint8List(_fileServerChunkSize);
+        int offset = 0;
+        while (offset < length) {
+          final toRead = (length - offset) < _fileServerChunkSize
+              ? length - offset
+              : _fileServerChunkSize;
+          final read = await raf.readInto(buffer, 0, toRead);
+          if (read <= 0) break;
+          // 매 청크마다 새 Uint8List로 복사 (버퍼 재사용에 따른 race 방지)
+          request.response.add(Uint8List.fromList(
+            read == buffer.length ? buffer : buffer.sublist(0, read),
+          ));
+          offset += read;
+        }
+      } finally {
+        await raf.close();
+      }
+      await request.response.close();
+    } catch (e) {
+      debugPrint('HTTP serve error: $e');
+      try {
+        await request.response.close();
+      } catch (_) {}
+    }
+  }
+
   Future<void> _stopFileServer() async {
-    await _httpServer?.close();
+    await _httpServer?.close(force: true);
     _httpServer = null;
   }
 
@@ -479,6 +537,25 @@ class NativeAudioSyncService {
   // 호스트: drift-report 수신 → 측정 로그 기록
   // ═══════════════════════════════════════════════════════════
 
+  void _handleDownloadReport(Map<String, dynamic> message) {
+    final from = message['_from'] as String?;
+    final data = message['data'] as Map<String, dynamic>?;
+    if (data == null) return;
+    final bytes = (data['bytes'] as num?)?.toInt() ?? 0;
+    final totalMs = (data['totalMs'] as num?)?.toInt() ?? 0;
+    final firstByteMs = (data['firstByteMs'] as num?)?.toInt() ?? 0;
+    final transferMs = (data['transferMs'] as num?)?.toInt() ?? 0;
+    final mbps = (data['mbps'] as num?)?.toDouble() ?? 0;
+    final fileName = data['fileName'] as String? ?? '';
+    final mb = bytes / (1024.0 * 1024.0);
+    debugPrint(
+      '[DOWNLOAD-REPORT] from=$from file="$fileName" '
+      '${mb.toStringAsFixed(2)}MB total=${totalMs}ms '
+      'TTFB=${firstByteMs}ms transfer=${transferMs}ms '
+      '${mbps.toStringAsFixed(2)}MB/s',
+    );
+  }
+
   void _handleDriftReport(Map<String, dynamic> message) {
     final from = message['_from'] as String?;
     final data = message['data'] as Map<String, dynamic>?;
@@ -554,6 +631,9 @@ class NativeAudioSyncService {
       tempFile = File('${tempDir.path}/dl_${mySession}_$safeName');
 
       final swDownload = Stopwatch()..start();
+      int receivedBytes = 0;
+      int firstByteMs = -1;
+      int transferMs = 0;
       final client = HttpClient();
       _activeHttpClient = client;
       try {
@@ -563,11 +643,15 @@ class NativeAudioSyncService {
           throw Exception('HTTP ${response.statusCode}');
         }
         final totalBytes = response.contentLength; // -1 if unknown
-        int receivedBytes = 0;
+        final swTransfer = Stopwatch();
         final sink = tempFile.openWrite();
         try {
           await for (final chunk in response) {
             if (_downloadAborted || _downloadSessionId != mySession) break;
+            if (firstByteMs < 0) {
+              firstByteMs = swDownload.elapsedMilliseconds;
+              swTransfer.start();
+            }
             sink.add(chunk);
             receivedBytes += chunk.length;
             if (totalBytes > 0) {
@@ -577,11 +661,36 @@ class NativeAudioSyncService {
         } finally {
           await sink.close();
         }
+        swTransfer.stop();
+        transferMs = swTransfer.elapsedMilliseconds;
       } finally {
         client.close();
         if (_activeHttpClient == client) _activeHttpClient = null;
       }
       swDownload.stop();
+      final totalMs = swDownload.elapsedMilliseconds;
+      final mbytes = receivedBytes / (1024.0 * 1024.0);
+      final transferMBps =
+          transferMs > 0 ? mbytes * 1000 / transferMs : 0.0;
+      debugPrint(
+        '[DOWNLOAD-GUEST] ${mbytes.toStringAsFixed(2)}MB in ${totalMs}ms '
+        '(TTFB=${firstByteMs}ms, transfer=${transferMs}ms, '
+        '${transferMBps.toStringAsFixed(2)} MB/s)',
+      );
+      // 호스트에 측정값 보고 — 호스트 logcat에서 확인 가능
+      if (_downloadSessionId == mySession && !_downloadAborted) {
+        _p2p.sendToHost({
+          'type': 'download-report',
+          'data': {
+            'bytes': receivedBytes,
+            'totalMs': totalMs,
+            'firstByteMs': firstByteMs,
+            'transferMs': transferMs,
+            'mbps': transferMBps,
+            'fileName': _currentFileName ?? '',
+          },
+        });
+      }
 
       // 다운로드 중 새 파일 요청이 들어온 경우 → 이 세션은 무효
       if (_downloadAborted || _downloadSessionId != mySession) {
@@ -592,8 +701,6 @@ class NativeAudioSyncService {
         _loadingController.add(false);
         return;
       }
-
-      debugPrint('[DOWNLOAD-GUEST] took ${swDownload.elapsedMilliseconds}ms');
 
       // 네이티브 엔진에 로드
       final swDecode = Stopwatch()..start();
