@@ -283,7 +283,7 @@
 | **anchor (앵커)** | drift=0인 기준점. 호스트/게스트의 framePos 쌍을 기록. 이후 각각의 진행량 차이로 drift 계산 |
 | **drift** | 호스트와 게스트의 재생 위치 차이 (ms). 양수=게스트가 앞서감, 음수=뒤처짐 |
 | **drift-report** | 게스트가 호스트에게 보내는 drift 측정 보고. 호스트의 CSV 로거에 기록 |
-| **seek-notify** | 호스트 seek 시 게스트에게 보내는 절대 위치(ms). 멱등(idempotent) |
+| **seek-notify** | 호스트 seek 시 게스트에게 보내는 절대 위치(ms). 멱등(idempotent). 게스트가 재생 중이 아니어도 엔진 VF/seekFrameOffset 갱신 적용 |
 | **cooldown (쿨다운)** | 보정 seek 후 일정 시간(1초) 동안 추가 보정을 금지. 진동(oscillation) 방지 |
 | **gain=0.8** | seek 보정 시 drift의 80%만 보정. 오버슈트(과잉 보정 --> 반대쪽으로 벗어남) 방지 |
 | **cross-rate 비교** | 호스트(48kHz)와 게스트(44.1kHz)의 frame을 직접 비교하지 않고 각각 ms로 변환 후 비교 |

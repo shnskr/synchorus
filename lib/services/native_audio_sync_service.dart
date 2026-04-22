@@ -687,10 +687,19 @@ class NativeAudioSyncService {
 
   void _handleSeekNotify(Map<String, dynamic> message) {
     final targetMs = (message['data']?['targetMs'] as num?)?.toDouble();
-    if (targetMs == null || !_playing) return;
+    if (targetMs == null || !_audioReady) return;
     // 절대 위치 → 게스트 frame 변환. 몇 번 와도 같은 위치 (멱등)
     final targetGuestVf = (targetMs * _framesPerMs).round();
     unawaited(_engine.seekToFrame(targetGuestVf));
+    // UI 즉시 반영. 재생 중이 아니면 폴링이 이전 위치를 계속 emit하므로
+    // override로 덮어야 "처음 재생" 시 끝 위치(4:55) 잔상이 사라짐.
+    final pos = Duration(milliseconds: targetMs.round());
+    _seekOverridePosition = pos;
+    _positionController.add(pos);
+    _seekOverrideTimer?.cancel();
+    _seekOverrideTimer = Timer(const Duration(milliseconds: 500), () {
+      _seekOverridePosition = null;
+    });
     // 앵커 무효화 + 쿨다운: fresh obs 도착 대기 후 re-anchor
     _anchorHostFrame = null;
     _anchorGuestFrame = null;

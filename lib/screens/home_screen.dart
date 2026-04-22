@@ -137,7 +137,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => RoomScreen(roomCode: host.roomCode, isHost: false, initialPeerCount: peerCount),
+            builder: (_) => RoomScreen(
+              roomCode: host.roomCode,
+              isHost: false,
+              initialPeerCount: peerCount,
+            ),
           ),
         );
       }
@@ -146,11 +150,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         final msg = e is TimeoutException
             ? '호스트 응답 없음 (시간 초과)'
             : e is SocketException
-                ? '호스트에 연결할 수 없습니다'
-                : '연결 실패: $e';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(msg)),
-        );
+            ? '호스트에 연결할 수 없습니다'
+            : '연결 실패: $e';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(msg)));
       }
     } finally {
       if (mounted) setState(() => _isJoining = false);
@@ -171,7 +175,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
                 _versionLabel,
                 style: TextStyle(
                   fontSize: 11,
-                  color: Theme.of(context).colorScheme.onSurface.withValues(alpha: 0.6),
+                  color: Theme.of(
+                    context,
+                  ).colorScheme.onSurface.withValues(alpha: 0.6),
                 ),
               ),
             ),
@@ -181,122 +187,152 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       body: GestureDetector(
         onTap: () => FocusScope.of(context).unfocus(),
         behavior: HitTestBehavior.translucent,
-        child: Padding(
-          padding: const EdgeInsets.all(24.0),
-          child: Column(
-            mainAxisAlignment: MainAxisAlignment.center,
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: [
-              // [임시] v3 네이티브 엔진 테스트
-              OutlinedButton.icon(
-                onPressed: () => Navigator.push(
-                  context,
-                  MaterialPageRoute(builder: (_) => const NativeTestScreen()),
-                ),
-                icon: const Icon(Icons.science),
-                label: const Text('Native Engine Test'),
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            padding: const EdgeInsets.all(24.0),
+            child: ConstrainedBox(
+              constraints: BoxConstraints(
+                minHeight: constraints.maxHeight - 48,
               ),
-              const SizedBox(height: 16),
-
-              // 방 만들기 버튼
-              ElevatedButton.icon(
-                onPressed: _createRoom,
-                icon: const Icon(Icons.speaker_group),
-                label: const Text('방 만들기'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  textStyle: const TextStyle(fontSize: 18),
-                ),
-              ),
-
-              const SizedBox(height: 32),
-              const Divider(),
-              const SizedBox(height: 32),
-
-              // 방 참가 버튼
-              ElevatedButton.icon(
-                onPressed: _isSearching ? _stopDiscovery : _startDiscovery,
-                icon: Icon(_isSearching ? Icons.stop : Icons.search),
-                label: Text(_isSearching ? '검색 중단' : '주변 방 찾기'),
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
-                  textStyle: const TextStyle(fontSize: 18),
-                ),
-              ),
-
-              const SizedBox(height: 16),
-
-              // 검색 중 표시
-              if (_isSearching)
-                Padding(
-                  padding: const EdgeInsets.only(bottom: 16),
-                  child: Row(
-                    mainAxisAlignment: MainAxisAlignment.center,
-                    children: [
-                      const SizedBox(
-                        width: 16, height: 16,
-                        child: CircularProgressIndicator(strokeWidth: 2),
+              child: IntrinsicHeight(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    // [임시] v3 네이티브 엔진 테스트
+                    OutlinedButton.icon(
+                      onPressed: () => Navigator.push(
+                        context,
+                        MaterialPageRoute(
+                          builder: (_) => const NativeTestScreen(),
+                        ),
                       ),
-                      const SizedBox(width: 8),
-                      Text(
-                        _discoveredHosts.isEmpty
-                            ? '주변 방을 검색하고 있습니다...'
-                            : '${_discoveredHosts.length}개의 방을 찾았습니다',
-                        style: TextStyle(color: Colors.grey[600]),
-                      ),
-                    ],
-                  ),
-                ),
-
-              // 발견된 방 목록
-              ..._discoveredHosts.map((host) => Card(
-                child: ListTile(
-                  leading: const Icon(Icons.wifi),
-                  title: Text('방 코드: ${host.roomCode}'),
-                  subtitle: Text('${host.name} (${host.ip})'),
-                  trailing: _isJoining
-                      ? const SizedBox(
-                          width: 20, height: 20,
-                          child: CircularProgressIndicator(strokeWidth: 2),
-                        )
-                      : const Icon(Icons.arrow_forward),
-                  onTap: _isJoining ? null : () => _joinRoom(host),
-                ),
-              )),
-
-              const SizedBox(height: 32),
-              const Divider(),
-              const SizedBox(height: 16),
-
-              // IP 직접 입력으로 참가
-              const Text('IP 직접 입력', style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold)),
-              const SizedBox(height: 8),
-              Row(
-                children: [
-                  Expanded(
-                    child: TextField(
-                      controller: _codeController,
-                      decoration: const InputDecoration(
-                        hintText: '호스트 IP (예: 192.168.0.10)',
-                        border: OutlineInputBorder(),
-                      ),
-                      keyboardType: const TextInputType.numberWithOptions(decimal: true),
-                      textInputAction: TextInputAction.done,
+                      icon: const Icon(Icons.science),
+                      label: const Text('Native Engine Test'),
                     ),
-                  ),
-                  const SizedBox(width: 8),
-                  ElevatedButton(
-                    onPressed: _isJoining ? null : () => _joinByIp(),
-                    child: _isJoining
-                        ? const SizedBox(
-                            width: 20, height: 20,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Text('참가'),
-                  ),
-                ],
+                    const SizedBox(height: 16),
+
+                    // 방 만들기 버튼
+                    ElevatedButton.icon(
+                      onPressed: _createRoom,
+                      icon: const Icon(Icons.speaker_group),
+                      label: const Text('방 만들기'),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        textStyle: const TextStyle(fontSize: 18),
+                      ),
+                    ),
+
+                    const SizedBox(height: 32),
+                    const Divider(),
+                    const SizedBox(height: 32),
+
+                    // 방 참가 버튼
+                    ElevatedButton.icon(
+                      onPressed: _isSearching
+                          ? _stopDiscovery
+                          : _startDiscovery,
+                      icon: Icon(_isSearching ? Icons.stop : Icons.search),
+                      label: Text(_isSearching ? '검색 중단' : '주변 방 찾기'),
+                      style: ElevatedButton.styleFrom(
+                        padding: const EdgeInsets.symmetric(vertical: 16),
+                        textStyle: const TextStyle(fontSize: 18),
+                      ),
+                    ),
+
+                    const SizedBox(height: 16),
+
+                    // 검색 중 표시
+                    if (_isSearching)
+                      Padding(
+                        padding: const EdgeInsets.only(bottom: 16),
+                        child: Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: [
+                            const SizedBox(
+                              width: 16,
+                              height: 16,
+                              child: CircularProgressIndicator(strokeWidth: 2),
+                            ),
+                            const SizedBox(width: 8),
+                            Text(
+                              _discoveredHosts.isEmpty
+                                  ? '주변 방을 검색하고 있습니다...'
+                                  : '${_discoveredHosts.length}개의 방을 찾았습니다',
+                              style: TextStyle(color: Colors.grey[600]),
+                            ),
+                          ],
+                        ),
+                      ),
+
+                    // 발견된 방 목록
+                    ..._discoveredHosts.map(
+                      (host) => Card(
+                        child: ListTile(
+                          leading: const Icon(Icons.wifi),
+                          title: Text('방 코드: ${host.roomCode}'),
+                          subtitle: Text('${host.name} (${host.ip})'),
+                          trailing: _isJoining
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Icon(Icons.arrow_forward),
+                          onTap: _isJoining ? null : () => _joinRoom(host),
+                        ),
+                      ),
+                    ),
+
+                    const SizedBox(height: 32),
+                    const Divider(),
+                    const SizedBox(height: 16),
+
+                    // IP 직접 입력으로 참가
+                    const Text(
+                      'IP 직접 입력',
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        Expanded(
+                          child: TextField(
+                            controller: _codeController,
+                            decoration: const InputDecoration(
+                              hintText: '호스트 IP (예: 192.168.0.10)',
+                              border: OutlineInputBorder(),
+                            ),
+                            keyboardType: const TextInputType.numberWithOptions(
+                              decimal: true,
+                            ),
+                            textInputAction: TextInputAction.done,
+                          ),
+                        ),
+                        const SizedBox(width: 8),
+                        ElevatedButton(
+                          onPressed: _isJoining ? null : () => _joinByIp(),
+                          child: _isJoining
+                              ? const SizedBox(
+                                  width: 20,
+                                  height: 20,
+                                  child: CircularProgressIndicator(
+                                    strokeWidth: 2,
+                                  ),
+                                )
+                              : const Text('참가'),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
               ),
-            ],
+            ),
           ),
         ),
       ),
@@ -330,7 +366,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         Navigator.push(
           context,
           MaterialPageRoute(
-            builder: (_) => RoomScreen(roomCode: roomCode, isHost: false, initialPeerCount: peerCount),
+            builder: (_) => RoomScreen(
+              roomCode: roomCode,
+              isHost: false,
+              initialPeerCount: peerCount,
+            ),
           ),
         );
       }
@@ -339,11 +379,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         final msg = e is TimeoutException
             ? '호스트 응답 없음 (시간 초과)'
             : e is SocketException
-                ? '호스트에 연결할 수 없습니다'
-                : '연결 실패: $e';
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text(msg)),
-        );
+            ? '호스트에 연결할 수 없습니다'
+            : '연결 실패: $e';
+        ScaffoldMessenger.of(
+          context,
+        ).showSnackBar(SnackBar(content: Text(msg)));
       }
     } finally {
       if (mounted) setState(() => _isJoining = false);
