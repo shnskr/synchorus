@@ -1132,6 +1132,78 @@ Dart는 단일 isolate 내에서 single event loop로 동작 → P2P 소켓과 H
 
 **빌드**: v0.0.23
 
+### 2026-04-22 (17) — drift 노이즈 완화 실험 + 호스트 라이프사이클 프로토콜 (v0.0.25)
+
+v0.0.24는 drift 완화 실험 과정에서만 존재한 빌드(패치 없이 v0.0.25로 통합 기록).
+
+#### Part A — drift 노이즈 완화
+
+이전에 제안된 3가지 변경 (B/C/A) 실험. 실측:
+
+- **B (audio-obs broadcast 500→200ms)**: **롤백**. 롤백 이유는 Part B 참고. 즉 `_obsBroadcastIntervalMs` 현재 500ms 유지.
+- **C (drift 판단을 최근 5샘플 중앙값으로)**: 적용. `_driftSamples` 윈도우 + `_median` 헬퍼. 큰 drift(≥200ms re-anchor)는 즉시 처리, 중소 drift(≥20ms)는 중앙값 기준으로 seek 발동.
+- **A (clock sync sliding window 5→10)**: 적용. `sync_service.dart:35` `_windowSize = 10`.
+
+**부가**: 호스트 `_handleDownloadReport`와 `_handleDriftReport`에 `debugPrint` 추가 → logcat에서 실시간 drift/다운로드 관측 가능.
+
+**실측**: fallback anchor 기준 drift -2~-4ms 안정 유지 확인. seekCount 증가 없이 노이즈 샘플(-47ms 등) 흡수 확인. 즉 C의 중앙값 필터 효과 실측.
+
+#### Part B — 호스트 라이프사이클 프로토콜 + 게스트 자동 재접속
+
+**배경**: 재생 전 상태에서 호스트가 홈/파일 선택 창으로 background 진입 시 Android가 foreground service 없는 프로세스를 강등하여 TCP `errno=103 Software caused connection abort` 발생. 게스트는 `errno=104 Connection reset by peer` 받아 TCP 끊김. 기존 재접속 플로우는 즉시 실행되지만 호스트가 still paused 상태라 3회 실패 후 `_leaveRoom()` → 사용자 체감 "호스트 잠깐 뒤로 가기만 했는데 방이 터짐".
+
+**실측 확인된 가설** (v0.0.25 debugPrint 로그 기반, CLAUDE.md 근거 원칙 준수):
+- 호스트 `AppLifecycleState.paused` 이벤트는 **실제 TCP abort보다 약 5초 먼저** Dart에 도달 → 그 window 안에 broadcast 가능
+- `host-paused` 메시지는 게스트에 정상 도달 (1.6초 이내)
+- 호스트 resume 시 broadcast하는 `host-resumed`는 **도달 불가**: paused 중 TCP socket이 이미 abort되어 `_peers.isEmpty` 상태
+- 재생 중 종료 시 `AppLifecycleState.detached` 이벤트가 Dart까지 도달함 관측 (foreground service가 프로세스 유지 덕)
+
+**B 롤백 이유**: v0.0.24 시험 중 호스트 재생 전 파일 선택 창 진입 시 게스트 쪽 연결이 이전보다 자주 끊기는 것 같은 현상 관측. 원인을 좁히기 위해 B만 롤백. 재현 후 원인이 `audio-obs 주기`가 아니라 **"재생 전 paused"에서 foreground service 부재로 인한 TCP abort**임을 확인. B는 본질적으로 무관했으나 원인 확정 전에 복잡도를 줄이기 위해 롤백 유지.
+
+**구현 (v0.0.25)**:
+
+1. 프로토콜 메시지 3종 (`p2p_service.dart`):
+   - `host-paused` / `host-resumed` / `host-closed`
+   - 새 메서드: `pauseHeartbeat()`, `resumeHeartbeat()`, `closeRoom()`
+   - `resumeHeartbeat` 시 모든 peer `lastSeen` 초기화 → paused 기간이 timeout으로 판정되지 않게
+
+2. 호스트 라이프사이클 감지 (`room_screen.dart`):
+   - `WidgetsBindingObserver` 등록
+   - `paused` → `pauseHeartbeat()`, `resumed` → `resumeHeartbeat()`
+   - 정식 방 나가기 버튼 → `closeRoom()` 호출 후 `disconnect()`
+
+3. 게스트 자리비움 UI + 주기적 재접속 (`room_screen.dart`):
+   - `_hostAway` / `_hostClosed` 플래그
+   - 주황 배너 "호스트가 일시 자리비움입니다"
+   - `host-paused` 수신 시 `_hostAway=true` + 재접속 시도 중단
+   - TCP 끊기면 `_startAwayReconnectLoop()` — 5초 주기 재접속 시도 (`reconnectToHost(retries: 1)`)
+   - 재접속 성공 시 `_hostAway=false` + 재동기화 + Timer 취소 (TCP 재접속 성공 자체가 복귀 신호, `host-resumed` 도달 불가 전제)
+   - watchdog: 12회 실패(공칭 60초, 실제 timeout 7초씩이라 ~2분) 후 `leaveRoom()` 호출
+   - `host-resumed` 수신 시에도 Timer 취소 (이중 안전장치)
+   - `host-closed` 수신 시 즉시 `_leaveRoom()`
+
+**검증 (S22 + A7 Lite 실측)**:
+
+| 시나리오 | 결과 | 복구 시간 |
+|---|---|---|
+| T1 파일 선택 창 10초 대기 → 복귀 | ✅ 자동 재접속 + 재동기화 | 5~10초 |
+| T2 홈 버튼 → 복귀 | ✅ 자동 재접속 | 4~10초 |
+| T3 정식 방 나가기 버튼 | ✅ `host-closed` 메시지로 게스트 즉시 홈 복귀 | 1~2초 |
+| T4 앱 스위처 스와이프 종료 | ✅ watchdog 12회 실패 후 자동 홈 복귀 | 약 2분 |
+
+**iOS 검증 미수행**: flutter run의 VM Service 연결 실패로 오늘 세션에선 iPhone을 안정적으로 테스트 못 함. iOS는 Android와 동일 enum이지만 detached 도달 동작 차이 있음 → 추후 재확인 필요 (PLAN.md 추후 보완 후보에 기록).
+
+**아직 미구현(추후 보완 후보, 상세는 `docs/LIFECYCLE.md` + `docs/PLAN.md`)**:
+- `RoomLifecycleCoordinator` 클래스 추출 (현재 room_screen에 로직 혼재)
+- `detached`에서 `host-closed` broadcast (재생 중 종료 복구 2분 → 즉시)
+- errno=111 refused 감지 시 watchdog 빠른 포기 (재생 전 종료 2분 → ~10초)
+- errno=113/101 시 connectivity_plus 연동
+
+**문서 신설**:
+- `docs/LIFECYCLE.md` 대폭 확장 — "앱 라이프사이클 (AppLifecycleState)", "소켓 에러 코드 (errno)", "연결 복구 전략 (3중 안전망)" 섹션 추가. 이 3섹션이 앞으로 라이프사이클/연결 이슈 작업할 때 참조할 단일 소스.
+
+**빌드**: v0.0.25
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -1147,9 +1219,11 @@ Dart는 단일 isolate 내에서 single event loop로 동작 → P2P 소켓과 H
 - [ ] 엔진 레이턴시 보정값 ~10ms 오차 — 자동 측정 방식 개선 먼저 검토
 
 **안정성**
-- [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22)
-- [x] ~~호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성~~ — 위와 같은 조건에서 재현 실패 (2026-04-22)
+- [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
+- [x] ~~호스트 파일선택 창 열고 있는 동안 게스트 입퇴장 시 안정성~~ — 위와 같은 조건에서 재현 실패 (2026-04-22). v0.0.25에서 호스트 라이프사이클 프로토콜로 명시적 처리.
+- [x] ~~호스트 재생 전 paused 시 게스트 연결이 tcp abort로 끊겨 재접속 실패 → 방 폭파~~ — v0.0.25 host-paused/resumed + 주기적 재접속 watchdog로 해결. T1~T4 실기기 검증 완료 (Android 2대) (2026-04-22)
 - [ ] 디버그 모드에서 호스트 플레이어 간헐적 스터터
+- [ ] iOS 실기기에서 라이프사이클 시나리오(T1~T4) 재검증 — v0.0.25는 Android 2대로만 검증됨. iOS의 background audio 미활성 상태에서 paused 동작과 detached 이벤트 도달 여부 확인 필요
 
 #### 해결된 이슈
 - [x] 호스트 파일 빠른 교체 시 race condition — 세션 ID + HttpClient 강제 종료 + stale 체크 (2026-04-20)

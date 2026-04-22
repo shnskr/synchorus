@@ -3,26 +3,29 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.23** (2026-04-22).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.25** (2026-04-22).
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
-- **Step 2 멀티 게스트**: 실기기 3대(S22 호스트 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 사실상 검증. 코드 변경 없이 1:N 동작 확인 완료
+- **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
 - **Step 3 HTTP 전송**: 완료 (v0.0.22에서 shelf 제거, dart:io HttpServer 직접 + 1MB chunk)
+- **호스트 라이프사이클 프로토콜**: v0.0.25 추가 — `host-paused`/`host-resumed`/`host-closed` + 게스트 주기적 재접속 + watchdog. T1~T4 Android 검증 완료
 
 v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handler.dart: NativeAudioHandler.
 
 ### 최근 해결 (2026-04-22)
 - v0.0.20: seek-notify 가드(`!_playing`→`!_audioReady`) + 태블릿 가로모드 UI 스크롤
 - v0.0.22: HTTP 서버 재구현 (shelf 제거 + Content-Length + 1MB chunk) + 다운로드 측정 인프라 (`download-report` P2P 메시지)
-- v0.0.23: heartbeat timeout 9→15초. 파일 선택 창/백그라운드 시 끊김 재현 실패
+- v0.0.23: heartbeat timeout 9→15초. 다운로드 중 끊김 해결
+- v0.0.25: **호스트 라이프사이클 프로토콜** (host-paused/resumed/closed) + 게스트 자리비움 배너 + 주기적 재접속 Timer + watchdog(12회/~2분). drift 노이즈 완화(C: 중앙값, A: clock sync window 10). 상세: `docs/LIFECYCLE.md`의 "앱 라이프사이클 / errno / 연결 복구 전략" 섹션
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
-2. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-3. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-4. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+1. **라이프사이클·연결 추가 개선** — `RoomLifecycleCoordinator` 클래스 추출, detached에서 host-closed, errno=111 빠른 포기, iOS 실기기 재검증. 상세는 `docs/PLAN.md` Phase 4 "라이프사이클·연결 추가 개선 후보" + `docs/LIFECYCLE.md`
+2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
+3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+5. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
 
-상세: `docs/HISTORY.md` (#14~#16 섹션), `docs/PLAN.md`
+상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
 
 ## 작업 시작 전
 - 설계/결정/이력/계획: **docs/** 아래 4개 문서 확인

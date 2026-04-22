@@ -298,3 +298,162 @@
 | **멱등 (idempotent)** | 같은 요청을 여러 번 보내도 결과가 동일. seek-notify가 absolute targetMs인 이유 |
 | **NativeTimestamp** | 네이티브 엔진이 보내는 관측 데이터. `{framePos, timeNs, virtualFrame, sampleRate, wallMs, ok}` |
 | **CSV 로거** | 호스트에서 drift-report를 파일로 기록. 테스트 후 분석용 |
+
+---
+
+## 앱 라이프사이클 (AppLifecycleState)
+
+Flutter가 Android/iOS의 앱 상태 전환을 단일 enum으로 추상화한 것. `WidgetsBindingObserver.didChangeAppLifecycleState`로 받는다.
+
+### 상태 (5가지)
+
+Flutter 공식 state machine (api.flutter.dev):
+
+```
++-----------+                           +-----------+
+| detached  |-------------------------->|  resumed  |
++-----------+                           +-----------+
+      ^                                     ^
+      |                                     |
+      |                                     v
++-----------+   +--------------+   +-----------+
+|  paused   |<->|    hidden   |<->| inactive  |
++-----------+   +--------------+   +-----------+
+```
+
+| 상태 | 의미 | 우리 앱에서 언제 발생? |
+|------|------|----------------------|
+| **resumed** | foreground + 입력 포커스 있음 (정상 사용 중) | 앱 정상 사용, 복귀 직후 |
+| **inactive** | foreground이지만 입력 못 받음 (transient 전환) | 알림 드롭다운 살짝 내림, Control Center, 앱 전환 애니메이션 중, Siri 호출 |
+| **hidden** | 모든 view 숨김 (background 전환 과정) | paused 직전/직후 짧게. 대부분 무시 가능 |
+| **paused** | background. 앱 실행 중단, OS가 프로세스 억제 가능 | 홈 버튼, 다른 앱 전환, 화면 잠금, 파일 선택 창(file_picker Intent), 전화 수신 전체화면 |
+| **detached** | 모든 view 분리 (종료 직전) | 앱 종료 (정상/스와이프 스와이프/OS kill 중 Dart가 살아있을 때만) |
+
+### OS가 paused 상태 앱에 하는 일
+
+**Android**:
+- foreground service 없으면 프로세스 "cached/background"로 강등
+- CPU 스케줄러 우선순위 낮춤
+- Timer·네트워크 억제 (Doze / App Standby)
+- 수 분 후 cgroup freezer로 CPU 아예 중단 (Android 12+)
+- 메모리 부족 시 OOM killer 대상 1순위
+
+**iOS**:
+- background audio mode 없으면 수 초 내 suspended
+- suspended 상태에서 CPU/network/Timer 모두 정지
+- 메모리 부족 시 kill
+
+**foreground service / background audio mode**: 위 제약을 면제받는 OS 공식 수단. 하지만 UX상 알림 필수.
+
+### 플랫폼별 실전 차이 (같은 enum 써도 동작이 미묘히 다름)
+
+| 이벤트 | Android | iOS |
+|---|---|---|
+| 정상 종료 (`finish()` / `Scene dismiss`) | detached 도달 | detached 도달 (`UIApplicationWillTerminate`, `UISceneDidDisconnect`) |
+| 앱 스위처 스와이프 | detached **보통 도달** (프로세스 짧게 살아있음) | detached **거의 도달 안 함** (OS 바로 kill) |
+| OS 메모리 kill | detached 도달 확률 낮음 | detached 도달 안 함 |
+| 크래시 | detached 안 옴 | detached 안 옴 |
+
+→ **detached 이벤트는 best-effort**. 이 이벤트만 믿고 정리 로직을 걸면 안 됨.
+
+### 우리 앱의 역할 × 라이프사이클 대응 매트릭스
+
+역할(role) 정의:
+- **idle**: 방 없음 (홈 화면, 로그인 등)
+- **host**: 방 만들고 TCP 서버 운영 중
+- **guest**: 방 참가해서 호스트에 연결 중
+
+| 상태 | idle | host | guest |
+|---|---|---|---|
+| inactive | 무시 | 무시 | 무시 |
+| hidden | 무시 | 무시 | 무시 |
+| **paused** | 무시 | `host-paused` broadcast + heartbeat 정지 | (자기 pause는 호스트가 감지) |
+| **resumed** | 무시 | `host-resumed` broadcast + heartbeat 재개 + 모든 peer `lastSeen` 리셋 | TCP 상태 점검, 끊겼으면 재접속 |
+| **detached** | 무시 | `host-closed` broadcast (best-effort) + disconnect | `leave` 메시지 + disconnect |
+
+현재 v0.0.25: host 측 paused/resumed만 구현. detached는 미구현(추후 보완).
+
+---
+
+## 소켓 에러 코드 (errno)
+
+TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX errno 숫자가 담긴다. Android(Linux 커널) / iOS(Darwin)에서 대부분 같지만 미묘한 차이 있음.
+
+### 주요 errno (이 앱에서 실제 관측된 것 포함)
+
+| errno | 이름 | 의미 | 우리 앱에서의 해석 |
+|---|---|---|---|
+| **111** | ECONNREFUSED | 상대가 listen 안 함 | 호스트 TCP 서버 죽음 → 호스트 프로세스 종료 거의 확정 |
+| **110** | ETIMEDOUT | 응답 없음 (SYN timeout) | 호스트 paused 상태 or 네트워크 지연 → 잠깐 기다릴 가치 있음 |
+| **113** | EHOSTUNREACH | 호스트로 경로 없음 | 호스트가 AP 나감 or WiFi 변경 |
+| **101** | ENETUNREACH | 네트워크 자체 사용 불가 | 내 WiFi 끊김 |
+| **104** | ECONNRESET | 상대가 RST 보냄 | 상대 OS의 socket cleanup (대부분 상대 정상 종료) |
+| **103** | ECONNABORTED | 로컬 소켓 abort | 내 OS가 내 앱의 socket 정리 (Android paused 직후 흔함) |
+| **32** | EPIPE | 이미 끊긴 소켓에 write | 이전에 RST 받은 소켓에 send 시도 |
+
+### 판정 트리 (설계안, v0.0.25엔 미구현)
+
+```
+소켓 에러 발생 시:
+  ├─ errno=111 (refused)
+  │    → 호스트 프로세스 죽음 확률↑
+  │    → 2회 연속이면 즉시 leaveRoom (빠른 포기)
+  │
+  ├─ errno=110 (timed out)
+  │    → 호스트 paused 가능성 (foreground service 없는 상태)
+  │    → 주기 재시도 (watchdog까지 유지)
+  │
+  ├─ errno=113 (no route) / errno=101 (network unreachable)
+  │    → connectivity_plus로 내 WiFi 상태 재확인
+  │         ├─ WiFi 있음 → 호스트 네트워크 문제 → 재시도
+  │         └─ WiFi 없음 → 내 WiFi 복구 대기 (기존 `_waitForWifiAndReconnect` 로직)
+  │
+  ├─ errno=104 (reset)
+  │    → 상대 정상/비정상 종료 (대부분)
+  │    → `_hostAway=true`면 watchdog, 아니면 기존 reconnectToHost 플로우
+  │
+  └─ errno=103 (abort)
+       → 내 측 abort (호스트가 paused로 강등되며 OS가 처리한 경우 흔함)
+       → 보통 `host-paused` 메시지가 앞서서 도달했을 것이라 이미 `_hostAway=true` 상태
+```
+
+### 한계
+
+- errno 값은 POSIX 표준이지만 플랫폼·커널 버전에 따라 다를 수 있음
+- 원격 호스트의 실제 상태를 100% 알 방법 없음 → 휴리스틱 판정일 뿐
+- 최종 확신은 재접속 성공/실패 + 시간 기반 watchdog으로만 가능
+
+---
+
+## 연결 복구 전략 (3중 안전망)
+
+앞의 "앱 라이프사이클"과 "errno"를 조합해 P2P 연결이 다양한 실패 모드를 견디도록 설계한 구조. 상위 계층이 실패해도 하위 계층이 안전망으로 작동.
+
+### 1층 — 프로토콜 메시지 ("정상 경로")
+
+양쪽 앱이 **살아있고 통신 가능할 때** 의도를 명시적으로 주고받는다.
+
+| 메시지 | 방향 | 트리거 | 효과 |
+|---|---|---|---|
+| `host-paused` | 호스트 → 전체 게스트 | 호스트 `AppLifecycleState.paused` | 게스트 자리비움 배너 표시, 재접속 중단 |
+| `host-resumed` | 호스트 → 전체 게스트 | 호스트 `AppLifecycleState.resumed` | 게스트 자리비움 해제, heartbeat 재개 |
+| `host-closed` | 호스트 → 전체 게스트 | 호스트 방 나가기 버튼 / (장래) detached | 게스트 즉시 홈 화면 복귀 |
+
+### 2층 — TCP 소켓 이벤트 ("비정상 감지")
+
+1층 메시지가 오지 못하는 상황을 OS 수준에서 포착.
+
+- `Socket.onDone`: 상대가 FIN을 보낸 경우 (정상 종료)
+- `Socket.onError` + `SocketException.osError.errorCode`: RST / timeout / unreachable 등
+- errno 기반 판정 트리 (위 "소켓 에러 코드" 섹션)
+
+### 3층 — 시간 기반 watchdog ("최종 안전망")
+
+1층·2층 모두 실패해도 앱이 멈추지 않도록 하는 하드 타임아웃.
+
+- 게스트가 `_hostAway=true` 상태 + TCP 끊김 상태에서 `_startAwayReconnectLoop()` 시작
+- 5초 주기로 1회씩 `reconnectToHost(retries: 1)` 시도
+- N회(현재 12회, 약 60~120초) 실패 시 `leaveRoom()` 강제 호출 → 홈 화면으로
+- 성공 시 재동기화 진행
+
+WiFi 완전 끊김처럼 TCP RST도 오지 않는 극단 케이스에 이 층이 유일한 방어선.

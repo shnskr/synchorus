@@ -187,3 +187,10 @@ Phase 4:   확장 기능 추가
     - [ ] multi-stream 다운로드 (같은 파일 N개 TCP 병렬) — 중간 비용, AP가 WiFi 6+ 일 때 효과
     - [ ] Wi-Fi Direct / iOS MultipeerConnectivity — 공유기 거치지 않고 기기 간 직접 연결 (AirDrop급 속도). 크로스플랫폼 호환 위해 양 네이티브 플러그인 직접 구현 필요
     - [ ] HTTP 다운로드를 별도 Isolate로 분리 — 속도보다는 heartbeat 처리 안정성 목적 (v0.0.23 노트 참고)
+- [ ] 라이프사이클·연결 추가 개선 후보 (v0.0.25 MVP 이후. 상세: `docs/LIFECYCLE.md`의 "앱 라이프사이클", "소켓 에러 코드(errno)", "연결 복구 전략" 섹션):
+    - [ ] `RoomLifecycleCoordinator` 클래스 추출 — `room_screen.dart`의 라이프사이클/재접속/상태 로직을 별도 클래스로 분리. 역할 × 라이프사이클 매트릭스를 한 곳에서 선언. UI는 상태 구독만.
+    - [ ] `AppLifecycleState.detached`에서 `host-closed` broadcast — 재생 중 호스트 종료 시 게스트 즉시 복구(현재 watchdog 2분 → 즉시). best-effort(iOS 강제 종료는 도달 안 함).
+    - [ ] errno=111 refused 2회 연속 감지 시 watchdog 빠른 포기 — 재생 전 호스트 종료 복구(현재 watchdog 2분 → ~10초).
+    - [ ] errno=113 EHOSTUNREACH / errno=101 ENETUNREACH 감지 시 `connectivity_plus` 이벤트와 연동 — WiFi 변경·AP 변경 케이스에서 WiFi 복구 대기 로직(`_waitForWifiAndReconnect`) 바로 트리거.
+    - [ ] `_awayReconnectTimer` 주기 조정 여지 — 현재 5초 × 12회 = 60초 공칭이지만 timeout 7초씩이라 실제 ~2분. `Socket.connect` timeout을 2초로 줄이면 실제도 1분 이내.
+    - [ ] iOS 실기기에서 라이프사이클·재접속 시나리오 T1~T4 재검증 — 현재는 Android 2대(S22+A7 Lite)로만 검증됨. iOS의 background audio 미활성 상태에서 paused 동작 특히 확인 필요.

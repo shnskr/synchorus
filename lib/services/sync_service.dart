@@ -32,7 +32,7 @@ class _SyncSample {
 const double _emaAlphaFast = 0.5; // 초기 수렴용 (처음 10 샘플)
 const double _emaAlphaSlow = 0.1; // 안정 후 (new 0.1)
 const int _fastPhaseCount = 10; // 빠른 수렴 샘플 수
-const int _windowSize = 5; // sliding window 크기
+const int _windowSize = 10; // sliding window 크기 (v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소)
 const double _stableThresholdMs = 2.0; // offset 안정 판정 기준 (ms)
 const int _stableRequiredCount = 5; // 연속 안정 횟수
 

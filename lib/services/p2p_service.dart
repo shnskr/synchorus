@@ -81,6 +81,48 @@ class P2PService {
     );
   }
 
+  /// 호스트: paused 진입 시 heartbeat 정지 + host-paused 알림.
+  /// background로 가면 Timer가 억제돼서 어차피 안 돌지만,
+  /// 복귀(resumed) 직후 stale lastSeen으로 dead 판정되는 걸 막기 위해 명시적으로 cancel.
+  void pauseHeartbeat() {
+    debugPrint('[P2P] pauseHeartbeat peers=${_peers.length}');
+    _heartbeatTimer?.cancel();
+    _heartbeatTimer = null;
+    broadcastToAll({'type': 'host-paused'});
+    // paused 진입 전 OS 소켓 버퍼로 강제 flush (짧은 시간 여유 내)
+    for (final peer in _peers) {
+      try {
+        peer.socket.flush();
+      } catch (_) {}
+    }
+  }
+
+  /// 호스트: resumed 시 모든 peer의 lastSeen을 지금 시각으로 리셋한 뒤 heartbeat 재개.
+  /// 리셋 안 하면 paused 기간이 lastSeen에 누적돼 바로 dead 판정될 수 있음.
+  void resumeHeartbeat() {
+    debugPrint('[P2P] resumeHeartbeat peers=${_peers.length}');
+    final now = DateTime.now().millisecondsSinceEpoch;
+    for (final peer in _peers) {
+      peer.lastSeen = now;
+    }
+    broadcastToAll({'type': 'host-resumed'});
+    _startHeartbeat();
+  }
+
+  /// 호스트: 정식으로 방 종료. 게스트들에게 먼저 알린 뒤 disconnect.
+  Future<void> closeRoom() async {
+    debugPrint('[P2P] closeRoom peers=${_peers.length}');
+    broadcastToAll({'type': 'host-closed'});
+    // 메시지가 소켓 버퍼로 flush될 시간 확보
+    for (final peer in _peers) {
+      try {
+        await peer.socket.flush();
+      } catch (_) {}
+    }
+    await Future.delayed(const Duration(milliseconds: 100));
+    await disconnect();
+  }
+
   /// 호스트: 응답 없는 피어 제거
   void _removeDeadPeers() {
     final now = DateTime.now().millisecondsSinceEpoch;

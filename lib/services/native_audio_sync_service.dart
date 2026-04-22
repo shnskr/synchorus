@@ -18,6 +18,13 @@ const Duration _seekCooldown = Duration(milliseconds: 1000);
 const double _defaultFramesPerMs = 48.0; // fallback (실제 sampleRate 미확인 시)
 const double _reAnchorThresholdMs = 200.0;
 const double _offsetDriftThresholdMs = 5.0; // 앵커 후 offset 변화 허용치
+// ── v0.0.24: drift 노이즈 완화 ──────────────────────────────
+// 단일 ts 샘플로 seek 판단하면 순간 노이즈에 불필요 seek 발생.
+// 최근 N개 샘플 중앙값으로 판단하되, 큰 drift(re-anchor 임계)는 즉시 처리.
+const int _driftMedianWindow = 5;        // ~500ms (poll 100ms 기준)
+// B(200ms) 롤백: 파일 선택창 등 paused 복귀 시 heartbeat Timer와 경쟁하며 끊김 유발 의심.
+// 500ms 유지로 원상복구 후 재현 여부 확인. 재현 안 되면 B가 원인, 재현 시 C/A 의심.
+const double _obsBroadcastIntervalMs = 500.0;
 
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
@@ -61,6 +68,8 @@ class NativeAudioSyncService {
   double? _latestDriftMs;
   // ignore: unused_field
   int _driftSampleCount = 0;
+  // v0.0.24: 최근 drift 샘플 윈도우 (중앙값 기반 seek 판단용)
+  final List<double> _driftSamples = [];
   // 누적 seek 보정 (HAL framePos는 seek 영향 없음 → accum으로 복원)
   int _seekCorrectionAccum = 0;
   int _seekCount = 0;
@@ -474,10 +483,10 @@ class NativeAudioSyncService {
 
   void _startObsBroadcast() {
     _obsBroadcastTimer?.cancel();
-    _obsBroadcastTimer =
-        Timer.periodic(const Duration(milliseconds: 500), (_) {
-      _broadcastObs();
-    });
+    _obsBroadcastTimer = Timer.periodic(
+      Duration(milliseconds: _obsBroadcastIntervalMs.round()),
+      (_) => _broadcastObs(),
+    );
   }
 
   void _stopObsBroadcast() {
@@ -561,16 +570,28 @@ class NativeAudioSyncService {
     final data = message['data'] as Map<String, dynamic>?;
     if (from == null || data == null) return;
 
+    final driftMs = (data['driftMs'] as num?)?.toDouble() ?? 0;
+    final offsetMs = (data['offsetMs'] as num?)?.toDouble() ?? 0;
+    final seekCount = (data['seekCount'] as num?)?.toInt() ?? 0;
+    final event = data['event'] as String? ?? 'drift';
+
     _logger.log(
       wallMs: (data['wallMs'] as num?)?.toInt() ??
           DateTime.now().millisecondsSinceEpoch,
       guestId: from,
-      driftMs: (data['driftMs'] as num?)?.toDouble() ?? 0,
-      offsetMs: (data['offsetMs'] as num?)?.toDouble() ?? 0,
+      driftMs: driftMs,
+      offsetMs: offsetMs,
       hostVf: (data['hostVf'] as num?)?.toInt() ?? 0,
       guestVf: (data['guestVf'] as num?)?.toInt() ?? 0,
-      seekCount: (data['seekCount'] as num?)?.toInt() ?? 0,
-      event: data['event'] as String? ?? 'drift',
+      seekCount: seekCount,
+      event: event,
+    );
+    // 실시간 관측용 logcat 출력 (v0.0.24+)
+    debugPrint(
+      '[DRIFT-REPORT] from=$from event=$event '
+      'drift=${driftMs.toStringAsFixed(2)}ms '
+      'offset=${offsetMs.toStringAsFixed(1)}ms '
+      'seekCount=$seekCount',
     );
   }
 
@@ -849,6 +870,7 @@ class NativeAudioSyncService {
     _fallbackAlignCooldownMs = 0;
     _latestDriftMs = null;
     _driftSampleCount = 0;
+    _driftSamples.clear();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1032,6 +1054,7 @@ class NativeAudioSyncService {
       _anchorHostFrame = null;
       _anchorGuestFrame = null;
       _offsetAtAnchor = null;
+      _driftSamples.clear();
       return;
     }
 
@@ -1054,6 +1077,12 @@ class NativeAudioSyncService {
     _latestDriftMs = driftMs;
     _driftSampleCount++;
 
+    // v0.0.24: 최근 N개 샘플 윈도우에 push (중앙값으로 seek 판단)
+    _driftSamples.add(driftMs);
+    if (_driftSamples.length > _driftMedianWindow) {
+      _driftSamples.removeAt(0);
+    }
+
     // 500ms마다 drift report 전송
     if (ts.wallMs - _lastDriftReportMs >= 500) {
       _lastDriftReportMs = ts.wallMs;
@@ -1067,23 +1096,35 @@ class NativeAudioSyncService {
       );
     }
 
-    // seek 판단
+    // seek 판단 — 큰 drift(≥re-anchor)는 즉시, 중소 drift는 중앙값으로
     _maybeTriggerSeek(ts.wallMs, driftMs);
   }
 
-  /// |drift| ≥ 200ms → 앵커 리셋 (호스트 seek 등 큰 점프).
-  /// |drift| ≥ 20ms → seek 보정.
+  /// 정렬된 복사본의 중앙값.
+  double _median(List<double> samples) {
+    final sorted = List<double>.from(samples)..sort();
+    final n = sorted.length;
+    if (n == 0) return 0.0;
+    if (n.isOdd) return sorted[n ~/ 2];
+    return (sorted[n ~/ 2 - 1] + sorted[n ~/ 2]) / 2;
+  }
+
+  /// |drift| ≥ 200ms → 앵커 리셋 (호스트 seek 등 큰 점프, 즉시 처리).
+  /// |중앙값| ≥ 20ms → seek 보정 (노이즈 완화 위해 최근 N개 중앙값 기준).
   void _maybeTriggerSeek(int wallMs, double driftMs) {
     if (driftMs.abs() >= _reAnchorThresholdMs) {
       // 큰 drift → 앵커 리셋. 다음 poll에서 _tryEstablishAnchor가 재정렬.
       _anchorHostFrame = null;
       _anchorGuestFrame = null;
+      _driftSamples.clear(); // 앵커 리셋 시 노이즈 윈도우도 초기화
       _seekCooldownUntilMs = 0;
       return;
     }
     if (wallMs < _seekCooldownUntilMs) return;
-    if (driftMs.abs() < _driftSeekThresholdMs) return;
-    unawaited(_performSeek(wallMs, driftMs));
+    if (_driftSamples.length < _driftMedianWindow) return; // 충분한 샘플 확보 후 판단
+    final medianDrift = _median(_driftSamples);
+    if (medianDrift.abs() < _driftSeekThresholdMs) return;
+    unawaited(_performSeek(wallMs, medianDrift));
   }
 
   Future<void> _performSeek(int wallMs, double driftMs) async {
