@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.26** (2026-04-22).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.29** (2026-04-23).
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -18,9 +18,12 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.23: heartbeat timeout 9→15초. 다운로드 중 끊김 해결
 - v0.0.25: **호스트 라이프사이클 프로토콜** (host-paused/resumed/closed) + 게스트 자리비움 배너 + 주기적 재접속 Timer + watchdog(12회/~2분). drift 노이즈 완화(C: 중앙값, A: clock sync window 10). 상세: `docs/LIFECYCLE.md`의 "앱 라이프사이클 / errno / 연결 복구 전략" 섹션
 - v0.0.26: **detached에서 host-closed best-effort broadcast** — 재생 중 호스트 종료 시 게스트 복구 2분 → **실측 1.4초 확인** (S22 + A7 Lite). 재생 전 종료 / iOS 강제 종료는 detached 미도달 가능성 있어 watchdog fallback 유지
+- v0.0.27: **Socket.connect timeout 5→2초** + **errno=111 2연속 → watchdog 빠른 포기** (재생 전 호스트 종료 / iOS 강제 종료 fallback ~2분 → ~10초 이론값). 실측 검증은 다음 세션. 상세: `docs/HISTORY.md` 2026-04-23 (19)
+- v0.0.28: **errno=113/101 + connectivity_plus 연동** — WiFi 변경·AP 변경 시 connectivity 이벤트 늦어도 errno로 조기 감지 → `_waitForWifiAndReconnect` 즉시 트리거. 라이프사이클·연결 후보 6개 중 5개 완료. 상세: `docs/HISTORY.md` 2026-04-23 (20)
+- v0.0.29: **`RoomLifecycleCoordinator` 추출** — `lib/services/room_lifecycle_coordinator.dart` 신설. `room_screen.dart`(828줄) 라이프사이클·연결 로직 약 320줄을 별도 클래스로 분리. UI는 `ValueListenableBuilder` + 콜백만. 라이프사이클·연결 후보 6개 모두 완료, Phase 4 라이프사이클 영역 종결. 상세: `docs/HISTORY.md` 2026-04-23 (21)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **라이프사이클·연결 추가 개선** — `RoomLifecycleCoordinator` 클래스 추출, detached에서 host-closed, errno=111 빠른 포기, iOS 실기기 재검증. 상세는 `docs/PLAN.md` Phase 4 "라이프사이클·연결 추가 개선 후보" + `docs/LIFECYCLE.md`
+1. **라이프사이클·연결 실측 검증** — v0.0.27/v0.0.28/v0.0.29 모두 정적 검증(`flutter analyze` clean)만 됐고 실기기 시나리오 검증 대기. errno=111 빠른 포기(~10초), errno=113/101 WiFi 변경, coordinator 추출 후 동작 동등성 (T1~T4 + 새 시나리오). 코드 변경 0, 실기기 또는 에뮬 1대+실기기 1대.
 2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
 3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
 4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입

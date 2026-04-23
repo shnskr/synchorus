@@ -158,9 +158,14 @@ class P2PService {
   int? _lastHostPort;
   String? _lastMyName;
 
+  /// 마지막 reconnect 시도에서 잡힌 SocketException의 errno (없으면 null).
+  /// 호출부가 errno=111(refused) 같은 값으로 빠른 포기 판정에 사용.
+  int? _lastReconnectErrno;
+  int? get lastReconnectErrno => _lastReconnectErrno;
+
   /// 참가자: 호스트에 TCP 연결
   Future<void> connectToHost(String ip, int port, String myName) async {
-    _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+    _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
     _connectedHostIp = ip;
     _lastHostPort = port;
     _lastMyName = myName;
@@ -181,18 +186,25 @@ class P2PService {
 
     _hostSocket?.destroy();
     _hostSocket = null;
+    _lastReconnectErrno = null;
 
     for (int i = 0; i < retries; i++) {
       try {
         debugPrint('Reconnect attempt ${i + 1}/$retries to $ip:$port');
         await Future.delayed(Duration(seconds: i + 1)); // 1, 2, 3초 대기
-        _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 5));
+        _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
         _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': name}});
         _listenToSocket(_hostSocket!, 'host');
         debugPrint('Reconnected successfully');
+        _lastReconnectErrno = null;
         return true;
       } catch (e) {
         debugPrint('Reconnect attempt ${i + 1} failed: $e');
+        if (e is SocketException) {
+          _lastReconnectErrno = e.osError?.errorCode;
+        } else {
+          _lastReconnectErrno = null;
+        }
         _hostSocket?.destroy();
         _hostSocket = null;
       }

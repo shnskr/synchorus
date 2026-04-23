@@ -399,7 +399,7 @@ TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX e
 | **103** | ECONNABORTED | 로컬 소켓 abort | 내 OS가 내 앱의 socket 정리 (Android paused 직후 흔함) |
 | **32** | EPIPE | 이미 끊긴 소켓에 write | 이전에 RST 받은 소켓에 send 시도 |
 
-### 판정 트리 (설계안, v0.0.25엔 미구현)
+### 판정 트리 (errno=111 분기는 v0.0.27, 113/101 분기는 v0.0.28 구현)
 
 ```
 소켓 에러 발생 시:
@@ -436,6 +436,8 @@ TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX e
 ## 연결 복구 전략 (3중 안전망)
 
 앞의 "앱 라이프사이클"과 "errno"를 조합해 P2P 연결이 다양한 실패 모드를 견디도록 설계한 구조. 상위 계층이 실패해도 하위 계층이 안전망으로 작동.
+
+> **구현 위치**: v0.0.29부터 1~3층 전체가 `lib/services/room_lifecycle_coordinator.dart`의 `RoomLifecycleCoordinator`에 모여 있다. UI(`room_screen.dart`)는 `hostAway` / `hostClosed` `ValueNotifier` 구독과 액션 콜백(`onLeaveRequested`, `onReconnectSyncRequested`, `onLog`, `onSnackbar`)만 처리. 라이프사이클 분기 추가/수정은 모두 코디네이터 한 파일에서.
 
 ### 1층 — 프로토콜 메시지 ("정상 경로")
 

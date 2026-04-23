@@ -1,12 +1,12 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:connectivity_plus/connectivity_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/app_providers.dart';
+import '../services/room_lifecycle_coordinator.dart';
 import 'player_screen.dart';
 
 class RoomScreen extends ConsumerStatefulWidget {
@@ -34,21 +34,14 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
   StreamSubscription? _joinSub;
   StreamSubscription? _leaveSub;
   StreamSubscription? _messageSub;
-  StreamSubscription? _disconnectSub;
-  StreamSubscription? _connectivitySub;
   StreamSubscription? _audioErrorSub;
   bool _syncing = false;
   bool _syncDone = false;
   bool _syncFailed = false;
   bool _leaving = false; // _leaveRoom 중복 호출 방지 (#13)
-  bool _hostClosed = false; // 호스트가 host-closed 보내고 나간 상태
-  bool _hostAway = false; // 게스트 측: 호스트가 host-paused 보낸 상태
-  Timer? _awayReconnectTimer; // _hostAway 중 주기적 재접속 타이머
-  bool _awayReconnecting = false; // 재접속 시도 중 중복 방지
-  int _awayReconnectAttempts = 0; // 실패 누적 (N회 초과 시 호스트 사라짐 판정)
-  static const int _awayReconnectMaxAttempts = 12; // 약 60초 (5초 주기 × 12)
   String? _hostIp;
   late int _guestPeerCount;
+  late final RoomLifecycleCoordinator _lifecycle;
 
   @override
   void initState() {
@@ -68,6 +61,16 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     // 호스트: 재생/정지/seek 컨트롤 표시, 게스트: 곡 정보+재생 상태만 표시
     final handler = ref.read(audioHandlerProvider);
     handler.attachSyncService(audio, isHost: widget.isHost);
+
+    // 라이프사이클·연결 복구 코디네이터 시작 (host/guest 분기는 내부 처리)
+    _lifecycle = RoomLifecycleCoordinator(
+      p2p: p2p,
+      isHost: widget.isHost,
+      onLeaveRequested: _leaveRoom,
+      onReconnectSyncRequested: _reconnectSync,
+      onLog: _addLog,
+      onSnackbar: _showSnackbar,
+    )..start();
 
     if (widget.isHost) {
       _addLog('방 생성 완료 (코드: ${widget.roomCode})');
@@ -94,81 +97,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
       _addLog('방 참가 완료 (코드: ${widget.roomCode})');
       audio.startListening(isHost: false);
       _startSync();
-
-      // 게스트: 호스트 연결 끊김 감지
-      _disconnectSub = p2p.onDisconnected.listen((_) async {
-        if (!mounted) return;
-        // host-closed 수신 후 정식 종료 중이면 재연결 시도하지 않고 바로 정리
-        if (_hostClosed) {
-          _addLog('호스트가 방을 종료했습니다.');
-          _leaveRoom();
-          return;
-        }
-        // 호스트 자리비움 중 TCP 끊김: host-resumed는 이미 죽은 소켓이라 도달 불가.
-        // TCP 재접속 성공 자체를 "호스트 복귀 신호"로 삼아 주기적으로 조용히 시도.
-        if (_hostAway) {
-          _addLog('호스트 자리비움 중 TCP 끊김 → 주기적 재접속 시도 시작');
-          _startAwayReconnectLoop();
-          return;
-        }
-        _addLog('호스트와 연결이 끊어졌습니다. 재연결 시도 중...');
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('연결이 끊어졌습니다. 재연결 시도 중...')),
-        );
-
-        final reconnected = await p2p.reconnectToHost();
-        if (!mounted) return;
-
-        if (reconnected) {
-          _addLog('재연결 성공!');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('재연결되었습니다')),
-          );
-          // 재동기화 (엔진 레이턴시는 이미 측정했으므로 스킵)
-          final sync = ref.read(syncServiceProvider);
-          sync.reset();
-          await _reconnectSync();
-        } else {
-          _addLog('재연결 실패. 방을 나갑니다.');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('호스트에 재연결할 수 없습니다')),
-          );
-          _leaveRoom();
-        }
-      });
     }
-
-    // WiFi 끊김 감지 (stale/일시적 이벤트 필터링)
-    _connectivitySub = Connectivity().onConnectivityChanged.listen((result) async {
-      if (!result.contains(ConnectivityResult.wifi) &&
-          !result.contains(ConnectivityResult.ethernet) &&
-          !result.contains(ConnectivityResult.other)) {
-        // 잠시 대기 후 실제 상태 재확인 (stale/일시적 이벤트 방지)
-        await Future.delayed(const Duration(seconds: 1));
-        if (!mounted) return;
-        final current = await Connectivity().checkConnectivity();
-        final hasLocal = current.contains(ConnectivityResult.wifi) ||
-            current.contains(ConnectivityResult.ethernet) ||
-            current.contains(ConnectivityResult.other);
-        if (!hasLocal && mounted) {
-          if (widget.isHost) {
-            // 호스트: WiFi 끊기면 방 유지 불가
-            _addLog('WiFi 연결이 끊어졌습니다');
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 방을 나갑니다.')),
-            );
-            _leaveRoom();
-          } else {
-            // 게스트: WiFi 복구 대기 후 재연결 시도
-            _addLog('WiFi 연결이 끊어졌습니다. 복구 대기 중...');
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('WiFi 연결이 끊어졌습니다. 복구 대기 중...')),
-            );
-            await _waitForWifiAndReconnect();
-          }
-        }
-      }
-    });
 
     // 오디오 에러 알림
     _audioErrorSub = audio.errorStream.listen((error) {
@@ -180,37 +109,9 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
       }
     });
 
+    // 메시지 로그·접속자 카운트 추적 (라이프사이클 메시지는 coordinator가 별도로 listen)
     _messageSub = p2p.onMessage.listen((message) {
       final type = message['type'] as String;
-
-      // 게스트: 호스트 라이프사이클 메시지 처리
-      if (!widget.isHost) {
-        if (type == 'host-paused') {
-          debugPrint('[LIFECYCLE-GUEST] received host-paused');
-          setState(() => _hostAway = true);
-          _addLog('호스트 일시 자리비움');
-          return;
-        }
-        if (type == 'host-resumed') {
-          debugPrint('[LIFECYCLE-GUEST] received host-resumed');
-          _cancelAwayReconnectLoop();
-          setState(() => _hostAway = false);
-          _addLog('호스트 복귀');
-          return;
-        }
-        if (type == 'host-closed') {
-          debugPrint('[LIFECYCLE-GUEST] received host-closed');
-          _hostClosed = true;
-          _addLog('호스트가 방을 종료했습니다.');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('호스트가 방을 종료했습니다')),
-            );
-          }
-          _leaveRoom();
-          return;
-        }
-      }
 
       // 게스트: 참가자 입퇴장 추적
       if (!widget.isHost) {
@@ -237,102 +138,19 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     });
   }
 
-  /// 게스트: _hostAway=true 상태에서 TCP 끊김 감지 시 주기적 재접속.
-  /// host-resumed 메시지는 이미 죽은 소켓이라 도달 불가 → 재접속 성공 자체가 복귀 신호.
-  /// 5초 간격, 실패해도 계속 시도 (조용히). 방 나가기/호스트 종료/재접속 성공 시 취소.
-  void _startAwayReconnectLoop() {
-    _awayReconnectTimer?.cancel();
-    _awayReconnectAttempts = 0;
-    _awayReconnectTimer = Timer.periodic(const Duration(seconds: 5), (t) async {
-      if (!mounted || !_hostAway || _leaving || _hostClosed) {
-        t.cancel();
-        return;
-      }
-      if (_awayReconnecting) return; // 이전 시도가 아직 진행 중
-      _awayReconnecting = true;
-      try {
-        final p2p = ref.read(p2pServiceProvider);
-        final reconnected = await p2p.reconnectToHost(retries: 1);
-        if (!mounted) return;
-        if (reconnected) {
-          debugPrint('[AWAY-RECONNECT] success — treating as host resumed');
-          t.cancel();
-          _awayReconnectTimer = null;
-          _awayReconnectAttempts = 0;
-          setState(() => _hostAway = false);
-          _addLog('호스트 복귀 감지 (TCP 재접속 성공) — 재동기화');
-          if (mounted) {
-            ScaffoldMessenger.of(context).showSnackBar(
-              const SnackBar(content: Text('호스트 복귀')),
-            );
-          }
-          final sync = ref.read(syncServiceProvider);
-          sync.reset();
-          await _reconnectSync();
-        } else {
-          _awayReconnectAttempts++;
-          debugPrint(
-            '[AWAY-RECONNECT] attempt $_awayReconnectAttempts/$_awayReconnectMaxAttempts failed',
-          );
-          if (_awayReconnectAttempts >= _awayReconnectMaxAttempts) {
-            t.cancel();
-            _awayReconnectTimer = null;
-            debugPrint(
-              '[AWAY-RECONNECT] giving up after $_awayReconnectMaxAttempts attempts → leaveRoom',
-            );
-            _addLog('호스트 복귀 없음 (약 60초 경과). 방을 나갑니다.');
-            if (mounted) {
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text('호스트가 돌아오지 않습니다. 방을 나갑니다.')),
-              );
-            }
-            _leaveRoom();
-          }
-        }
-      } catch (e) {
-        debugPrint('[AWAY-RECONNECT] attempt error: $e');
-      } finally {
-        _awayReconnecting = false;
-      }
-    });
-  }
-
-  void _cancelAwayReconnectLoop() {
-    _awayReconnectTimer?.cancel();
-    _awayReconnectTimer = null;
-    _awayReconnecting = false;
-    _awayReconnectAttempts = 0;
+  void _showSnackbar(String message) {
+    if (!mounted) return;
+    ScaffoldMessenger.of(context).showSnackBar(
+      SnackBar(content: Text(message)),
+    );
   }
 
   /// 호스트: 앱 라이프사이클에 따라 heartbeat pause/resume + 게스트에 알림.
-  /// audio_service가 foreground service 승격 안 된 상태(재생 전)에서 paused되면
-  /// OS가 프로세스를 background로 강등하여 Timer 억제 → 게스트가 dead 오판정하는 문제를
-  /// 예방. 재생 중이어도 동일 신호로 게스트에게 자리비움 알림 UX 제공.
+  /// 실제 분기는 `RoomLifecycleCoordinator.handleAppLifecycleState`에 위임.
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
     super.didChangeAppLifecycleState(state);
-    debugPrint('[LIFECYCLE] state=$state isHost=${widget.isHost} leaving=$_leaving closed=$_hostClosed');
-    if (!widget.isHost) return;
-    if (_leaving || _hostClosed) return;
-    final p2p = ref.read(p2pServiceProvider);
-    if (state == AppLifecycleState.paused) {
-      debugPrint('[LIFECYCLE] HOST paused → pauseHeartbeat + broadcast host-paused');
-      _addLog('[라이프사이클] paused — heartbeat 정지 + host-paused broadcast');
-      p2p.pauseHeartbeat();
-    } else if (state == AppLifecycleState.resumed) {
-      debugPrint('[LIFECYCLE] HOST resumed → broadcast host-resumed + resumeHeartbeat');
-      _addLog('[라이프사이클] resumed — host-resumed broadcast + heartbeat 재개');
-      p2p.resumeHeartbeat();
-    } else if (state == AppLifecycleState.detached) {
-      // 재생 중 호스트 종료 케이스: foreground service 덕에 detached까지 Dart
-      // 코드 도달 가능 → 게스트가 watchdog 2분 대신 즉시 홈 화면으로 돌아갈
-      // 수 있도록 best-effort로 host-closed 전송. iOS 강제 종료처럼 detached
-      // 자체가 도달 못 하는 경우에는 기존 watchdog이 받아준다.
-      debugPrint('[LIFECYCLE] HOST detached → broadcast host-closed (best-effort)');
-      _addLog('[라이프사이클] detached — host-closed best-effort 전송');
-      _hostClosed = true;
-      p2p.broadcastHostClosedBestEffort();
-    }
+    _lifecycle.handleAppLifecycleState(state);
   }
 
   Future<void> _loadHostIp() async {
@@ -406,42 +224,8 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     }
   }
 
-  /// 게스트: WiFi 복구 대기 (최대 15초) 후 재연결
-  Future<void> _waitForWifiAndReconnect() async {
-    // 최대 15초간 WiFi 복구 대기 (3초 간격 체크)
-    for (int i = 0; i < 5; i++) {
-      await Future.delayed(const Duration(seconds: 3));
-      if (!mounted) return;
-      final current = await Connectivity().checkConnectivity();
-      if (current.contains(ConnectivityResult.wifi)) {
-        _addLog('WiFi 복구됨. 재연결 시도 중...');
-        final p2p = ref.read(p2pServiceProvider);
-        final reconnected = await p2p.reconnectToHost();
-        if (!mounted) return;
-
-        if (reconnected) {
-          _addLog('재연결 성공!');
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('재연결되었습니다')),
-          );
-          final sync = ref.read(syncServiceProvider);
-          sync.reset();
-          await _reconnectSync();
-          return;
-        }
-        break; // WiFi는 복구됐지만 호스트 연결 실패
-      }
-    }
-
-    if (!mounted) return;
-    _addLog('재연결 실패. 방을 나갑니다.');
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text('재연결할 수 없습니다')),
-    );
-    _leaveRoom();
-  }
-
-  /// 재연결 후 동기화 (엔진 레이턴시 측정 스킵, 오디오 상태 복원)
+  /// 재연결 후 동기화 (엔진 레이턴시 측정 스킵, 오디오 상태 복원).
+  /// `RoomLifecycleCoordinator.onReconnectSyncRequested` 콜백.
   Future<void> _reconnectSync() async {
     if (!mounted) return;
     setState(() => _syncing = true);
@@ -449,6 +233,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
 
     try {
       final sync = ref.read(syncServiceProvider);
+      sync.reset();
       final result = await sync.syncWithHost();
       _addLog('재동기화 완료! offset: ${result.offsetMs}ms, RTT: ${result.rttMs}ms');
       if (!mounted) return;
@@ -533,13 +318,11 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
   Future<void> _leaveRoom() async {
     if (_leaving) return; // #13: 중복 호출 방지
     _leaving = true;
-    _cancelAwayReconnectLoop();
+    _lifecycle.notifyLeaving();
     // 구독 먼저 취소 (cleanup 중 콜백 방지)
     _joinSub?.cancel();
     _leaveSub?.cancel();
     _messageSub?.cancel();
-    _disconnectSub?.cancel();
-    _connectivitySub?.cancel();
     _audioErrorSub?.cancel();
 
     final p2p = ref.read(p2pServiceProvider);
@@ -557,7 +340,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     discovery.stop();
     // 호스트가 정식 나가기: host-closed broadcast 후 disconnect.
     // 이미 host-closed 수신(게스트측)이거나 비정상 경로면 일반 disconnect.
-    if (widget.isHost && !_hostClosed) {
+    if (widget.isHost && !_lifecycle.hostClosed.value) {
       await p2p.closeRoom();
     } else {
       await p2p.disconnect();
@@ -579,12 +362,10 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
-    _cancelAwayReconnectLoop();
+    _lifecycle.dispose();
     _joinSub?.cancel();
     _leaveSub?.cancel();
     _messageSub?.cancel();
-    _disconnectSub?.cancel();
-    _connectivitySub?.cancel();
     _audioErrorSub?.cancel();
 
     _logScrollController.dispose();
@@ -660,28 +441,34 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
 
             const SizedBox(height: 16),
 
-            // 게스트: 호스트 자리비움 안내 배너
-            if (!widget.isHost && _hostAway)
-              Container(
-                margin: const EdgeInsets.only(bottom: 12),
-                padding: const EdgeInsets.all(12),
-                decoration: BoxDecoration(
-                  color: Colors.orange[50],
-                  border: Border.all(color: Colors.orange[300]!),
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                child: Row(
-                  children: [
-                    const Icon(Icons.pause_circle_outline, color: Colors.orange),
-                    const SizedBox(width: 8),
-                    Expanded(
-                      child: Text(
-                        '호스트가 일시 자리비움입니다. 복귀를 기다려 주세요.',
-                        style: TextStyle(color: Colors.orange[900]),
-                      ),
+            // 게스트: 호스트 자리비움 안내 배너 (coordinator 상태 구독)
+            if (!widget.isHost)
+              ValueListenableBuilder<bool>(
+                valueListenable: _lifecycle.hostAway,
+                builder: (context, hostAway, _) {
+                  if (!hostAway) return const SizedBox.shrink();
+                  return Container(
+                    margin: const EdgeInsets.only(bottom: 12),
+                    padding: const EdgeInsets.all(12),
+                    decoration: BoxDecoration(
+                      color: Colors.orange[50],
+                      border: Border.all(color: Colors.orange[300]!),
+                      borderRadius: BorderRadius.circular(8),
                     ),
-                  ],
-                ),
+                    child: Row(
+                      children: [
+                        const Icon(Icons.pause_circle_outline, color: Colors.orange),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text(
+                            '호스트가 일시 자리비움입니다. 복귀를 기다려 주세요.',
+                            style: TextStyle(color: Colors.orange[900]),
+                          ),
+                        ),
+                      ],
+                    ),
+                  );
+                },
               ),
 
             // 접속자 수
