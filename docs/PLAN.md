@@ -193,4 +193,5 @@ Phase 4:   확장 기능 추가
     - [x] ~~errno=111 refused 2회 연속 감지 시 watchdog 빠른 포기~~ — v0.0.27에서 구현 (`HISTORY.md` 2026-04-23 (19)). 이론 복구 시간 ~10초.
     - [x] ~~errno=113 EHOSTUNREACH / errno=101 ENETUNREACH 감지 시 `connectivity_plus` 이벤트와 연동~~ — v0.0.28에서 구현 (`HISTORY.md` 2026-04-23 (20)). `_maybeHandleNetworkErrno` 헬퍼 + 두 곳 호출.
     - [x] ~~`_awayReconnectTimer` 주기 조정 여지~~ — v0.0.27에서 `Socket.connect` timeout `5→2초` 적용. 12회 실패 시 실제 시간 ~2분 → ~1분 이내.
-    - [ ] iOS 실기기에서 라이프사이클·재접속 시나리오 T1~T4 재검증 — 현재는 Android 2대(S22+A7 Lite)로만 검증됨. iOS의 background audio 미활성 상태에서 paused 동작 특히 확인 필요.
+    - [ ] iOS 실기기에서 라이프사이클·재접속 시나리오 T1~T4 재검증 — 2026-04-24 (22)에서 S22 + Pixel 6 에뮬 조합으로 T1~T4a PASS 확인했으나 iOS 미검증 유지. iOS의 background audio 미활성 상태에서 paused 동작 특히 확인 필요.
+    - [ ] errno=111 빠른 포기(v0.0.27) / errno=113·101 연동(v0.0.28) 실측 재검증 — 2026-04-24 (22)에서 adb forward 환경의 TCP `Socket.connect` 가짜 성공 때문에 Android 에뮬로는 원천적 검증 불가 확인. 실기기 2대 WiFi LAN 조합 (S22+iPhone 또는 Android 실기기 2대) 필요.
