@@ -1694,6 +1694,66 @@ Reconnected successfully
 
 ---
 
+### 2026-04-24 (30) — B(buf 차이 실영향) 검증 결과 + 호스트 `getTimestamp` 간헐 실패 이슈 발견 (문서 only)
+
+**배경**: (29) 문서 정리 직후 B(v0.0.4 buf 17ms 차이가 v3 폐루프에서 drift에 영향 주는지) 실측을 이어서 진행. S22(호스트, 내장 스피커) + iPhone 12 Pro(게스트) USB 연결, 임의 파일 약 3분 30초 재생. 사용자 체감 "시작엔 잘 맞다가 정지 직전에 싱크 엄청 틀어짐".
+
+**csv 추출 실패**:
+- `getApplicationDocumentsDirectory()` 실제 경로가 S22에서 `/data/user/95/com.synchorus.synchorus/app_flutter/`로 생성됨 (`/data/user/95/`는 Samsung Secure Folder 또는 multi-user 공간). `run-as`로는 기본 `/data/user/0/`만 바인드되어 permission denied.
+- 대체: S22 `logcat --pid=<app>`에서 `[DRIFT-REPORT]` 363건 추출(약 3분 10초치)로 분석.
+
+**B 검증 결과 (drift 수치 관점) — PASS**:
+
+| 구간(s) | event | n | mean\|d\| | max | 해석 |
+|---------|-------|---|-----------|-----|------|
+| 0~30 | fallback 21 + drift 28 | 49 | **37ms** | **636ms** | 초기 clock sync·앵커 설정, 정상 수렴 과정 |
+| 30~60 | drift 58 | 58 | **0.47ms** | 1.4ms | 폐루프 수렴 완료 |
+| 60~90 | drift 60 | 60 | 0.53ms | 1.4ms | 안정 |
+| 90~120 | drift 60 | 60 | 0.76ms | 1.8ms | 안정 |
+| 120~150 | drift 60 | 60 | 1.75ms | 3.8ms | 약간 증가 |
+| 150~180 | drift 60 | 60 | 2.74ms | **4.1ms** | 가장 큰 구간이지만 여전히 5ms 미만 |
+| 180~210 | drift 16 | 16 | 1.88ms | 2.9ms | 종료 직전, 다시 안정 |
+
+→ 초기 30초 수렴 이후 **전 구간 \|drift\| < 5ms**. buf 17ms 비대칭은 v3 framePos 기반 폐루프가 **정상적으로 흡수**. PoC Phase 5~6의 `|drift| < 10ms 100%`와 동등한 성능 재확인.
+
+**그런데 체감은 "정지 직전 싱크 엄청 틀어짐"** — 데이터와 모순된 체감 원인을 찾기 위해 logcat의 `[TS]` 이벤트 추가 조사:
+
+```
+04-24 16:01:50.390  [TS] ok recovered after 26 failures (vf=3360)       ← 재생 시작 직후
+04-24 16:04:57.275  [TS] ok recovered after 15 failures (vf=8175360)    ← 정지 10초 전
+04-24 16:05:07        방 닫음(closeRoom)
+```
+
+**`[TS]`는 호스트 S22의 `oboe::getTimestamp()` 폴링** (100ms 주기). 15회 연속 실패 = **1.5초 동안 호스트가 자기 재생 위치를 못 읽음**. 이 구간 동안:
+- 호스트: 정확한 audio-obs 못 보냄
+- 게스트: 마지막 앵커로 외삽 계속 → 게스트 **자기 drift 계산에선 0~3ms로 정상**처럼 보임
+- 하지만 실제 호스트 오디오는 그동안 진행 → **복구 순간 두 기기 실제 재생 위치가 최대 1.5초치 어긋남**
+- → 사용자 체감 "정지 직전 싱크 엄청 틀어짐"과 타이밍 정합 (16:04:57 TS 실패 → 16:05:07 정지)
+
+**결론**:
+- **B 수치 검증은 PASS** (buf 17ms → 폐루프 흡수, drift 안정).
+- 하지만 **별개 이슈 발견**: 호스트 `oboe::getTimestamp` 간헐 실패(15~26회 연속)가 **실전 체감 싱크 품질을 저해**하고 있음. drift-report만으론 이 구간을 못 잡음 (게스트 기준 외삽값이라).
+- 이 이슈는 buf 차이·BT 동적 보정과 별개 트랙. 우선순위 높음.
+
+**원인 가설** (추측, 근거 부족):
+- Oboe stream xrun(buffer underrun) 또는 HAL이 일시적 timestamp 반환 불가 상태
+- 앱 라이프사이클 전환 시점(paused/resumed), 포그라운드 서비스 재조정 등과 상관관계 의심
+- 재생 시작 직후 26회 / 정지 직전 15회라는 타이밍 특이점 — **stream state 전환 부근에 몰려있을 가능성**
+- 확정 위해선 `oboe_engine.cpp:278` 근처에서 실패 시 `AAudio_convertResultToText(result)` 등으로 실패 이유 native 로그에 찍어야 함
+
+**완화 방향 후보**:
+1. 호스트 TS 실패 중에도 **최근 성공한 framePos + 경과 시간**으로 보간해서 obs 보내기 — 게스트는 끊김 없이 따라갈 수 있음. 현재는 실패 시 obs 생략되거나 stale 값 반환
+2. 실패 원인을 native 로그로 분류 → 특정 원인 타깃 수정
+3. TS 폴링 주기 단축·백업 타임소스 병용 (cost 고려 필요)
+
+**csv 접근 개선 과제**:
+- Android에서 `getApplicationDocumentsDirectory()` 경로가 multi-user 공간(`/data/user/95/`)에 생성되면 `run-as`로 접근 불가. 실측 csv 분석이 logcat 버퍼(256KB~2MB)에 의존하게 됨
+- 대안: Android 한정으로 csv를 `/sdcard/Android/data/com.synchorus.synchorus/files/`(외부 앱 전용 저장소)로 저장하면 `adb pull` 직접 가능. 다음 세션에서 logger 경로 옵션 추가 검토
+
+**변경 범위**: 문서만(HISTORY.md, CLAUDE.md). 코드 변경 없음.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -1705,9 +1765,11 @@ Reconnected successfully
 - [x] ~~게스트 파일 다운로드 속도 체감상 느림~~ — shelf 제거 + HttpServer 직접 + Content-Length + 1MB chunk로 +40~50% 개선 (2026-04-22)
 
 **레이턴시 보정**
-- [~] S22 buf=4ms vs iPhone buf=21ms 비대칭 (17ms) — **v0.0.4에서 측정 방식 통일로 compensation 계산 왜곡 원인은 제거** (iOS도 buffer만 사용, `outputLatency` 제거). 기기별 buffer 크기 자체 차이는 HAL 보고값이라 남아있음. v3 전환 후 **framePos 기반 폐루프가 실제 drift에 영향을 흡수하는지 실측 검증 필요**. (2026-04-24 (29) 문서 점검으로 맥락 재정리)
+- [x] ~~S22 buf=4ms vs iPhone buf=21ms 비대칭 (17ms)~~ — **v0.0.4에서 측정 방식 통일로 compensation 계산 왜곡 원인 제거** + **2026-04-24 (30) 실측으로 v3 framePos 폐루프가 완전 흡수 확인** (3분 재생 안정 구간 \|drift\| < 5ms, p95 3.78ms). 추가 작업 불필요.
 - [x] ~~엔진 레이턴시 보정값 ~10ms 오차~~ — **실제로는 이 수치의 구체적 측정 근거가 코드/문서에 없음** (git log 추적: ec80452에서 "수동 보정 슬라이더 추가 예정"으로 추가 → 6e53efd에서 "자동 측정 방식 개선"으로 문구만 수정). v3 전환 후 `com.synchorus/audio_latency` 채널 제거(v0.0.33) 이후 **"엔진 레이턴시 보정값"이라는 수치 자체가 코드에 없음** — 엔진 레이턴시는 `oboe::getTimestamp()` / `AVAudioTime` 반환값에 내포. "~10ms"의 유력 출처는 PoC Phase 5~6의 `\|drift\| < 10ms 100%`(HISTORY.md:491,500,534) 또는 drift mean 진동 범위(HISTORY.md:648) — 이건 **성능 지표**이지 "오차"가 아님. (2026-04-24 (29)에서 맥락 재정리·제거)
-- [ ] **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency`가 ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반 → BT 환경에서 drift 누적 가능. 주기 재측정 + EMA 반영(자동 보정) 방향. (2026-04-24 (29) 신규 항목)
+- [ ] **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency`가 ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반 → BT 환경에서 drift 누적 가능. 주기 재측정 + EMA 반영(자동 보정) 방향. (2026-04-24 (29) 신규 항목). **외부 문서 검증 결과 주의**: Apple `AVAudioSession.outputLatency`가 BT 실제 지연을 과소보고하는 것으로 보고됨 (developer.apple.com/forums/thread/126277) → iOS에서 이미 측정 중인 값을 Dart `_recomputeDrift`에 반영해도 효과 제한적일 수 있음. BT route 변경 감지는 `AVAudioSession.routeChangeNotification` 공식. Android는 `AAudioStream_getTimestamp`가 DAC까지만 커버, BT transmission 지연 포함 여부 불확실(google/oboe#357 관찰).
+- [ ] **호스트 `oboe::getTimestamp` 간헐적 실패 — 체감 싱크 깨짐 원인** (2026-04-24 (30) 신규). S22 3분 재생 중 재생 시작 직후 26회, 정지 직전 15회 연속 실패 관측. 100ms 폴링 기준 **1.5~2.6초 동안 호스트가 재생 위치를 못 읽음** → 게스트는 외삽 계속이라 drift-report는 안정(0~3ms)해 보이나 실제 재생은 최대 1.5초치 어긋남. 원인 가설: stream xrun / HAL 일시 실패 / 라이프사이클 전환 부근 상관. `oboe_engine.cpp:278` 근처에서 실패 시 `AAudio_convertResultToText(result)` 로그 추가 → 원인 분류 필요. 완화 방향: 실패 중에도 최근 성공한 framePos + 경과 시간으로 보간해 obs 계속 전송.
+- [ ] **Logger csv 경로 접근성** (2026-04-24 (30) 신규, low priority). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/`처럼 multi-user 공간에 떨어지면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. Android 한정 `/sdcard/Android/data/.../files/`로 저장 옵션 추가 검토.
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

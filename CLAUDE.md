@@ -30,12 +30,15 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.35 (2026-04-24 (28))**: **재연결 경로 직렬화** — v0.0.34는 loop만 차단했지 race 자체는 남아 재연결 2번 + 재동기화 2번 호출 → 1번은 "재동기화 실패" 스낵바. `room_lifecycle_coordinator.dart`에 `_reconnectInProgress` flag 추가해 `_handleDisconnected` + `_waitForWifiAndReconnect` 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip. `_handleDisconnected`는 `finally` 대신 명시적 flag 해제로 errno 분기→`_waitForWifiAndReconnect` 이어받기 지원. 실측(3 사이클): Reconnect 7→3, 재동기화 실패 0, `[RECONNECT] _handleDisconnected skip` 3회 발동 확인. 상세: `docs/HISTORY.md` 2026-04-24 (28)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency` ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반 → BT 환경에서 drift 누적 가능. 주기 재측정 + EMA 반영(자동 보정). (2026-04-24 (29) "~10ms 오차"로 표시되어 있던 모호한 타겟을 이것으로 재정의)
-2. **v0.0.4 buf 차이가 v3 폐루프에서 실제 drift에 영향 주는지 실측 검증** — 이전엔 `S22 buf=4ms vs iPhone buf=21ms 17ms 비대칭`이라 기록됐으나 v0.0.4에서 측정 방식 통일로 compensation 계산 왜곡은 제거됨. v3 전환 후 framePos 기반 폐루프가 이걸 흡수하는지 실기기 2대로 drift csv 수집·분석. 코드 변경 0 가능성.
+1. **호스트 `oboe::getTimestamp` 간헐적 실패 — 체감 싱크 깨짐 원인** (2026-04-24 (30) 신규). S22 3분 실측에서 재생 시작 직후 26회·정지 직전 15회 연속 실패 관측. 100ms 폴링 기준 1.5~2.6초 동안 호스트가 재생 위치를 못 읽어 게스트가 외삽으로 따라가다 최대 1.5초치 실재생 어긋남. drift-report 수치는 게스트 외삽값이라 이 구간 못 잡음. 시작점: `oboe_engine.cpp:278` 근처 실패 시 `AAudio_convertResultToText` 로그 추가 → 원인 분류.
+2. **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency` ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반. iOS는 이미 측정 중이지만 Dart drift 공식에 미반영. **주의**: Apple Forum에서 outputLatency가 BT 실제 지연을 과소보고한다는 보고 있음 → Dart 반영해도 효과 제한적일 수 있음. 검증부터.
 3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
-4. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-5. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-6. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+4. **Logger csv 경로 접근성** (2026-04-24 (30) 신규). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/` 같은 multi-user 공간이면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. 외부 앱 전용 저장소(`/sdcard/Android/data/.../files/`)로 저장 옵션 추가 검토. 우선순위 낮음.
+5. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+6. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+7. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+
+**완료됨 (이번 세션)**: v0.0.4 buf 17ms 비대칭이 drift에 영향 주는지 검증 → v3 framePos 폐루프가 완전 흡수 확인(\|drift\| < 5ms, p95 3.78ms). (2026-04-24 (30))
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
 
