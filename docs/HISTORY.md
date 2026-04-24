@@ -1504,6 +1504,29 @@ Bad state: Cannot add new events after calling close
 
 ---
 
+### 2026-04-24 (26) — Orphan `com.synchorus/audio_latency` MethodChannel 제거 (v0.0.33)
+
+**배경**: v3 전환(NativeAudioSyncService + framePos 기반 폐루프)에서 엔진 레이턴시가 `oboe::getTimestamp()` / `AVAudioTime` 반환값에 이미 내포되어 별도 보정값 불필요해짐. v2 시절의 `com.synchorus/audio_latency` 채널은 네이티브 측만 유지되고 **Dart에서 호출 0건** 상태(Explore agent 2026-04-24 조사 결과). v0.0.4 HISTORY 236의 player_screen "buf=4ms" 디버그 표시도 이미 제거된 상태라 유일한 사용처도 없었음.
+
+**수정**:
+- `android/app/src/main/kotlin/com/synchorus/synchorus/MainActivity.kt`: `com.synchorus/audio_latency` 블록(14줄) 제거 + 미사용 `import android.media.AudioManager` 제거
+- `ios/Runner/SceneDelegate.swift`: 동일 채널 블록(25줄) 제거 + 미사용 `import AVFoundation` 제거. `super.scene(...)` 호출만 남기고 빈 body로 축소
+
+**효과**:
+- 네이티브 코드 40여 줄 dead code 제거
+- 새로 프로젝트 들어오는 사람이 v2 잔재에 혼란스러울 일 없음
+- 기능 동일 (호출자 0이었음)
+
+**검증**:
+- `grep -rn "audio_latency\|getOutputLatency" ios/ android/` 0건 확인
+- `flutter analyze` clean
+
+**향후**: 레이턴시 측정값을 다시 UI에 노출하고 싶다면 `ARCHITECTURE.md:514`의 "엔진 레이턴시 측정" 절차 참고해서 새로 구축 (v3 폐루프와 별개 디버그용).
+
+**빌드**: v0.0.33+1 (`flutter analyze` clean)
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.32** (2026-04-24) — peer count 불일치 수정 (stale peer 정리 + peerCount broadcast 포함).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.33** (2026-04-24) — orphan `com.synchorus/audio_latency` 네이티브 채널 제거 (v2 legacy).
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -25,6 +25,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.30 (2026-04-24 (23))**: iPhone 12 Pro USB 복구 후 S22+iPhone 실기기 LAN으로 T4b 실측 중 **Darwin errno=61 미체크 버그** 발견 (v0.0.27 코드가 Linux `errno=111`만 하드코딩, iOS에서 작동 안 함). `room_lifecycle_coordinator.dart`에 `_refusedErrnos = {111, 61}` + `_networkUnreachableErrnos = {113, 101, 65, 51}` 집합 도입. 재검증 **~10초 fast giveup PASS**. 상세: `docs/HISTORY.md` 2026-04-24 (23)
 - **v0.0.31 (2026-04-24 (24))**: W 시나리오(iPhone WiFi 30초+ off) 재현 중 **`P2PService._disconnectedController` race 예외** 발견 → isClosed 가드 추가. `_handleConnectivity` / `_waitForWifiAndReconnect`에 `[CONNECTIVITY]` debugPrint 5개 보강. W connectivity 경로 **PASS**. errno=65/51 분기는 connectivity_plus 즉각 발화로 우회. 상세: `docs/HISTORY.md` 2026-04-24 (24)
 - **v0.0.32 (2026-04-24 (25))**: **Peer count 불일치 수정**. `Peer.id`가 socket 주소 기반이라 재접속 시 다른 ID로 새 peer 추가되는 구조 → 호스트 `_handleNewPeer`에 같은 이름 stale peer 정리 추가 + 모든 peer-joined/left broadcast에 `peerCount` 포함 + 게스트 측 `peer-joined`/`peer-left`에서 절대값 우선. 이중 방어. 실측 재검증은 다음 세션. 상세: `docs/HISTORY.md` 2026-04-24 (25)
+- **v0.0.33 (2026-04-24 (26))**: Orphan **`com.synchorus/audio_latency` MethodChannel** 제거 (Android MainActivity.kt + iOS SceneDelegate.swift). v2 시절 레이턴시 측정 채널이 v3 전환 후 Dart 호출 0건 상태로 남아있어 dead code 40여 줄 정리. 기능 동일. 상세: `docs/HISTORY.md` 2026-04-24 (26)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
 1. **v0.0.32 peer count 수정 실측 재검증** — S22+iPhone 조합으로 W 시나리오 반복 후 호스트/게스트 접속자 수 일치 확인. 코드 변경 0.
