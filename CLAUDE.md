@@ -30,11 +30,12 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.35 (2026-04-24 (28))**: **재연결 경로 직렬화** — v0.0.34는 loop만 차단했지 race 자체는 남아 재연결 2번 + 재동기화 2번 호출 → 1번은 "재동기화 실패" 스낵바. `room_lifecycle_coordinator.dart`에 `_reconnectInProgress` flag 추가해 `_handleDisconnected` + `_waitForWifiAndReconnect` 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip. `_handleDisconnected`는 `finally` 대신 명시적 flag 해제로 errno 분기→`_waitForWifiAndReconnect` 이어받기 지원. 실측(3 사이클): Reconnect 7→3, 재동기화 실패 0, `[RECONNECT] _handleDisconnected skip` 3회 발동 확인. 상세: `docs/HISTORY.md` 2026-04-24 (28)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
-2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
-3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-5. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+1. **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency` ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반 → BT 환경에서 drift 누적 가능. 주기 재측정 + EMA 반영(자동 보정). (2026-04-24 (29) "~10ms 오차"로 표시되어 있던 모호한 타겟을 이것으로 재정의)
+2. **v0.0.4 buf 차이가 v3 폐루프에서 실제 drift에 영향 주는지 실측 검증** — 이전엔 `S22 buf=4ms vs iPhone buf=21ms 17ms 비대칭`이라 기록됐으나 v0.0.4에서 측정 방식 통일로 compensation 계산 왜곡은 제거됨. v3 전환 후 framePos 기반 폐루프가 이걸 흡수하는지 실기기 2대로 drift csv 수집·분석. 코드 변경 0 가능성.
+3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
+4. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+5. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+6. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
 
