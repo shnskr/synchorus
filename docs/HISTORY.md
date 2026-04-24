@@ -1603,6 +1603,56 @@ flutter: Stale host onDone ignored (socket replaced)      ← ✅ 가드 발동 
 
 ---
 
+### 2026-04-24 (28) — 재연결 경로 직렬화 — 재동기화 중복 호출 제거 (v0.0.35)
+
+**배경**: (27) v0.0.34 onDone 가드로 무한 loop는 차단했지만, **두 재연결 경로가 각자 성공한 뒤 재동기화도 각자 호출**하는 문제가 남음. W 시나리오 3회 실측에서 증상 관찰:
+- `Reconnect attempt 1/3` **7회** (3 사이클 × 2 경로 + 추가 1회)
+- `Reconnected successfully` **7회** (매 경로 각자 성공)
+- 사용자 보고: "재연결 2번, 재동기화 2번 하는데 1번은 실패했다고 나오네" — 두 `onReconnectSyncRequested` 호출이 경쟁하며 하나가 실패 보고
+
+**원인**: `_handleDisconnected`(TCP onDone 기반)와 `_waitForWifiAndReconnect`(connectivity `none` 기반)가 WiFi off/on 시 거의 동시에 발화 → 각자 `reconnectToHost` 성공 → 각자 `onReconnectSyncRequested()` await. 재동기화는 P2P 메시지+타이밍 조율이라 중복 실행이 서로를 invalidate.
+
+**수정** (`lib/services/room_lifecycle_coordinator.dart`):
+- 클래스 필드에 `bool _reconnectInProgress = false` 추가
+- `_handleDisconnected` 진입부에 `if (_reconnectInProgress) return;` 가드 + flag 세팅
+- `_waitForWifiAndReconnect` 진입부 동일 가드 + try/finally로 flag 해제
+- `_handleDisconnected`는 `finally` 대신 각 exit 경로에서 **명시적 flag 해제** — errno 분기에서 `unawaited(_waitForWifiAndReconnect())`를 트리거할 때 flag를 먼저 false로 만들고 반환해야 `_waitForWifiAndReconnect`가 자체 관리로 이어받을 수 있음. `finally`로 덮어쓰면 `_waitForWifiAndReconnect` 실행 중에 flag가 풀려 다른 이벤트로 또 race 유발.
+
+**실측 결과** (S22 호스트 + iPhone 12 Pro 게스트 USB, 비행기 모드 3회 반복):
+
+| 항목 | v0.0.34 | v0.0.35 | 변화 |
+|------|---------|---------|------|
+| Reconnect attempt 1/3 | 7 | **3** | -4 |
+| Reconnected successfully | 7 | **3** | -4 |
+| `_handleDisconnected skip` | 0 | **3** | 신규 로그, 경로 A 차단 증거 |
+| `[CONNECTIVITY] reconnectToHost OK` | 3 | 3 | (경로 B 1번만) |
+| `Stale host onDone ignored` | 3 | **0** | race 자체가 사라져 가드 발동 불필요 |
+| 재동기화 실패 스낵바 | 1/3 사이클 | **0** | ✅ |
+
+로그 흐름:
+```
+[CONNECTIVITY] GUEST WiFi off 확정 → _waitForWifiAndReconnect    ← 경로 B flag 잡음
+[CONNECTIVITY] _waitForWifiAndReconnect 시작 (최대 15초)
+[CONNECTIVITY] WiFi 복구 감지 (check 3/5) → reconnectToHost
+Reconnect attempt 1/3 to 192.168.45.52:41235                    ← 1회만
+[RECONNECT] _handleDisconnected skip (이미 진행 중)              ← 경로 A 차단
+Reconnected successfully
+[CONNECTIVITY] reconnectToHost OK → sync 재시작                  ← 재동기화 1회만
+```
+
+**관계**:
+- v0.0.34 onDone 가드는 **race가 일어난 뒤 loop를 차단**하는 안전망으로 유지
+- v0.0.35 flag는 **race 자체를 예방** → `Stale host onDone ignored` 발동 불필요 상태
+- 두 방어층이 함께 있어 future regression에도 견고
+
+**문서**:
+- 미해결 "게스트 재연결 race(무한 loop)" 항목을 "게스트 재연결 race(중복 재동기화 포함)"으로 갱신
+- `CLAUDE.md` 최신 릴리스 v0.0.35
+
+**빌드**: v0.0.35+1 (`flutter analyze lib/services/room_lifecycle_coordinator.dart` clean)
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -1627,6 +1677,7 @@ flutter: Stale host onDone ignored (socket replaced)      ← ✅ 가드 발동 
 - [ ] W 시나리오의 errno=65/51(Darwin EHOSTUNREACH/ENETUNREACH) 분기 실행 캡처 — 2026-04-24 (23)에서 WiFi off 시간이 짧아 Socket.onDone 도달 전 WiFi 복구됨. 30초+ off 또는 호스트와 다른 AP 이동 시나리오 필요
 - [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). **2026-04-24 (27) S22+iPhone 실측 PASS** — 비행기 모드 on/off 반복 중 양쪽 2명 유지 확인
 - [x] ~~게스트 재연결 race(무한 loop)~~ — 2026-04-24 (27) p2p_service.dart onDone에 `identical(_hostSocket, socket)` 가드 추가(v0.0.34). 짧은 off(5~8초)에서 두 재연결 경로(`_handleDisconnected` + `_waitForWifiAndReconnect`)가 동시 성공 시 old socket의 onDone이 새 socket까지 destroy하면서 발생하던 무한 loop 차단
+- [x] ~~게스트 재연결 경로 중복(재동기화 2회, 1회 실패 보고)~~ — 2026-04-24 (28) `_reconnectInProgress` flag로 두 경로 직렬화(v0.0.35). race 자체 제거 → Reconnect 7→3, 재동기화 실패 0. v0.0.34 onDone 가드는 안전망으로 유지
 
 #### 해결된 이슈
 - [x] 호스트 파일 빠른 교체 시 race condition — 세션 ID + HttpClient 강제 종료 + stale 체크 (2026-04-20)

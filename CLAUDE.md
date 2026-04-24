@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.34** (2026-04-24) — 게스트 재연결 race 수정(`onDone`이 교체된 새 `_hostSocket`까지 destroy하며 무한 loop 유발하던 버그) + v0.0.32 peer count 실측 PASS.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.35** (2026-04-24) — 게스트 재연결 경로 직렬화(`_reconnectInProgress` flag) → 재연결 2회·재동기화 2회 중복 제거, W 시나리오 3회 반복 PASS.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -27,6 +27,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.32 (2026-04-24 (25))**: **Peer count 불일치 수정**. `Peer.id`가 socket 주소 기반이라 재접속 시 다른 ID로 새 peer 추가되는 구조 → 호스트 `_handleNewPeer`에 같은 이름 stale peer 정리 추가 + 모든 peer-joined/left broadcast에 `peerCount` 포함 + 게스트 측 `peer-joined`/`peer-left`에서 절대값 우선. 이중 방어. 실측 재검증은 다음 세션. 상세: `docs/HISTORY.md` 2026-04-24 (25)
 - **v0.0.33 (2026-04-24 (26))**: Orphan **`com.synchorus/audio_latency` MethodChannel** 제거 (Android MainActivity.kt + iOS SceneDelegate.swift). v2 시절 레이턴시 측정 채널이 v3 전환 후 Dart 호출 0건 상태로 남아있어 dead code 40여 줄 정리. 기능 동일. 상세: `docs/HISTORY.md` 2026-04-24 (26)
 - **v0.0.34 (2026-04-24 (27))**: **게스트 재연결 race 수정** — 짧은 off(5~8초) 시 `_handleDisconnected` + `_waitForWifiAndReconnect` 두 경로가 동시에 `reconnectToHost` 성공 → 나중 경로가 `_hostSocket?.destroy()`로 먼저 경로의 새 socket 파괴 → old socket의 onDone이 **교체된 새 `_hostSocket`까지 destroy + `_disconnectedController.add`** → 무한 loop. `p2p_service.dart:355` onDone에 `identical(_hostSocket, socket)` 가드 추가. 실측 PASS — `Stale host onDone ignored` 로그로 가드 발동 확인. **v0.0.32 peer count 수정도 같이 실측 PASS** (비행기 모드 반복 중 양쪽 2명 유지). 상세: `docs/HISTORY.md` 2026-04-24 (27)
+- **v0.0.35 (2026-04-24 (28))**: **재연결 경로 직렬화** — v0.0.34는 loop만 차단했지 race 자체는 남아 재연결 2번 + 재동기화 2번 호출 → 1번은 "재동기화 실패" 스낵바. `room_lifecycle_coordinator.dart`에 `_reconnectInProgress` flag 추가해 `_handleDisconnected` + `_waitForWifiAndReconnect` 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip. `_handleDisconnected`는 `finally` 대신 명시적 flag 해제로 errno 분기→`_waitForWifiAndReconnect` 이어받기 지원. 실측(3 사이클): Reconnect 7→3, 재동기화 실패 0, `[RECONNECT] _handleDisconnected skip` 3회 발동 확인. 상세: `docs/HISTORY.md` 2026-04-24 (28)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
 1. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
