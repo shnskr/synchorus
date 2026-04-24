@@ -385,49 +385,51 @@ Flutter 공식 state machine (api.flutter.dev):
 
 ## 소켓 에러 코드 (errno)
 
-TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX errno 숫자가 담긴다. Android(Linux 커널) / iOS(Darwin)에서 대부분 같지만 미묘한 차이 있음.
+TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX errno 숫자가 담긴다. POSIX 이름은 같아도 **숫자값이 Linux(Android) / Darwin(iOS/macOS)에서 다르다** — 관측 값은 양쪽을 모두 체크해야 함.
 
 ### 주요 errno (이 앱에서 실제 관측된 것 포함)
 
-| errno | 이름 | 의미 | 우리 앱에서의 해석 |
-|---|---|---|---|
-| **111** | ECONNREFUSED | 상대가 listen 안 함 | 호스트 TCP 서버 죽음 → 호스트 프로세스 종료 거의 확정 |
-| **110** | ETIMEDOUT | 응답 없음 (SYN timeout) | 호스트 paused 상태 or 네트워크 지연 → 잠깐 기다릴 가치 있음 |
-| **113** | EHOSTUNREACH | 호스트로 경로 없음 | 호스트가 AP 나감 or WiFi 변경 |
-| **101** | ENETUNREACH | 네트워크 자체 사용 불가 | 내 WiFi 끊김 |
-| **104** | ECONNRESET | 상대가 RST 보냄 | 상대 OS의 socket cleanup (대부분 상대 정상 종료) |
-| **103** | ECONNABORTED | 로컬 소켓 abort | 내 OS가 내 앱의 socket 정리 (Android paused 직후 흔함) |
-| **32** | EPIPE | 이미 끊긴 소켓에 write | 이전에 RST 받은 소켓에 send 시도 |
+| 이름 | Linux | Darwin | 의미 | 우리 앱에서의 해석 |
+|---|---|---|---|---|
+| **ECONNREFUSED** | 111 | **61** | 상대가 listen 안 함 | 호스트 TCP 서버 죽음 → 호스트 프로세스 종료 거의 확정 |
+| **ETIMEDOUT** | 110 | 60 | 응답 없음 (SYN timeout) | 호스트 paused 상태 or 네트워크 지연 → 잠깐 기다릴 가치 있음 |
+| **EHOSTUNREACH** | 113 | **65** | 호스트로 경로 없음 | 호스트가 AP 나감 or WiFi 변경 |
+| **ENETUNREACH** | 101 | **51** | 네트워크 자체 사용 불가 | 내 WiFi 끊김 |
+| **ECONNRESET** | 104 | 54 | 상대가 RST 보냄 | 상대 OS의 socket cleanup (대부분 상대 정상 종료) |
+| **ECONNABORTED** | 103 | 53 | 로컬 소켓 abort | 내 OS가 내 앱의 socket 정리 (Android paused 직후 흔함) |
+| **EPIPE** | 32 | 32 | 이미 끊긴 소켓에 write | 이전에 RST 받은 소켓에 send 시도 |
 
-### 판정 트리 (errno=111 분기는 v0.0.27, 113/101 분기는 v0.0.28 구현)
+> **Linux/Darwin errno 차이**: v0.0.29까지 코드가 Linux 값(111/113/101)만 하드코딩했다가 2026-04-24 iPhone 실측에서 `errno=61`(Darwin ECONNREFUSED)이 감지 안 되어 빠른 포기 경로 미작동으로 드러남. v0.0.30에서 `{Linux, Darwin}` 집합으로 확장: `room_lifecycle_coordinator.dart`의 `_refusedErrnos` / `_networkUnreachableErrnos` 상수.
+
+### 판정 트리 (ECONNREFUSED 분기는 v0.0.27, EHOSTUNREACH/ENETUNREACH 분기는 v0.0.28 구현, v0.0.30 Darwin 대응)
 
 ```
 소켓 에러 발생 시:
-  ├─ errno=111 (refused)
+  ├─ ECONNREFUSED (Linux 111 / Darwin 61)
   │    → 호스트 프로세스 죽음 확률↑
   │    → 2회 연속이면 즉시 leaveRoom (빠른 포기)
   │
-  ├─ errno=110 (timed out)
+  ├─ ETIMEDOUT (110 / 60)
   │    → 호스트 paused 가능성 (foreground service 없는 상태)
   │    → 주기 재시도 (watchdog까지 유지)
   │
-  ├─ errno=113 (no route) / errno=101 (network unreachable)
+  ├─ EHOSTUNREACH (113 / 65) / ENETUNREACH (101 / 51)
   │    → connectivity_plus로 내 WiFi 상태 재확인
   │         ├─ WiFi 있음 → 호스트 네트워크 문제 → 재시도
   │         └─ WiFi 없음 → 내 WiFi 복구 대기 (기존 `_waitForWifiAndReconnect` 로직)
   │
-  ├─ errno=104 (reset)
+  ├─ ECONNRESET (104 / 54)
   │    → 상대 정상/비정상 종료 (대부분)
   │    → `_hostAway=true`면 watchdog, 아니면 기존 reconnectToHost 플로우
   │
-  └─ errno=103 (abort)
+  └─ ECONNABORTED (103 / 53)
        → 내 측 abort (호스트가 paused로 강등되며 OS가 처리한 경우 흔함)
        → 보통 `host-paused` 메시지가 앞서서 도달했을 것이라 이미 `_hostAway=true` 상태
 ```
 
 ### 한계
 
-- errno 값은 POSIX 표준이지만 플랫폼·커널 버전에 따라 다를 수 있음
+- errno 숫자값은 **Linux/Darwin에서 다름** — 관측된 값은 양쪽을 명시적으로 OR 체크해야 함 (v0.0.30)
 - 원격 호스트의 실제 상태를 100% 알 방법 없음 → 휴리스틱 판정일 뿐
 - 최종 확신은 재접속 성공/실패 + 시간 기반 watchdog으로만 가능
 

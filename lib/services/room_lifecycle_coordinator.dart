@@ -58,8 +58,16 @@ class RoomLifecycleCoordinator {
   /// 약 60초 (5초 주기 × 12). errno 기반 빠른 포기 분기가 먼저 종료시킬 수 있음.
   static const int _awayReconnectMaxAttempts = 12;
 
-  /// errno=111(refused) 연속 N회 시 watchdog 안 기다리고 즉시 포기.
+  /// `ECONNREFUSED` errno 연속 N회 시 watchdog 안 기다리고 즉시 포기.
   static const int _refusedFastGiveupThreshold = 2;
+
+  /// `ECONNREFUSED` 의 POSIX errno. Linux=111, Darwin(iOS/macOS)=61.
+  /// 호스트 프로세스 종료 거의 확정 신호.
+  static const Set<int> _refusedErrnos = {111, 61};
+
+  /// `EHOSTUNREACH`(경로 없음) / `ENETUNREACH`(네트워크 사용 불가) POSIX errno.
+  /// Linux=113/101, Darwin=65/51. 내 WiFi 끊김 또는 호스트가 다른 AP로 이동한 경우.
+  static const Set<int> _networkUnreachableErrnos = {113, 101, 65, 51};
 
   StreamSubscription? _disconnectSub;
   StreamSubscription? _connectivitySub;
@@ -243,17 +251,17 @@ class RoomLifecycleCoordinator {
           onSnackbar('호스트 복귀');
           await onReconnectSyncRequested();
         } else {
-          // errno=111(ECONNREFUSED)이 연속으로 잡히면 호스트 프로세스 종료 거의 확정.
+          // ECONNREFUSED가 연속으로 잡히면 호스트 프로세스 종료 거의 확정.
           // detached에서 host-closed broadcast가 도달 못한 케이스(재생 전 종료 / iOS
           // 강제 종료) 복구를 watchdog 60초 대신 ~10초로 단축. (LIFECYCLE.md "errno 판정 트리")
           final errno = p2p.lastReconnectErrno;
-          // errno=113/101: 내 WiFi 끊김 가능성 → connectivity 즉시 확인 후 복구 루틴 위임
+          // EHOSTUNREACH/ENETUNREACH: 내 WiFi 끊김 가능성 → connectivity 즉시 확인 후 복구 루틴 위임
           if (await _maybeHandleNetworkErrno(errno)) {
             t.cancel();
             _awayReconnectTimer = null;
             return;
           }
-          if (errno == 111) {
+          if (errno != null && _refusedErrnos.contains(errno)) {
             _consecutiveRefused++;
           } else {
             _consecutiveRefused = 0;
@@ -262,7 +270,7 @@ class RoomLifecycleCoordinator {
             t.cancel();
             _awayReconnectTimer = null;
             debugPrint(
-              '[AWAY-RECONNECT] errno=111 x$_consecutiveRefused → fast giveup',
+              '[AWAY-RECONNECT] refused (errno=$errno) x$_consecutiveRefused → fast giveup',
             );
             onLog('호스트 종료 감지 (refused 연속). 방을 나갑니다.');
             onSnackbar('호스트가 종료되었습니다. 방을 나갑니다.');
@@ -300,14 +308,14 @@ class RoomLifecycleCoordinator {
     _consecutiveRefused = 0;
   }
 
-  /// errno=113(EHOSTUNREACH) / 101(ENETUNREACH)이면 connectivity_plus 이벤트를
-  /// 기다리지 말고 즉시 내 WiFi 상태 확인 → 끊겨 있으면 `_waitForWifiAndReconnect()`
+  /// `EHOSTUNREACH` / `ENETUNREACH` (Linux 113/101, Darwin 65/51)이면 connectivity_plus
+  /// 이벤트를 기다리지 말고 즉시 내 WiFi 상태 확인 → 끊겨 있으면 `_waitForWifiAndReconnect()`
   /// 트리거. WiFi가 살아있으면 호스트 측 문제로 보고 false 반환 (호출자가 기존 흐름 유지).
   ///
-  /// LIFECYCLE.md "errno 판정 트리"의 113/101 분기 구현. connectivity_plus 이벤트가
-  /// AP 변경/WiFi 변경 케이스에서 늦게 오거나 안 오는 경우의 앞당김 경로.
+  /// LIFECYCLE.md "errno 판정 트리"의 EHOSTUNREACH/ENETUNREACH 분기 구현. connectivity_plus
+  /// 이벤트가 AP 변경/WiFi 변경 케이스에서 늦게 오거나 안 오는 경우의 앞당김 경로.
   Future<bool> _maybeHandleNetworkErrno(int? errno) async {
-    if (errno != 113 && errno != 101) return false;
+    if (errno == null || !_networkUnreachableErrnos.contains(errno)) return false;
     if (_disposed) return false;
     final current = await Connectivity().checkConnectivity();
     if (_disposed) return false;
