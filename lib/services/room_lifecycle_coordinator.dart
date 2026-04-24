@@ -182,26 +182,27 @@ class RoomLifecycleCoordinator {
       return;
     }
     _reconnectInProgress = true;
-    onLog('호스트와 연결이 끊어졌습니다. 재연결 시도 중...');
-    onSnackbar('연결이 끊어졌습니다. 재연결 시도 중...');
+    // errno 분기(`_maybeHandleNetworkErrno` → `_waitForWifiAndReconnect`)가
+    // flag를 이어받아야 하므로 try 블록은 **재연결 본 흐름**만 감싼다.
+    // finally 진입 시점에 flag를 해제 → fall-through로 errno 분기 진입 시
+    // `_waitForWifiAndReconnect`가 자체 관리로 다시 잡음. 예외(`onReconnectSyncRequested`
+    // 내부 throw 등)가 발생해도 flag 해제가 보장된다.
+    try {
+      onLog('호스트와 연결이 끊어졌습니다. 재연결 시도 중...');
+      onSnackbar('연결이 끊어졌습니다. 재연결 시도 중...');
 
-    final reconnected = await p2p.reconnectToHost();
-    if (_disposed || _leaving) {
-      _reconnectInProgress = false;
-      return;
-    }
+      final reconnected = await p2p.reconnectToHost();
+      if (_disposed || _leaving) return;
 
-    if (reconnected) {
-      onLog('재연결 성공!');
-      onSnackbar('재연결되었습니다');
-      await onReconnectSyncRequested();
+      if (reconnected) {
+        onLog('재연결 성공!');
+        onSnackbar('재연결되었습니다');
+        await onReconnectSyncRequested();
+        return;
+      }
+    } finally {
       _reconnectInProgress = false;
-      return;
     }
-    // 실패: errno 분기 전에 flag 해제. `_waitForWifiAndReconnect`가 자체 관리로
-    // 이어받도록 함. `finally`로 덮어쓰면 _waitForWifiAndReconnect 실행 중에
-    // flag가 false가 되어 다른 이벤트로 또 race 발생.
-    _reconnectInProgress = false;
     if (await _maybeHandleNetworkErrno(p2p.lastReconnectErrno)) {
       return;
     }

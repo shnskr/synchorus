@@ -15,7 +15,17 @@ class SyncMeasurementLogger {
 
   Future<void> start() async {
     await stop();
-    final dir = await getApplicationDocumentsDirectory();
+    // Android: `getApplicationDocumentsDirectory()`가 Samsung Secure Folder 등의
+    // multi-user 공간(`/data/user/95/...`)으로 떨어지면 `run-as` 접근이 막혀
+    // 실측 csv를 뽑지 못하는 문제가 있었다(HISTORY.md (30)). 외부 앱 전용 저장소
+    // (`/sdcard/Android/data/<pkg>/files/`)는 `adb pull` 직접 가능하고 앱 uninstall 시
+    // 자동 정리된다. null 반환(접근 불가) 시 documents로 fallback.
+    // iOS는 `getExternalStorageDirectory()` 자체가 UnsupportedError.
+    Directory? dir;
+    if (Platform.isAndroid) {
+      dir = await getExternalStorageDirectory();
+    }
+    dir ??= await getApplicationDocumentsDirectory();
     final ts = DateTime.now()
         .toIso8601String()
         .replaceAll(':', '-')

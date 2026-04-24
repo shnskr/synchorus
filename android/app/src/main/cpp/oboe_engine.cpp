@@ -24,6 +24,7 @@
 
 #define LOG_TAG "OboeEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
+#define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
 #define LOGE(...) __android_log_print(ANDROID_LOG_ERROR, LOG_TAG, __VA_ARGS__)
 
 namespace {
@@ -278,11 +279,17 @@ public:
         oboe::Result result = mStream->getTimestamp(
             CLOCK_MONOTONIC, &framePos, &timeNs);
         if (result != oboe::Result::OK) {
+            if (mLastTsResult == oboe::Result::OK) {
+                LOGW("getTimestamp failed: %s (%d)",
+                     oboe::convertToText(result), static_cast<int>(result));
+            }
+            mLastTsResult = result;
             *outFramePos = -1;
             *outTimeNs = -1;
             *outWallAtFramePosNs = wallNow;
             return false;
         }
+        mLastTsResult = oboe::Result::OK;
 
         const int64_t monoNow =
             static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
@@ -384,6 +391,10 @@ private:
     std::atomic<int64_t> mVirtualFrame{0};
     std::atomic<bool> mMuted{false};
     std::mutex mLock;
+
+    // getTimestamp 실패 원인 진단용: 연속 실패 구간의 첫 회에만 oboe Result를 로그.
+    // logcat 폭주 방지 + 원인 코드(xrun / invalid state 등) 분류.
+    oboe::Result mLastTsResult{oboe::Result::OK};
 
     // ---- 디코딩된 오디오 버퍼 ----
     std::vector<int16_t> mDecodedData;
