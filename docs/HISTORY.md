@@ -1527,6 +1527,82 @@ Bad state: Cannot add new events after calling close
 
 ---
 
+### 2026-04-24 (27) — 게스트 재연결 race 수정 + v0.0.32 peer count 실측 PASS (v0.0.34)
+
+**배경**: (25) v0.0.32 peer count 실측 재검증 준비 중 S22+iPhone USB로 W 시나리오(짧은 off) 1회 돌리자마자 iPhone에서 **재연결 → 끊김 무한 반복** 관찰. 기존 버그였는데 v0.0.31까지는 긴 off(30초+)나 가벼운 1회 테스트만 해봐서 드러나지 않았음.
+
+**원인 분석** (`p2p_service.dart:355~367` + `room_lifecycle_coordinator.dart`):
+- 게스트 측 disconnect 감지 경로가 **두 개**로 분리:
+  - 경로 A: `onDisconnected` 스트림 → `_handleDisconnected` → `reconnectToHost(retries=3)`
+  - 경로 B: `connectivity_plus none` 이벤트 → `_waitForWifiAndReconnect` → 15초 내 `reconnectToHost()`
+- 짧은 off(5~8초)에서는 두 경로가 거의 동시에 재연결 시도 → 둘 다 성공하면서 **하나가 다른 쪽 socket을 `_hostSocket?.destroy()`로 파괴**
+- 파괴된 old socket의 `onDone` 콜백이 기존 코드는 **새 `_hostSocket`까지 무조건 destroy** + `_disconnectedController.add(null)`:
+  ```dart
+  onDone: () {
+    if (sourceId == 'host') {
+      _hostSocket?.destroy();   // ← 이 시점 _hostSocket은 이미 새 socket!
+      _hostSocket = null;
+      _disconnectedController.add(null);  // → _handleDisconnected 재트리거 → loop
+    }
+  }
+  ```
+- → **무한 재연결 loop**
+
+**수정** (`lib/services/p2p_service.dart:355`):
+```dart
+onDone: () {
+  if (sourceId == 'host') {
+    // 이 콜백 소유의 socket이 이미 재연결로 교체된 old socket이면 무시
+    if (!identical(_hostSocket, socket)) {
+      debugPrint('Stale host onDone ignored (socket replaced)');
+      return;
+    }
+    _hostSocket = null;
+    if (!_disconnectedController.isClosed) {
+      _disconnectedController.add(null);
+    }
+  }
+}
+```
+- `identical(_hostSocket, socket)` 가드: 현재 `_hostSocket`이 이 콜백 소유 socket과 같을 때만 정리. old socket의 onDone은 noop.
+
+**실측 결과** (S22 호스트 + iPhone 12 Pro 게스트, USB flutter run, 비행기 모드 토글):
+```
+flutter: [CONNECTIVITY] GUEST WiFi off 확정 → _waitForWifiAndReconnect
+flutter: [CONNECTIVITY] _waitForWifiAndReconnect 시작 (최대 15초)
+flutter: [CONNECTIVITY] WiFi 복구 감지 (check 3/5) → reconnectToHost
+flutter: Connection closed: host
+flutter: Reconnect attempt 1/3 to 192.168.45.52:41235   ← 경로 A
+flutter: Reconnect attempt 1/3 to 192.168.45.52:41235   ← 경로 B (동시)
+flutter: Reconnected successfully
+flutter: Reconnected successfully                         ← 둘 다 성공 (race 재현)
+flutter: [CONNECTIVITY] reconnectToHost OK → sync 재시작
+flutter: Connection closed: host
+flutter: Stale host onDone ignored (socket replaced)      ← ✅ 가드 발동 — loop 차단
+```
+
+- **race 자체는 실제 존재** (`Reconnect attempt 1/3 ... ×2 → Reconnected ×2`).
+- **`Stale host onDone ignored` 로그** 정상 출력 → 수정이 의도대로 동작.
+- **무한 반복 없이** 재접속 완료, **peer count 양쪽 모두 2명 유지** (v0.0.32 효과 동시 확인).
+- 여러 사이클 반복해도 동일 동작.
+
+**부수 효과 — v0.0.32 peer count 실측 PASS**:
+- (25)에서 "실측 재검증 대기"로 남겼던 Peer count 불일치 수정이 같이 검증됨.
+- iPhone 비행기 모드 on/off 반복 내내 **S22 2명, iPhone 2명** 유지.
+
+**iOS 테스트 조건 발견**:
+- 제어센터 **WiFi 아이콘** 토글은 iOS가 "일시 비활성화"로 취급해 `connectivity_plus`에 `none` 이벤트가 안 가거나 약하게 감. → 재현 부적합.
+- 진짜 네트워크 off 재현은 **제어센터 → 비행기 모드 토글** 또는 **설정 앱 > Wi-Fi 토글**로 해야 함. 전자는 앱 포그라운드 유지, 후자는 앱이 background로 내려감 → race 조건 달라짐.
+
+**문서**:
+- 미해결 "Peer count 불일치" 체크 완료 + 주석에 실측 PASS 반영
+- 게스트 재연결 race는 (25)에 포함 안 됐던 별건 → (27) 항목으로 신설
+- `CLAUDE.md` 최신 릴리스 v0.0.34 + 재개 포인트 갱신
+
+**빌드**: v0.0.34+1 (`flutter analyze lib/services/p2p_service.dart` clean)
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -1549,7 +1625,8 @@ Bad state: Cannot add new events after calling close
 - [ ] iOS 실기기에서 라이프사이클 시나리오(T1~T4) 재검증 — v0.0.25는 Android 2대로만 검증됨. iOS의 background audio 미활성 상태에서 paused 동작과 detached 이벤트 도달 여부 확인 필요
 - [x] ~~**v0.0.27 errno=111 빠른 포기 실측 검증**~~ — 2026-04-24 (23)에서 S22+iPhone 조합으로 T4b 실측. **Darwin errno=61 미체크 버그** 발견 → v0.0.30에서 수정 → 재검증 ~10초 fast giveup PASS. W(게스트 WiFi off/on)는 일반 재연결 성공, errno=65/51 분기 재현은 추가 조건 필요 (WiFi 30초+ off 또는 AP 이동)
 - [ ] W 시나리오의 errno=65/51(Darwin EHOSTUNREACH/ENETUNREACH) 분기 실행 캡처 — 2026-04-24 (23)에서 WiFi off 시간이 짧아 Socket.onDone 도달 전 WiFi 복구됨. 30초+ off 또는 호스트와 다른 AP 이동 시나리오 필요
-- [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). 실측 재검증은 다음 세션
+- [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). **2026-04-24 (27) S22+iPhone 실측 PASS** — 비행기 모드 on/off 반복 중 양쪽 2명 유지 확인
+- [x] ~~게스트 재연결 race(무한 loop)~~ — 2026-04-24 (27) p2p_service.dart onDone에 `identical(_hostSocket, socket)` 가드 추가(v0.0.34). 짧은 off(5~8초)에서 두 재연결 경로(`_handleDisconnected` + `_waitForWifiAndReconnect`)가 동시 성공 시 old socket의 onDone이 새 socket까지 destroy하면서 발생하던 무한 loop 차단
 
 #### 해결된 이슈
 - [x] 호스트 파일 빠른 교체 시 race condition — 세션 ID + HttpClient 강제 종료 + stale 체크 (2026-04-20)

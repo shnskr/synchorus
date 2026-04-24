@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.33** (2026-04-24) — orphan `com.synchorus/audio_latency` 네이티브 채널 제거 (v2 legacy).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.34** (2026-04-24) — 게스트 재연결 race 수정(`onDone`이 교체된 새 `_hostSocket`까지 destroy하며 무한 loop 유발하던 버그) + v0.0.32 peer count 실측 PASS.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -26,10 +26,10 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.31 (2026-04-24 (24))**: W 시나리오(iPhone WiFi 30초+ off) 재현 중 **`P2PService._disconnectedController` race 예외** 발견 → isClosed 가드 추가. `_handleConnectivity` / `_waitForWifiAndReconnect`에 `[CONNECTIVITY]` debugPrint 5개 보강. W connectivity 경로 **PASS**. errno=65/51 분기는 connectivity_plus 즉각 발화로 우회. 상세: `docs/HISTORY.md` 2026-04-24 (24)
 - **v0.0.32 (2026-04-24 (25))**: **Peer count 불일치 수정**. `Peer.id`가 socket 주소 기반이라 재접속 시 다른 ID로 새 peer 추가되는 구조 → 호스트 `_handleNewPeer`에 같은 이름 stale peer 정리 추가 + 모든 peer-joined/left broadcast에 `peerCount` 포함 + 게스트 측 `peer-joined`/`peer-left`에서 절대값 우선. 이중 방어. 실측 재검증은 다음 세션. 상세: `docs/HISTORY.md` 2026-04-24 (25)
 - **v0.0.33 (2026-04-24 (26))**: Orphan **`com.synchorus/audio_latency` MethodChannel** 제거 (Android MainActivity.kt + iOS SceneDelegate.swift). v2 시절 레이턴시 측정 채널이 v3 전환 후 Dart 호출 0건 상태로 남아있어 dead code 40여 줄 정리. 기능 동일. 상세: `docs/HISTORY.md` 2026-04-24 (26)
+- **v0.0.34 (2026-04-24 (27))**: **게스트 재연결 race 수정** — 짧은 off(5~8초) 시 `_handleDisconnected` + `_waitForWifiAndReconnect` 두 경로가 동시에 `reconnectToHost` 성공 → 나중 경로가 `_hostSocket?.destroy()`로 먼저 경로의 새 socket 파괴 → old socket의 onDone이 **교체된 새 `_hostSocket`까지 destroy + `_disconnectedController.add`** → 무한 loop. `p2p_service.dart:355` onDone에 `identical(_hostSocket, socket)` 가드 추가. 실측 PASS — `Stale host onDone ignored` 로그로 가드 발동 확인. **v0.0.32 peer count 수정도 같이 실측 PASS** (비행기 모드 반복 중 양쪽 2명 유지). 상세: `docs/HISTORY.md` 2026-04-24 (27)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **v0.0.32 peer count 수정 실측 재검증** — S22+iPhone 조합으로 W 시나리오 반복 후 호스트/게스트 접속자 수 일치 확인. 코드 변경 0.
-2. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
+1. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
 2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
 3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
 4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
@@ -91,6 +91,20 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 - git log/blame으로 해당 줄의 도입 의도 확인 후 수정. "이상해 보이는" 패턴이 의도적 수정인 경우 많음.
 - 특히 audio_service.dart의 syncPlay/syncSeek 순서(broadcast→seek)는 커밋 c6123b6에서 의도적으로 변경한 것. 되돌리지 말 것.
 - 주석에 "대칭화", "의도적", "방지" 같은 단어가 있으면 함부로 되돌리지 말 것.
+
+### 크로스 플랫폼 (Android + iOS) 항상 고려
+무언가 구현·수정할 때 **두 플랫폼 모두** 검토해서 진행. 한쪽만 생각하면 상대 플랫폼에서 조용히 동작 안 함.
+- **POSIX errno 값 차이**: Linux(Android)와 Darwin(iOS/macOS)은 같은 의미의 errno 번호가 다름.
+  - `ECONNREFUSED`: Linux=111, Darwin=61
+  - `EHOSTUNREACH`: Linux=113, Darwin=65
+  - `ENETUNREACH`: Linux=101, Darwin=51
+  - 실제 사고: v0.0.27에서 Linux `errno=111`만 하드코딩해 iOS에서 fast-giveup 작동 안 함 → v0.0.30에서 집합 `{111,61}` / `{113,101,65,51}`로 수정.
+  - 플랫폼 errno 집합 정의는 `room_lifecycle_coordinator.dart`의 `_refusedErrnos` / `_networkUnreachableErrnos` 참고.
+- **라이프사이클 이벤트 도달성**: detached는 Android foreground service에선 도달 가능, iOS 강제 종료는 미도달 가능. 이런 비대칭은 `docs/LIFECYCLE.md` 매트릭스에 반영.
+- **네이티브 채널**: 새 MethodChannel 추가 시 Android(Kotlin) + iOS(Swift) **양쪽 구현** 필수. 한쪽만 하면 반대 플랫폼에서 PlatformException 또는 silent fail.
+- **권한·capability**: Info.plist(iOS)와 AndroidManifest.xml 둘 다 확인. 예: 마이크, 로컬 네트워크, 백그라운드 오디오.
+- **connectivity / 네트워크 스택**: iOS 제어센터 WiFi 토글은 "일시 비활성화"라 `connectivity_plus`가 `none` 이벤트 안 줄 수 있음. 진짜 off 테스트는 비행기 모드 또는 설정 앱 Wi-Fi 토글로.
+- **플랫폼 분기 표기**: `Platform.isIOS` / `Platform.isAndroid` 분기 작성 시 각 분기 아래에 **왜 분기했는지 주석**. 안 그러면 나중에 사유를 알 수 없어 되돌릴 위험.
 
 ### 빌드/배포/테스트
 - flutter run 백그라운드 실행 후 불필요하게 상태 계속 확인하지 말 것. 빌드 진행 중이면 간단히 알려주고 기다릴 것.
