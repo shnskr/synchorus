@@ -400,6 +400,70 @@ EventChannel 추가로 native 자발적 push 전환 검토:
 
 ---
 
+### 9. 라이프사이클·연결 복구 아키텍처
+
+v0.0.25~v0.0.35 걸쳐 누적된 라이프사이클·재연결 구조. 상세 매트릭스는 `docs/LIFECYCLE.md`, 시나리오 로그는 `docs/HISTORY.md`.
+
+#### 9-1. 호스트 라이프사이클 프로토콜 (v0.0.25)
+
+호스트의 앱 상태 변화를 게스트에 명시적 메시지로 통보 → 게스트가 불필요하게 방 폭파되는 걸 막고 원인별 UX 차별화.
+
+| 메시지 | 트리거 | 게스트 대응 |
+|---|---|---|
+| `host-paused` | 호스트 `AppLifecycleState.paused` (파일 선택 창·홈 버튼) | 자리비움 배너 + 주기적 재접속 Timer |
+| `host-resumed` | 호스트 `AppLifecycleState.resumed` | 배너 해제 + 재동기화 |
+| `host-closed` | 호스트 `AppLifecycleState.detached` (v0.0.26) 또는 정식 `closeRoom` | 즉시 홈 복귀 |
+
+`detached` 도달성은 플랫폼별 비대칭:
+- Android foreground service 덕에 재생 중 종료 시 detached까지 Dart 코드 도달 (~1.4s 복구 실측)
+- iOS 강제 종료는 detached 미도달 가능 → watchdog fallback(~60s)이 받음
+
+#### 9-2. `RoomLifecycleCoordinator` (v0.0.29)
+
+라이프사이클·재연결 로직을 `room_screen.dart`에서 `lib/services/room_lifecycle_coordinator.dart`로 분리. UI는 `ValueListenableBuilder` + 콜백(`onLeaveRequested` / `onReconnectSyncRequested` / `onLog` / `onSnackbar`)만 처리.
+
+coordinator가 소유하는 주요 state:
+- `hostAway` / `hostClosed` (ValueNotifier<bool>) — UI 배너·종료 분기
+- `_reconnectInProgress` (bool) — 두 재연결 경로 직렬화 (9-4)
+- `_awayReconnecting` (bool) — away loop tick 재진입 가드
+- `_leaving` / `_disposed` — 종단 상태 플래그
+
+#### 9-3. Peer count 관리 (v0.0.32)
+
+`Peer.id`가 socket 주소(`ip:port`) 기반이라 게스트 재접속 시 **다른 ID로 새 peer 추가**됨. 누적 방지 이중 방어:
+1. 호스트 `_handleNewPeer`에서 같은 `name`의 stale peer들을 `destroy + remove + peer-left broadcast` 후 새 peer 등록
+2. 모든 `peer-joined`/`peer-left` broadcast에 `peerCount` 절대값 포함 → 게스트는 증감이 아닌 **절대값 우선 반영**
+
+한계: 동일 이름 두 기기 동시 입장은 stale 정리가 legit peer를 자를 수 있음. MVP는 기기명이 기기별 unique라 허용.
+
+#### 9-4. 게스트 재연결 경로 2중화 + 직렬화 (v0.0.28, v0.0.34, v0.0.35)
+
+게스트는 호스트 연결 끊김을 **두 경로**로 감지:
+
+```
+TCP onDone          → _disconnectedController.add → _handleDisconnected
+connectivity_plus   → none 이벤트 → 1초 재확인 → _waitForWifiAndReconnect
+```
+
+두 경로는 WiFi off/on 시 거의 동시에 발화 가능. 별도 방어 없으면 **각자 reconnectToHost() 성공 + 각자 재동기화 호출** → 중복 작업·실패 스낵바 노출. 방어층:
+
+1. **`identical(_hostSocket, socket)` 가드** (v0.0.34, `p2p_service.dart:355~`) — old socket의 onDone이 교체된 새 `_hostSocket`까지 destroy하는 무한 loop 차단 (안전망)
+2. **`_reconnectInProgress` flag** (v0.0.35, `room_lifecycle_coordinator.dart`) — 두 경로 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip (race 예방)
+
+`_handleDisconnected`는 `try/finally`로 flag 해제 보장 + errno 분기는 try 밖으로 배치해 `_waitForWifiAndReconnect`가 자체 관리로 이어받음.
+
+#### 9-5. errno 기반 빠른 포기·WiFi 복구 분기 (v0.0.27, v0.0.28, v0.0.30)
+
+호스트 프로세스 종료를 watchdog 60초 대신 ~10초로 줄이는 fast giveup 분기 + WiFi 끊김 조기 감지 분기. POSIX errno는 **플랫폼별 값 다름**:
+
+| 의미 | Linux (Android) | Darwin (iOS/macOS) | 대응 |
+|---|---|---|---|
+| `ECONNREFUSED` | 111 | 61 | 2연속 시 fast giveup (`_refusedErrnos`) |
+| `EHOSTUNREACH` | 113 | 65 | connectivity 즉시 확인 + `_waitForWifiAndReconnect` 트리거 (`_networkUnreachableErrnos`) |
+| `ENETUNREACH` | 101 | 51 | (위와 동일) |
+
+v0.0.27에서 Linux 값만 하드코딩해 iOS fast giveup 작동 안 하던 버그 → v0.0.30에서 집합으로 수정. 크로스 플랫폼 원칙의 시초.
+
 ---
 
 ## Appendix: v2 설계 (legacy)
