@@ -355,8 +355,14 @@ class P2PService {
       onDone: () {
         debugPrint('Connection closed: $sourceId');
         if (sourceId == 'host') {
-          // #1: stale 소켓 참조 정리 (이후 sendToHost가 죽은 소켓에 쓰지 않도록)
-          _hostSocket?.destroy();
+          // 이 콜백 소유의 socket이 이미 재연결로 교체된 old socket이면 무시.
+          // 아니면 두 재연결 경로(_handleDisconnected + _waitForWifiAndReconnect)가
+          // race로 번갈아 성공·파괴하면서 old onDone이 새 _hostSocket까지 destroy하고
+          // disconnect 이벤트를 재발화 → 무한 재연결 루프 발생.
+          if (!identical(_hostSocket, socket)) {
+            debugPrint('Stale host onDone ignored (socket replaced)');
+            return;
+          }
           _hostSocket = null;
           // dispose() 후 지연 도착하는 Socket.onDone 가드 (closed controller에 add하면 예외)
           if (!_disconnectedController.isClosed) {
