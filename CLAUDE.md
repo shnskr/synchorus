@@ -3,12 +3,12 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.29** (2026-04-23), 2026-04-24 실측 재검증 완료 (T1~T4a PASS).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.30** (2026-04-24) — iOS 실측에서 Darwin errno 대응 버그 발견 + 수정.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
 - **Step 3 HTTP 전송**: 완료 (v0.0.22에서 shelf 제거, dart:io HttpServer 직접 + 1MB chunk)
-- **호스트 라이프사이클 프로토콜**: v0.0.25 추가 — `host-paused`/`host-resumed`/`host-closed` + 게스트 주기적 재접속 + watchdog. T1~T4 Android 검증 완료 (2026-04-22). v0.0.29 coordinator 추출 후 T1~T4a 재검증(S22+Pixel 6 에뮬, 2026-04-24). **errno 분기(T4b/W)는 adb forward 한계로 실기기 2대 조합 재검증 필요**
+- **호스트 라이프사이클 프로토콜**: v0.0.25 추가 — `host-paused`/`host-resumed`/`host-closed` + 게스트 주기적 재접속 + watchdog. T1~T4 Android 검증 완료 (2026-04-22). v0.0.29 coordinator 추출 후 T1~T4a 재검증(S22+Pixel 6 에뮬, 2026-04-24). **v0.0.30에서 Darwin errno 버그 수정 + T4b 실측 PASS (S22+iPhone ~10초 fast giveup)**
 
 v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handler.dart: NativeAudioHandler.
 
@@ -21,10 +21,12 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.27: **Socket.connect timeout 5→2초** + **errno=111 2연속 → watchdog 빠른 포기** (재생 전 호스트 종료 / iOS 강제 종료 fallback ~2분 → ~10초 이론값). 실측 검증은 다음 세션. 상세: `docs/HISTORY.md` 2026-04-23 (19)
 - v0.0.28: **errno=113/101 + connectivity_plus 연동** — WiFi 변경·AP 변경 시 connectivity 이벤트 늦어도 errno로 조기 감지 → `_waitForWifiAndReconnect` 즉시 트리거. 라이프사이클·연결 후보 6개 중 5개 완료. 상세: `docs/HISTORY.md` 2026-04-23 (20)
 - v0.0.29: **`RoomLifecycleCoordinator` 추출** — `lib/services/room_lifecycle_coordinator.dart` 신설. `room_screen.dart`(828줄) 라이프사이클·연결 로직 약 320줄을 별도 클래스로 분리. UI는 `ValueListenableBuilder` + 콜백만. 라이프사이클·연결 후보 6개 모두 완료, Phase 4 라이프사이클 영역 종결. 상세: `docs/HISTORY.md` 2026-04-23 (21)
-- **2026-04-24**: 실측 재검증 (S22 + Pixel 6 에뮬 조합). T1 파일선택/T2 홈버튼/T3 방나가기/T4a 재생 중 스와이프 종료 **모두 PASS** (watchdog `AWAY-RECONNECT` 로그 0건, coordinator 동작 동등성 확인). T4b 재생 전 스와이프 종료 + W 게스트 WiFi off/on은 **adb forward의 TCP accept 가짜 성공** 때문에 `errno=111` 경로 진입 불가 → 실기기 LAN 조합으로 재검증 필요. 상세: `docs/HISTORY.md` 2026-04-24 (22), `docs/EMULATOR_NETWORK.md`
+- **2026-04-24 (22)**: 실측 재검증 (S22 + Pixel 6 에뮬). T1~T4a **PASS** (coordinator 동등성). T4b/W는 adb forward의 TCP accept 가짜 성공 때문에 에뮬로는 검증 불가 → 실기기 LAN 필요. 상세: `docs/HISTORY.md` 2026-04-24 (22), `docs/EMULATOR_NETWORK.md`
+- **v0.0.30 (2026-04-24 (23))**: iPhone 12 Pro USB 복구 후 S22+iPhone 실기기 LAN으로 T4b 실측 중 **Darwin errno=61 미체크 버그** 발견 (v0.0.27 코드가 Linux `errno=111`만 하드코딩, iOS에서 작동 안 함). `room_lifecycle_coordinator.dart`에 `_refusedErrnos = {111, 61}` + `_networkUnreachableErrnos = {113, 101, 65, 51}` 집합 도입. 재검증 **~10초 fast giveup PASS** (`[AWAY-RECONNECT] refused (errno=61) x2 → fast giveup`). W 일반 재연결 성공, errno=65/51 분기는 WiFi off 짧아 재현 안 됨. 부가 관찰: peer count 불일치(호스트 3/게스트 5). 상세: `docs/HISTORY.md` 2026-04-24 (23)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **errno 분기 실측 재검증 (실기기 LAN)** — v0.0.27 errno=111 빠른 포기(~10초)와 v0.0.28 errno=113/101 + connectivity_plus 연동은 **adb forward 환경에서 원천적으로 검증 불가** 확인됨(2026-04-24). iPhone 12 Pro USB 인식 복구 + S22 조합, 또는 Android 실기기 2대 WiFi LAN 조합 필요. T4b(재생 전 호스트 강제 종료)·W(게스트 WiFi off/on) 두 시나리오. 코드 변경 0.
+1. **W errno=65/51 분기 재현** — v0.0.30 Darwin 대응 추가됐으나 실행 증거 아직. WiFi 30초+ off 또는 호스트와 다른 AP 이동 시나리오. 코드 변경 0.
+2. **Peer count 불일치 버그** — WiFi off/on 중 재접속 반복으로 호스트 측 peer leave 처리 누적 추정. `P2PService._peers` 카운팅/제거 경로 조사 필요. 2026-04-24 (23) 실측 중 관찰.
 2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
 3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
 4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
