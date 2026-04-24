@@ -201,6 +201,7 @@ class RoomLifecycleCoordinator {
         result.contains(ConnectivityResult.other)) {
       return;
     }
+    debugPrint('[CONNECTIVITY] non-local event $result (isHost=$isHost) — 1s 재확인');
     // 잠시 대기 후 실제 상태 재확인 (stale/일시적 이벤트 방지)
     await Future.delayed(const Duration(seconds: 1));
     if (_disposed || _leaving) return;
@@ -208,15 +209,20 @@ class RoomLifecycleCoordinator {
     final hasLocal = current.contains(ConnectivityResult.wifi) ||
         current.contains(ConnectivityResult.ethernet) ||
         current.contains(ConnectivityResult.other);
-    if (hasLocal) return;
+    if (hasLocal) {
+      debugPrint('[CONNECTIVITY] 재확인 결과 local 살아있음 → 무시');
+      return;
+    }
     if (_disposed || _leaving) return;
     if (isHost) {
       // 호스트: WiFi 끊기면 방 유지 불가
+      debugPrint('[CONNECTIVITY] HOST WiFi off 확정 → leaveRoom');
       onLog('WiFi 연결이 끊어졌습니다');
       onSnackbar('WiFi 연결이 끊어졌습니다. 방을 나갑니다.');
       onLeaveRequested();
     } else {
       // 게스트: WiFi 복구 대기 후 재연결 시도
+      debugPrint('[CONNECTIVITY] GUEST WiFi off 확정 → _waitForWifiAndReconnect');
       onLog('WiFi 연결이 끊어졌습니다. 복구 대기 중...');
       onSnackbar('WiFi 연결이 끊어졌습니다. 복구 대기 중...');
       await _waitForWifiAndReconnect();
@@ -331,25 +337,30 @@ class RoomLifecycleCoordinator {
 
   /// 게스트: WiFi 복구 대기 (최대 15초) 후 재연결
   Future<void> _waitForWifiAndReconnect() async {
+    debugPrint('[CONNECTIVITY] _waitForWifiAndReconnect 시작 (최대 15초)');
     // 최대 15초간 WiFi 복구 대기 (3초 간격 체크)
     for (int i = 0; i < 5; i++) {
       await Future.delayed(const Duration(seconds: 3));
       if (_disposed || _leaving) return;
       final current = await Connectivity().checkConnectivity();
       if (current.contains(ConnectivityResult.wifi)) {
+        debugPrint('[CONNECTIVITY] WiFi 복구 감지 (check ${i + 1}/5) → reconnectToHost');
         onLog('WiFi 복구됨. 재연결 시도 중...');
         final reconnected = await p2p.reconnectToHost();
         if (_disposed || _leaving) return;
         if (reconnected) {
+          debugPrint('[CONNECTIVITY] reconnectToHost OK → sync 재시작');
           onLog('재연결 성공!');
           onSnackbar('재연결되었습니다');
           await onReconnectSyncRequested();
           return;
         }
+        debugPrint('[CONNECTIVITY] reconnectToHost 실패 (errno=${p2p.lastReconnectErrno}) — WiFi는 돌아왔지만 호스트 연결 불가');
         break; // WiFi는 복구됐지만 호스트 연결 실패
       }
     }
     if (_disposed || _leaving) return;
+    debugPrint('[CONNECTIVITY] WiFi 복구 실패 또는 호스트 연결 불가 → leaveRoom');
     onLog('재연결 실패. 방을 나갑니다.');
     onSnackbar('재연결할 수 없습니다');
     onLeaveRequested();

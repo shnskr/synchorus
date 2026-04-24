@@ -342,7 +342,10 @@ class P2PService {
           // #1: stale 소켓 참조 정리 (이후 sendToHost가 죽은 소켓에 쓰지 않도록)
           _hostSocket?.destroy();
           _hostSocket = null;
-          _disconnectedController.add(null);
+          // dispose() 후 지연 도착하는 Socket.onDone 가드 (closed controller에 add하면 예외)
+          if (!_disconnectedController.isClosed) {
+            _disconnectedController.add(null);
+          }
         }
       },
     );
@@ -381,7 +384,9 @@ class P2PService {
       // 호스트 소켓이 깨진 상태 → 정리 + 재연결 트리거
       _hostSocket?.destroy();
       _hostSocket = null;
-      _disconnectedController.add(null);
+      if (!_disconnectedController.isClosed) {
+        _disconnectedController.add(null);
+      }
     }
   }
 
