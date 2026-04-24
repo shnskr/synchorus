@@ -1472,6 +1472,38 @@ Bad state: Cannot add new events after calling close
 
 ---
 
+### 2026-04-24 (25) — Peer count 불일치 수정 (v0.0.32)
+
+**배경**: (23) W 시나리오 직후 관찰 — 호스트 S22 접속자 **3명**, 게스트 iPhone **5명** 표시(실제 2대). 라이프사이클과 별개의 P2P peer 관리 버그.
+
+**원인 분석** (코드 기반):
+- `Peer.id = "${socket.remoteAddress}:${socket.remotePort}"` — **socket 주소 기반**이라 게스트 재접속 시 **다른 ID로 새 peer 추가**됨 (`p2p_service.dart:217`)
+- 호스트 `_handleNewPeer`는 새 join 때 같은 이름 stale peer 정리 없이 그냥 `_peers.add` — old socket은 `socket.done` 도달하거나 heartbeat timeout(15초)까지 남음
+- 재접속 여러 번이면 stale peer 누적 → `peerCount = _peers.length` 부풀음
+- 게스트는 `welcome`에서만 절대값 받고 `peer-joined`는 `++`, `peer-left`는 `--` 증감만 — 메시지 누락 시(WiFi off 중) drift 누적
+
+**수정** (`lib/services/p2p_service.dart` + `lib/screens/room_screen.dart`):
+1. **호스트 stale peer 정리**: `_handleNewPeer` join 처리 시 같은 `name`의 기존 peer를 모두 `socket.destroy()` + `_peers.remove` + `peer-left` broadcast 후 새 peer 등록 (`p2p_service.dart:228~242`)
+2. **peer-joined/left broadcast에 `peerCount` 포함**: heartbeat timeout, `socket.done`, leave 메시지 수신, `_removeAndBroadcastLeave` 등 모든 peer-left 경로 + peer-joined 경로
+3. **게스트 절대값 우선 반영**: `room_screen.dart`에서 `peer-joined`/`peer-left` 수신 시 `peerCount` 필드 있으면 `_guestPeerCount = peerCount`, 없으면 기존 `++`/`--` fallback
+
+**효과** (논리 기반 — 실측 검증 대기):
+- 재접속 시 같은 이름 stale peer 자동 제거 → 호스트 `_peers.length` 누적 해소
+- 게스트가 연속으로 받는 broadcast마다 절대값으로 재설정 → 증감 drift 누적 해소
+- 이중 방어: 둘 중 하나라도 작동하면 카운트 일치
+
+**한계 / 다음 세션 실측 필요**:
+- 정적 검증(`flutter analyze` clean)만 완료. 실기기 2대 WiFi off/on 반복으로 peer count 일치 재현 필요
+- 이름이 동일한 두 기기가 동시 참가하는 edge case 처리는 이번 범위 밖 (stale 정리 로직이 의도치 않게 legit peer 잘라낼 가능성). MVP 기준 기기명은 보통 기기별 unique라 허용.
+
+**문서**:
+- `docs/HISTORY.md` 미해결 이슈 "Peer count 불일치" 항목 해결 체크
+- `CLAUDE.md` 최신 릴리스 v0.0.32 + 다음 재개 포인트 갱신
+
+**빌드**: v0.0.32+1 (`flutter analyze` clean)
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -1494,7 +1526,7 @@ Bad state: Cannot add new events after calling close
 - [ ] iOS 실기기에서 라이프사이클 시나리오(T1~T4) 재검증 — v0.0.25는 Android 2대로만 검증됨. iOS의 background audio 미활성 상태에서 paused 동작과 detached 이벤트 도달 여부 확인 필요
 - [x] ~~**v0.0.27 errno=111 빠른 포기 실측 검증**~~ — 2026-04-24 (23)에서 S22+iPhone 조합으로 T4b 실측. **Darwin errno=61 미체크 버그** 발견 → v0.0.30에서 수정 → 재검증 ~10초 fast giveup PASS. W(게스트 WiFi off/on)는 일반 재연결 성공, errno=65/51 분기 재현은 추가 조건 필요 (WiFi 30초+ off 또는 AP 이동)
 - [ ] W 시나리오의 errno=65/51(Darwin EHOSTUNREACH/ENETUNREACH) 분기 실행 캡처 — 2026-04-24 (23)에서 WiFi off 시간이 짧아 Socket.onDone 도달 전 WiFi 복구됨. 30초+ off 또는 호스트와 다른 AP 이동 시나리오 필요
-- [ ] Peer count 불일치 — 2026-04-24 (23) W 시나리오 직후 관찰: 호스트 3명 vs 게스트 5명 표시(실제 2대). WiFi off/on 중 재접속 반복으로 호스트 peer leave 처리 누적 추정. 라이프사이클 아닌 `P2PService._peers` 카운팅/제거 경로 조사 필요
+- [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). 실측 재검증은 다음 세션
 
 #### 해결된 이슈
 - [x] 호스트 파일 빠른 교체 시 race condition — 세션 ID + HttpClient 강제 종료 + stale 체크 (2026-04-20)
