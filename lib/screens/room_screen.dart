@@ -113,7 +113,7 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     _messageSub = p2p.onMessage.listen((message) {
       final type = message['type'] as String;
 
-      // 게스트: 참가자 입퇴장 추적
+      // 게스트: 참가자 입퇴장 추적 (peerCount는 호스트가 보낸 절대값 우선, 없으면 증감 fallback)
       if (!widget.isHost) {
         if (type == 'welcome') {
           final peerCount = message['data']?['peerCount'] as int?;
@@ -122,10 +122,24 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
           }
         } else if (type == 'peer-joined') {
           final name = message['data']?['name'] as String? ?? '참가자';
-          setState(() => _guestPeerCount++);
+          final peerCount = message['data']?['peerCount'] as int?;
+          setState(() {
+            if (peerCount != null) {
+              _guestPeerCount = peerCount;
+            } else {
+              _guestPeerCount++;
+            }
+          });
           _addLog('$name 입장');
         } else if (type == 'peer-left') {
-          setState(() => _guestPeerCount = (_guestPeerCount - 1).clamp(0, 999));
+          final peerCount = message['data']?['peerCount'] as int?;
+          setState(() {
+            if (peerCount != null) {
+              _guestPeerCount = peerCount;
+            } else {
+              _guestPeerCount = (_guestPeerCount - 1).clamp(0, 999);
+            }
+          });
           _addLog('참가자 퇴장');
         }
       }

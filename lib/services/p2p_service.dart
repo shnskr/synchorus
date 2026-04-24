@@ -150,7 +150,7 @@ class P2PService {
       _peerLeaveController.add(peer.id);
       broadcastToAll({
         'type': 'peer-left',
-        'data': {'peerId': peer.id},
+        'data': {'peerId': peer.id, 'peerCount': _peers.length},
       });
     }
   }
@@ -225,6 +225,22 @@ class P2PService {
       }
 
       peerName = message['data']['name'] ?? 'Unknown';
+
+      // 재접속 케이스: peer.id는 "ip:port"라 게스트가 새 socket으로 오면 다른 ID로
+      // 보인다. 같은 이름의 stale peer들이 heartbeat timeout(15초) 전까지 남아 카운트
+      // 누적을 일으키는 문제 방지. 이름 기반으로 먼저 정리 후 새 peer 등록.
+      final stalePeers = _peers.where((p) => p.name == peerName).toList();
+      for (final stale in stalePeers) {
+        debugPrint('[P2P] stale peer 정리 (name=$peerName): ${stale.id}');
+        try { stale.socket.destroy(); } catch (_) {}
+        _peers.remove(stale);
+        _peerLeaveController.add(stale.id);
+        broadcastToAll({
+          'type': 'peer-left',
+          'data': {'peerId': stale.id, 'peerCount': _peers.length},
+        });
+      }
+
       final peer = Peer(id: peerId, name: peerName, socket: socket);
       _peers.add(peer);
       _peerJoinController.add(peer);
@@ -239,10 +255,10 @@ class P2PService {
         },
       });
 
-      // 다른 참가자들에게 알림
+      // 다른 참가자들에게 알림 (peerCount 포함 — 게스트가 매번 절대값으로 재설정)
       broadcastToAll({
         'type': 'peer-joined',
-        'data': {'peerId': peerId, 'name': peerName},
+        'data': {'peerId': peerId, 'name': peerName, 'peerCount': _peers.length},
       }, exclude: peerId);
     });
 
@@ -253,7 +269,7 @@ class P2PService {
       _peerLeaveController.add(peerId);
       broadcastToAll({
         'type': 'peer-left',
-        'data': {'peerId': peerId},
+        'data': {'peerId': peerId, 'peerCount': _peers.length},
       });
     }).catchError((e) {
       if (!_peers.any((p) => p.id == peerId)) return;
@@ -287,7 +303,7 @@ class P2PService {
           _peerLeaveController.add(peer.id);
           broadcastToAll({
             'type': 'peer-left',
-            'data': {'peerId': peer.id},
+            'data': {'peerId': peer.id, 'peerCount': _peers.length},
           });
         }
         return;
@@ -404,7 +420,7 @@ class P2PService {
         // 다른 피어들에게도 알림 (재귀 호출이지만 해당 peer는 이미 _peers에서 빠졌으므로 안전)
         broadcastToAll({
           'type': 'peer-left',
-          'data': {'peerId': peer.id},
+          'data': {'peerId': peer.id, 'peerCount': _peers.length},
         });
       }
     }
