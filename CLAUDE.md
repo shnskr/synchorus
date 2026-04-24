@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.30** (2026-04-24) — iOS 실측에서 Darwin errno 대응 버그 발견 + 수정.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.31** (2026-04-24) — iOS 실측 과정에서 드러난 StreamController race 수정 + CONNECTIVITY 경로 로그 보강.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -22,11 +22,12 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.28: **errno=113/101 + connectivity_plus 연동** — WiFi 변경·AP 변경 시 connectivity 이벤트 늦어도 errno로 조기 감지 → `_waitForWifiAndReconnect` 즉시 트리거. 라이프사이클·연결 후보 6개 중 5개 완료. 상세: `docs/HISTORY.md` 2026-04-23 (20)
 - v0.0.29: **`RoomLifecycleCoordinator` 추출** — `lib/services/room_lifecycle_coordinator.dart` 신설. `room_screen.dart`(828줄) 라이프사이클·연결 로직 약 320줄을 별도 클래스로 분리. UI는 `ValueListenableBuilder` + 콜백만. 라이프사이클·연결 후보 6개 모두 완료, Phase 4 라이프사이클 영역 종결. 상세: `docs/HISTORY.md` 2026-04-23 (21)
 - **2026-04-24 (22)**: 실측 재검증 (S22 + Pixel 6 에뮬). T1~T4a **PASS** (coordinator 동등성). T4b/W는 adb forward의 TCP accept 가짜 성공 때문에 에뮬로는 검증 불가 → 실기기 LAN 필요. 상세: `docs/HISTORY.md` 2026-04-24 (22), `docs/EMULATOR_NETWORK.md`
-- **v0.0.30 (2026-04-24 (23))**: iPhone 12 Pro USB 복구 후 S22+iPhone 실기기 LAN으로 T4b 실측 중 **Darwin errno=61 미체크 버그** 발견 (v0.0.27 코드가 Linux `errno=111`만 하드코딩, iOS에서 작동 안 함). `room_lifecycle_coordinator.dart`에 `_refusedErrnos = {111, 61}` + `_networkUnreachableErrnos = {113, 101, 65, 51}` 집합 도입. 재검증 **~10초 fast giveup PASS** (`[AWAY-RECONNECT] refused (errno=61) x2 → fast giveup`). W 일반 재연결 성공, errno=65/51 분기는 WiFi off 짧아 재현 안 됨. 부가 관찰: peer count 불일치(호스트 3/게스트 5). 상세: `docs/HISTORY.md` 2026-04-24 (23)
+- **v0.0.30 (2026-04-24 (23))**: iPhone 12 Pro USB 복구 후 S22+iPhone 실기기 LAN으로 T4b 실측 중 **Darwin errno=61 미체크 버그** 발견 (v0.0.27 코드가 Linux `errno=111`만 하드코딩, iOS에서 작동 안 함). `room_lifecycle_coordinator.dart`에 `_refusedErrnos = {111, 61}` + `_networkUnreachableErrnos = {113, 101, 65, 51}` 집합 도입. 재검증 **~10초 fast giveup PASS**. 상세: `docs/HISTORY.md` 2026-04-24 (23)
+- **v0.0.31 (2026-04-24 (24))**: W 시나리오(iPhone WiFi 30초+ off) 재현 중 **`P2PService._disconnectedController` race 예외** 발견 (`Bad state: Cannot add new events after calling close`, p2p_service.dart:345/384) → isClosed 가드 추가. 추가로 `_handleConnectivity` / `_waitForWifiAndReconnect` 경로에 `[CONNECTIVITY]` 태그 `debugPrint` 5개 보강 (기존엔 onLog만 써서 CLI 로그에 안 찍혔음). W 시나리오 connectivity 경로 **PASS** — WiFi off 15초 대기 후 자동 leaveRoom (설계 의도대로). errno=65/51 분기는 iPhone의 connectivity_plus가 즉각 발화해 우회됨 — 별도 조건(다른 AP 이동) 필요. 상세: `docs/HISTORY.md` 2026-04-24 (24)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **W errno=65/51 분기 재현** — v0.0.30 Darwin 대응 추가됐으나 실행 증거 아직. WiFi 30초+ off 또는 호스트와 다른 AP 이동 시나리오. 코드 변경 0.
-2. **Peer count 불일치 버그** — WiFi off/on 중 재접속 반복으로 호스트 측 peer leave 처리 누적 추정. `P2PService._peers` 카운팅/제거 경로 조사 필요. 2026-04-24 (23) 실측 중 관찰.
+1. **Peer count 불일치 버그** — WiFi off/on 중 재접속 반복으로 호스트 측 peer leave 처리 누적 추정. `P2PService._peers` 카운팅/제거 경로 조사 필요. 2026-04-24 (23) 실측 중 관찰.
+2. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
 2. **레이턴시 자동 보정 정밀도 개선** — 엔진 측정값 10ms 오차 줄이기, S22/iPhone 버퍼 비대칭(17ms) 자동 보정 알고리즘 탐색. (**수동 슬라이더는 사용자 명시 요청 전까지 보류**)
 3. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
 4. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
