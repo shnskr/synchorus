@@ -1754,6 +1754,67 @@ Reconnected successfully
 
 ---
 
+### 2026-04-25 (31) — 호스트 `oboe::getTimestamp` streak 진단 로그 보강 (v0.0.37)
+
+**배경**: (30)에서 호스트 S22 `oboe::getTimestamp()` 100ms 폴링이 재생 시작 직후 26회·정지 직전 15회 연속 실패했지만, 기존 진단 로그는 streak 시작 시 1회 `LOGW`만 찍고 종료·길이·지속 시간을 안 남겼다 (`mLastTsResult` 가드). 그 결과 logcat에서는 "실패가 시작됐다"만 보이고 streak이 몇 회·몇 ms였는지, 어떤 result 코드였는지 분류 불가.
+
+**변경** (`android/app/src/main/cpp/oboe_engine.cpp:253` 주변, `getLatestTimestamp`):
+- 멤버 필드 2개 추가
+  - `int64_t mTsFailStreakCount{0};` — 현재 streak의 실패 횟수
+  - `int64_t mTsFailStreakStartMonoNs{0};` — streak 시작 monotonic ns
+- `monoNow` 계산을 lock 진입 전으로 이동 (실패 분기에서도 streak 시각 기록에 필요)
+- 실패 분기: 새 streak 시작이면 `mTsFailStreakStartMonoNs = monoNow`, `mTsFailStreakCount = 0`, 기존 `LOGW("getTimestamp streak start: %s (%d)", ...)`. 매 실패마다 `++mTsFailStreakCount`
+- 성공 분기 진입 시 직전이 실패였으면(`mLastTsResult != OK`) `LOGW("getTimestamp streak end: last=%s count=%lld duration=%lldms", ...)` 1회 추가
+
+**효과**:
+- logcat에 streak 1회당 시작/종료 1쌍 → streak 길이·지속 시간·마지막 result 코드 분류 가능
+- 폭주 방지(streak당 2줄)는 유지
+
+**1차 측정 결과** (S22 호스트 v0.0.37 + iPhone 12 Pro 게스트 v0.0.36, 3분 재생 + 끝부분 재생/정지/seek 연타):
+
+| 시각 | result | count | duration |
+|---|---|---|---|
+| 15:18:59 | `ErrorInvalidState` (-895) | 1회 | 142ms |
+| 15:22:12 | `ErrorInvalidState` (-895) | 1회 | 61ms |
+
+- result 코드 확정: **`ErrorInvalidState` (-895)** = "스트림 state가 timestamp를 줄 수 있는 상태(ACTIVE)가 아님"
+- (30)의 26회/15회 (1.5~2.6초) 긴 streak은 **재현 안 됨**. 사용자 체감 어긋남도 이번엔 없음
+- (30)과 (31)은 **같은 코드 + 같은 파일 + 같은 출력 장치(내장 스피커) + 다른 앱 없음** — 차이는 시간/시점뿐
+
+**csv 비교** (둘 다 30초 이후 안정):
+
+| 구간(s) | (30) mean / max ms | (31) mean / max ms |
+|---|---|---|
+| 30~60 | 0.47 / 1.4 | 2.03 / 3.91 |
+| 60~90 | 0.53 / 1.4 | 1.38 / 3.23 |
+| 90~120 | 0.76 / 1.8 | 1.72 / 3.91 |
+| 120~150 | 1.75 / 3.8 | 4.44 / 6.34 |
+| 150~180 | 2.74 / 4.1 | 2.84 / 6.37 |
+
+→ drift csv는 **(30)/(31) 둘 다 안정**(< 7ms). 사용자 체감 차이는 csv가 못 잡음. (게스트 외삽값이라 호스트 TS 침묵 구간이 가려짐 — (30) 결론과 일치)
+
+**csv 접근성 회복**: v0.0.36 `SyncMeasurementLogger`가 `getExternalStorageDirectory()`를 우선 시도하도록 바뀌어, **S22 dual-app(user 95) 환경에서도** `/storage/emulated/95/Android/data/com.synchorus.synchorus/files/sync_log_*.csv`로 떨어져 `adb pull` 가능. (30) raw csv는 v0.0.36 이전 internal `/data/user/95/...`라 영구 접근 불가.
+
+**잠정 결론**: 같은 코드/입력에서 streak 길이가 2회 → 26회로 점프 = **시스템 레벨 비결정성**. OS scheduler / AAudio HAL 내부 부하 / thermal 등이 트리거 후보지만 단발 측정으론 못 잡음.
+
+**2차 진단 보강** (이번 세션 후속):
+- streak start 로그에 **stream state**(`oboe::convertToText(mStream->getState())`) + **xrun 누적값**(`mStream->getXRunCount()`) + **wall clock ms** 추가
+- streak end 로그에 종료 시 state + **xrun delta** + wall clock ms 추가
+- 신규 멤버 `int32_t mTsFailStreakStartXRun{-1};`
+- 다음 긴 streak 재발 시 분류 가능: `ErrorInvalidState`가 어떤 state(STARTING / PAUSING / STOPPING / DISCONNECTED)에서 발생했는지, xrun underrun이 동반됐는지, Dart 측 라이프사이클·재생 컨트롤 호출과 시각 매칭
+
+**다음 단계 (A 방향, 사용자 합의)**:
+- 추가 보강만 해두고 **다음 자연 재발 대기**. 같은 조건 강제 재현 시도 부담 대비 ROI 낮다고 판단
+- 재발 시 logcat 데이터로 원인 분류 → 완화 방향(보간 obs / state 마스킹 신호 / 버퍼 점검) 결정
+
+**남은 위험**:
+- 자연 재발이 드물면 분류 데이터 누적까지 시간 소요
+- result/state/xrun으로도 근본 원인 단정 안 되면 Perfetto/atrace 시스템 레벨 trace 필요
+
+**변경 범위**: `android/app/src/main/cpp/oboe_engine.cpp` (1차 + 2차 진단 보강), `pubspec.yaml`(0.0.36→0.0.37). Dart 변경 없음, iOS 변경 없음(이슈는 Android 호스트만 관측).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

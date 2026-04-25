@@ -265,6 +265,8 @@ public:
         clock_gettime(CLOCK_MONOTONIC, &monoTs);
         const int64_t wallNow =
             static_cast<int64_t>(wallTs.tv_sec) * 1000000000LL + wallTs.tv_nsec;
+        const int64_t monoNow =
+            static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
 
         std::lock_guard<std::mutex> lock(mLock);
         if (!mStream) {
@@ -280,19 +282,41 @@ public:
             CLOCK_MONOTONIC, &framePos, &timeNs);
         if (result != oboe::Result::OK) {
             if (mLastTsResult == oboe::Result::OK) {
-                LOGW("getTimestamp failed: %s (%d)",
-                     oboe::convertToText(result), static_cast<int>(result));
+                auto xrunRes = mStream->getXRunCount();
+                mTsFailStreakStartXRun = xrunRes ? xrunRes.value() : -1;
+                mTsFailStreakStartMonoNs = monoNow;
+                mTsFailStreakCount = 0;
+                LOGW("getTimestamp streak start: %s (%d) state=%s xrun=%d wallMs=%lld",
+                     oboe::convertToText(result), static_cast<int>(result),
+                     oboe::convertToText(mStream->getState()),
+                     mTsFailStreakStartXRun,
+                     static_cast<long long>(wallNow / 1000000LL));
             }
+            ++mTsFailStreakCount;
             mLastTsResult = result;
             *outFramePos = -1;
             *outTimeNs = -1;
             *outWallAtFramePosNs = wallNow;
             return false;
         }
+        if (mLastTsResult != oboe::Result::OK) {
+            auto xrunEndRes = mStream->getXRunCount();
+            int32_t xrunEnd = xrunEndRes ? xrunEndRes.value() : -1;
+            int32_t xrunDelta =
+                (xrunEnd >= 0 && mTsFailStreakStartXRun >= 0)
+                    ? xrunEnd - mTsFailStreakStartXRun
+                    : -1;
+            const int64_t durMs =
+                (monoNow - mTsFailStreakStartMonoNs) / 1000000LL;
+            LOGW("getTimestamp streak end: last=%s count=%lld duration=%lldms state=%s xrunDelta=%d wallMs=%lld",
+                 oboe::convertToText(mLastTsResult),
+                 static_cast<long long>(mTsFailStreakCount),
+                 static_cast<long long>(durMs),
+                 oboe::convertToText(mStream->getState()),
+                 xrunDelta,
+                 static_cast<long long>(wallNow / 1000000LL));
+        }
         mLastTsResult = oboe::Result::OK;
-
-        const int64_t monoNow =
-            static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
 
         // HAL framePos는 스트림 rate(예: 48kHz)로 카운트되지만
         // VF/totalFrames/sampleRate는 파일 rate(예: 44.1kHz).
@@ -392,9 +416,15 @@ private:
     std::atomic<bool> mMuted{false};
     std::mutex mLock;
 
-    // getTimestamp 실패 원인 진단용: 연속 실패 구간의 첫 회에만 oboe Result를 로그.
-    // logcat 폭주 방지 + 원인 코드(xrun / invalid state 등) 분류.
+    // getTimestamp 실패 원인 진단용. logcat 폭주를 막기 위해 연속 실패(streak)
+    // 시작 시 1회, 종료 시 1회만 로그. 시작 로그: result + stream state + xrun.
+    // 종료 로그: 길이 + 지속 시간 + 마지막 result + 종료 시 state + xrun delta.
+    // 같은 코드/입력에서 streak 길이가 비결정적이라(HISTORY (30) vs (31)),
+    // 다음 긴 streak 발생 시 시스템 상태와 매칭하기 위한 풍부한 컨텍스트.
     oboe::Result mLastTsResult{oboe::Result::OK};
+    int64_t mTsFailStreakCount{0};
+    int64_t mTsFailStreakStartMonoNs{0};
+    int32_t mTsFailStreakStartXRun{-1};
 
     // ---- 디코딩된 오디오 버퍼 ----
     std::vector<int16_t> mDecodedData;

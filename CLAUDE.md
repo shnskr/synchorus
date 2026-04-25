@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.35** (2026-04-24) — 게스트 재연결 경로 직렬화(`_reconnectInProgress` flag) → 재연결 2회·재동기화 2회 중복 제거, W 시나리오 3회 반복 PASS.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.37** (2026-04-25) — 호스트 `oboe::getTimestamp` streak 진단 로그 보강 (start/end + state + xrun delta + wall ms). 같은 코드/입력에서도 streak 길이 비결정적이라 자연 재발 대기 후 풍부한 컨텍스트로 분류 (A 방향).
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -28,17 +28,20 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.33 (2026-04-24 (26))**: Orphan **`com.synchorus/audio_latency` MethodChannel** 제거 (Android MainActivity.kt + iOS SceneDelegate.swift). v2 시절 레이턴시 측정 채널이 v3 전환 후 Dart 호출 0건 상태로 남아있어 dead code 40여 줄 정리. 기능 동일. 상세: `docs/HISTORY.md` 2026-04-24 (26)
 - **v0.0.34 (2026-04-24 (27))**: **게스트 재연결 race 수정** — 짧은 off(5~8초) 시 `_handleDisconnected` + `_waitForWifiAndReconnect` 두 경로가 동시에 `reconnectToHost` 성공 → 나중 경로가 `_hostSocket?.destroy()`로 먼저 경로의 새 socket 파괴 → old socket의 onDone이 **교체된 새 `_hostSocket`까지 destroy + `_disconnectedController.add`** → 무한 loop. `p2p_service.dart:355` onDone에 `identical(_hostSocket, socket)` 가드 추가. 실측 PASS — `Stale host onDone ignored` 로그로 가드 발동 확인. **v0.0.32 peer count 수정도 같이 실측 PASS** (비행기 모드 반복 중 양쪽 2명 유지). 상세: `docs/HISTORY.md` 2026-04-24 (27)
 - **v0.0.35 (2026-04-24 (28))**: **재연결 경로 직렬화** — v0.0.34는 loop만 차단했지 race 자체는 남아 재연결 2번 + 재동기화 2번 호출 → 1번은 "재동기화 실패" 스낵바. `room_lifecycle_coordinator.dart`에 `_reconnectInProgress` flag 추가해 `_handleDisconnected` + `_waitForWifiAndReconnect` 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip. `_handleDisconnected`는 `finally` 대신 명시적 flag 해제로 errno 분기→`_waitForWifiAndReconnect` 이어받기 지원. 실측(3 사이클): Reconnect 7→3, 재동기화 실패 0, `[RECONNECT] _handleDisconnected skip` 3회 발동 확인. 상세: `docs/HISTORY.md` 2026-04-24 (28)
+- **v0.0.36 (2026-04-24, commit 392b1c8)**: 묶음 보강 — (1) `_handleDisconnected` flag leak 방지(try/finally + errno 분기 try 밖 배치), (2) `oboe::getTimestamp` 실패 1차 LOGW 추가(streak 첫 회만), (3) `SyncMeasurementLogger` Android 외부 저장소(`getExternalStorageDirectory()`) 우선 사용 → S22 dual-app(user 95)에서도 csv `adb pull` 가능. HISTORY 별도 항목 없음(commit 본문 참고).
+- **v0.0.37 (2026-04-25 (31))**: **호스트 `oboe::getTimestamp` streak 진단 2차 보강 + 1차 측정**. 멤버 `mTsFailStreakCount`, `mTsFailStreakStartMonoNs`, `mTsFailStreakStartXRun` 추가. start 로그에 result + state + xrun + wallMs, end 로그에 last + count + duration + state + xrunDelta + wallMs. **1차 측정 결과**: result 코드 `ErrorInvalidState` (-895) 확정, 단 (30)의 26·15회 긴 streak 미재현 (1·1회, ≤142ms). drift csv는 두 측정 모두 안정(<7ms) → 같은 코드/입력에서 차이 = 시스템 레벨 비결정성. **A 방향**: 자연 재발 대기 + 풍부한 로그로 분류 (사용자 합의). 상세: `docs/HISTORY.md` 2026-04-25 (31)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **호스트 `oboe::getTimestamp` 간헐적 실패 — 체감 싱크 깨짐 원인** (2026-04-24 (30) 신규). S22 3분 실측에서 재생 시작 직후 26회·정지 직전 15회 연속 실패 관측. 100ms 폴링 기준 1.5~2.6초 동안 호스트가 재생 위치를 못 읽어 게스트가 외삽으로 따라가다 최대 1.5초치 실재생 어긋남. drift-report 수치는 게스트 외삽값이라 이 구간 못 잡음. 시작점: `oboe_engine.cpp:278` 근처 실패 시 `AAudio_convertResultToText` 로그 추가 → 원인 분류.
+1. **호스트 `oboe::getTimestamp` 간헐 실패 — 체감 싱크 깨짐 원인 (자연 재발 대기 모드)**. (30) 발견 → v0.0.36 진단 로그 1차 → v0.0.37 진단 로그 2차 보강(state + xrun delta + wallMs) + 1차 측정에선 긴 streak 미재현. 같은 코드/같은 파일/같은 출력 장치인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그에서 `streak start` / `streak end` 짝짓기 → state·xrun·wallMs를 Dart 라이프사이클·재생 컨트롤 호출 시각과 매칭해 분류. 분류 결과로 완화 방향(보간 obs / state 마스킹 신호 / 버퍼 점검) 결정.
 2. **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency` ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반. iOS는 이미 측정 중이지만 Dart drift 공식에 미반영. **주의**: Apple Forum에서 outputLatency가 BT 실제 지연을 과소보고한다는 보고 있음 → Dart 반영해도 효과 제한적일 수 있음. 검증부터.
 3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
-4. **Logger csv 경로 접근성** (2026-04-24 (30) 신규). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/` 같은 multi-user 공간이면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. 외부 앱 전용 저장소(`/sdcard/Android/data/.../files/`)로 저장 옵션 추가 검토. 우선순위 낮음.
-5. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-6. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-7. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+4. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+5. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+6. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
 
-**완료됨 (이번 세션)**: v0.0.4 buf 17ms 비대칭이 drift에 영향 주는지 검증 → v3 framePos 폐루프가 완전 흡수 확인(\|drift\| < 5ms, p95 3.78ms). (2026-04-24 (30))
+**완료됨 (이번 세션, 2026-04-25)**:
+- v0.0.37 호스트 `oboe::getTimestamp` streak 진단 로그 2차 보강 (state + xrun delta + wallMs) + S22 1차 측정 PASS (긴 streak 미재현, 자연 재발 대기로 전환).
+- S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화. (이전 세션 v0.0.36 logger external storage fallback이 dual-app에서도 작동 확인.)
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
 
