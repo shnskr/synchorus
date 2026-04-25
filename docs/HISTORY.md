@@ -2019,6 +2019,39 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (35) — `discovery_service` nsd 마이그레이션 (v0.0.41) — 양방향 검색 PASS
+
+**배경**: (33-3) 발견한 iPhone 호스트 시 P2P discovery 게스트 검색·접속 안 되는 버그의 본격 fix. 진단 결과(IP 직접 입력은 OK = TCP 정상, UDP broadcast만 막힘) → iOS 14+ 보안상 raw multicast/broadcast 송신은 `com.apple.developer.networking.multicast` entitlement 필요(Apple에 사유 신청, 1~2주 승인). entitlement 신청 없이 영구 fix하려면 시스템 mDNS(Bonjour) 사용해야 함.
+
+**변경**:
+- **`pubspec.yaml`**: `nsd: ^5.0.1` 의존성 추가 (iOS NSNetService + Android NsdManager wrap)
+- **`lib/services/discovery_service.dart`** 전체 재작성:
+  - 기존: `RawDatagramSocket.bind(anyIPv4, 0)` + `broadcastEnabled = true` + 2초마다 `255.255.255.255:41234` send / 게스트는 41234 listen
+  - 신규: 호스트 `nsd.register(Service(name, type: '_synchorus._tcp', port, txt))` / 게스트 `nsd.startDiscovery(serviceType, ipLookupType: any)` + `addServiceListener`
+  - **인터페이스(`startBroadcast`/`discoverHosts`/`stop`) 호환 유지** → 호출부(`home_screen.dart`, `room_screen.dart`) 수정 0
+  - `roomCode`는 mDNS TXT records로 전달 (`Map<String, Uint8List>` 형태로 utf8 인코딩)
+  - 서비스 발견 시 IPv4 우선 (link-local IPv6는 일부 환경에서 connect 불안정)
+  - `stop()`은 unregister + stopDiscovery + StreamController close 모두 처리. async Future<void>로 변경 (호출부 fire-and-forget)
+- **iOS Info.plist**: `NSBonjourServices=_synchorus._tcp` 이미 등록되어 있어 추가 변경 0 (v0.0.41 시점에야 실제로 사용되기 시작)
+- **Android Manifest**: `CHANGE_WIFI_MULTICAST_STATE` 이미 등록되어 있어 추가 변경 0
+
+**검증** (이번 세션 사용자 보고):
+- iPhone 호스트 + Android 게스트 검색: **PASS** (이전 안 됐던 방향 fix)
+- Android 호스트 + iPhone 게스트 검색: **PASS** (회귀 없음)
+
+**효과**:
+- multicast entitlement 신청 없이 영구 fix
+- 표준 Bonjour 패턴이라 mDNSResponder가 시스템 단위로 처리 → 권한·entitlement 부담 ↓
+- iOS의 NSLocalNetworkUsageDescription 권한 다이얼로그가 nsd discovery 시 명확히 트리거 (이전 raw UDP는 트리거 비결정적)
+
+**남은 한계**:
+- mDNS는 같은 LAN segment 내에서만 작동 (라우터 분리 시 작동 안 함). 단 이전 raw UDP broadcast도 같은 한계라 회귀 아님
+- 첫 discovery 시작에 ~수백ms 지연 가능 (mDNS query → 응답 대기). 사용자 체감엔 영향 적음
+
+**변경 범위**: `pubspec.yaml`(nsd 추가, 0.0.40→0.0.41), `lib/services/discovery_service.dart`(전체 재작성). 호출부·iOS Info.plist·Android Manifest·native code 변경 0.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

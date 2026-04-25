@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.40** (2026-04-25) — iOS 파일 선택 크래시 fix(`NSAppleMusicUsageDescription` Info.plist 추가) + `FileType.custom + allowedExtensions`로 변경해 iOS에서 Files/iCloud/On My iPhone 등 모든 source 표시(이전 `FileType.audio`는 Music 앱 라이브러리만 + 대부분 DRM이라 사실상 무용). v0.0.38 BT outputLatency 베이크인 검증 PASS는 그대로 유지.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.41** (2026-04-25) — `discovery_service`를 raw UDP broadcast → nsd 패키지(시스템 mDNS/Bonjour) 마이그레이션. iOS multicast entitlement 신청 없이 양방향(iPhone 호스트 ↔ Android 게스트) 검색 PASS. v0.0.38 BT outputLatency 베이크인 + v0.0.40 iOS 파일 선택 fix 그대로 유지.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -32,10 +32,10 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.37 (2026-04-25 (31))**: **호스트 `oboe::getTimestamp` streak 진단 2차 보강 + 1차 측정**. 멤버 `mTsFailStreakCount`, `mTsFailStreakStartMonoNs`, `mTsFailStreakStartXRun` 추가. start 로그에 result + state + xrun + wallMs, end 로그에 last + count + duration + state + xrunDelta + wallMs. **1차 측정 결과**: result 코드 `ErrorInvalidState` (-895) 확정, 단 (30)의 26·15회 긴 streak 미재현 (1·1회, ≤142ms). drift csv는 두 측정 모두 안정(<7ms) → 같은 코드/입력에서 차이 = 시스템 레벨 비결정성. **A 방향**: 자연 재발 대기 + 풍부한 로그로 분류 (사용자 합의). 상세: `docs/HISTORY.md` 2026-04-25 (31)
 - **v0.0.38 (2026-04-25 (32))**: **drift 공식에 양쪽 outputLatency 반영 + anchor 베이크인 (BT 비대칭 보정)**. (a) baseline (BT 게스트, 3분)에서 csv <7ms 안정인데 음향 ~300ms 어긋남 = framePos가 BT codec/DAC 안 잡는 구조적 한계 발견. (b) 1차 변경(공식만 보정): csv -275ms 일관 + seek 0회 무한 anchor reset 발견. (b') anchor establishment에 outLatDelta 베이크인 (`_anchoredOutLatDeltaMs` 멤버, `_recomputeDrift`는 변화분만). **검증 PASS** (b'-1) BT: csv |d| <5ms + 사용자 체감 처음 40초 약간 + 이후 정확, (b'-2) 양쪽 내장: (30)/(31)와 동등 거동(<5ms, seek_count 0회). 처음 40초 잔여는 iOS outputLatency 워밍업 과소보고(Apple Forum #679274), 옵션 A(안정화 대기)·B(사전 워밍업)·C(acoustic loopback)·D(UX 명시)로 추가 개선 가능. 상세: `docs/HISTORY.md` 2026-04-25 (32)
 - **v0.0.39 + v0.0.40 (2026-04-25 (34))**: **iOS 파일 선택 크래시 + DRM 한계 발견·fix**. (33-3) 진단 중 iPhone 호스트 파일 선택 시 즉시 크래시 발견 → file_picker 8.x가 `FileType.audio`일 때 `MPMediaPickerController` 사용 + `NSAppleMusicUsageDescription` Info.plist 누락이라 SIGABRT. **v0.0.39 fix**: Info.plist에 `NSAppleMusicUsageDescription` 추가. 이후 picker는 열렸지만 Music 라이브러리만 보여줘 비어 보임 + Apple Music 구독곡은 FairPlay DRM이라 어차피 우리 엔진 디코드 불가. **v0.0.40 fix**: `pickFiles`를 `FileType.custom + allowedExtensions: ['mp3','m4a','wav','aac','flac','ogg']`로 변경 → iOS는 `UIDocumentPickerViewController` 사용 → Files/iCloud/On My iPhone 모든 source 표시. Android는 SAF mime 필터로 동일 동작, 회귀 없음. 상세: `docs/HISTORY.md` 2026-04-25 (34)
+- **v0.0.41 (2026-04-25 (35))**: **`discovery_service` nsd 마이그레이션 — 양방향 검색 PASS**. (33-3) 본격 fix. raw UDP `255.255.255.255` broadcast(iOS multicast entitlement 필요) → nsd 패키지(시스템 mDNS Bonjour, NSNetService + NsdManager). 인터페이스(`startBroadcast`/`discoverHosts`/`stop`) 호환 유지로 호출부 수정 0. roomCode는 mDNS TXT records로 전달. iOS Info.plist `NSBonjourServices=_synchorus._tcp` 이미 등록되어 추가 변경 0. **검증**: iPhone 호스트 + Android 게스트, Android 호스트 + iPhone 게스트 양방향 PASS. multicast entitlement 신청(1~2주) 우회. 상세: `docs/HISTORY.md` 2026-04-25 (35)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **iOS 호스트 시 P2P discovery 게스트 검색·접속 안 됨 — 신규 발견 (33-3)**. Android 호스트 + iPhone 게스트는 정상, 반대 방향만 안 됨. 코드는 raw UDP `255.255.255.255` broadcast(`discovery_service.dart:40`) — iOS 14+ 보안상 raw multicast/broadcast 송신엔 `com.apple.developer.networking.multicast` entitlement 필요할 수 있음. iOS entitlements 파일 자체 부재. Info.plist `NSBonjourServices=_synchorus._tcp` 등록은 있는데 코드는 Bonjour 안 씀(불일치). 권한(NSLocalNetworkUsageDescription) 토글은 사용자가 켰음. **다음 액션**: iPhone 호스트 IP를 Android 게스트가 "IP 직접 입력"(`home_screen.dart:295`)으로 시도 → ServerSocket TCP는 살아있는지 진단. 됨/안됨에 따라 nsd 패키지 마이그레이션(A) / multicast entitlement 신청(B) / 임시 IP 우회 UX 보강(C) 결정. 상세: `docs/HISTORY.md` 2026-04-25 (33-3)
-2. **BT 워밍업 잔여 개선 — (32) 후속, 외부 자료 조사 완료 (33-2)**. 정지/재생마다 anchor reset되어 처음 ~40초 잔여 패턴 반복. iOS는 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) / B(rolling median) / C(acoustic loopback) / D(UX만)로 분기. **Android 게스트 BT는 Oboe `calculateLatencyMillis()`가 codec/radio 안 잡아서 게이팅만으론 부족 → C가 거의 유일** (Oboe wiki 명시). 결정 필요. 상세: `docs/HISTORY.md` 2026-04-25 (33-2)
+1. **BT 워밍업 잔여 개선 — (32) 후속, 외부 자료 조사 완료 (33-2)**. 정지/재생마다 anchor reset되어 처음 ~40초 잔여 패턴 반복. iOS는 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) / B(rolling median) / C(acoustic loopback) / D(UX만)로 분기. **Android 게스트 BT는 Oboe `calculateLatencyMillis()`가 codec/radio 안 잡아서 게이팅만으론 부족 → C가 거의 유일** (Oboe wiki 명시). 결정 필요. 상세: `docs/HISTORY.md` 2026-04-25 (33-2)
 2. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기 모드** ((30) 발견 → v0.0.36 진단 1차 → v0.0.37 진단 2차 + 1차 측정 재현 X). 같은 코드/같은 파일/같은 출력인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류 → 완화 방향 결정(보간 obs / state 마스킹 / 버퍼 점검).
 3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
 4. **acoustic loopback 1회 calibration 설계** (선택 — 1번 검증에서 잔여 100ms+ 시 우선순위 ↑). OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 출력 녹음 → round-trip 측정. 마이크 권한 + 정숙 환경 + 사용자 트리거 필요. AOSP CTS 표준 방식.
@@ -46,7 +46,9 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 **완료됨 (이번 세션, 2026-04-25)**:
 - v0.0.37 호스트 `oboe::getTimestamp` streak 진단 로그 2차 보강 (state + xrun delta + wallMs) + S22 1차 측정 PASS (긴 streak 미재현, 자연 재발 대기로 전환).
 - v0.0.38 drift 공식 outputLatency 반영 + anchor 베이크인. **검증 PASS** (BT 게스트 + 양쪽 내장 회귀 모두). seek_count 0회로 부드럽게 동작. 처음 40초 BT 워밍업 잔여만 남음.
-- (33) `_resetDriftState`에 `_anchoredOutLatDeltaMs = 0` 한 줄 추가 (안전성). BT 워밍업 잔여 외부 자료 조사 완료(옵션 A/B/C/D 평가). iOS 호스트 P2P discovery 버그 신규 발견(다음 세션 1번 우선).
+- (33) `_resetDriftState`에 `_anchoredOutLatDeltaMs = 0` 한 줄 추가 (안전성). BT 워밍업 잔여 외부 자료 조사 완료(옵션 A/B/C/D 평가).
+- v0.0.39 + v0.0.40 iOS 파일 선택 크래시 fix (`NSAppleMusicUsageDescription`) + `FileType.custom + allowedExtensions`로 Files/iCloud 모든 source 표시.
+- v0.0.41 `discovery_service` nsd 마이그레이션 — iPhone 호스트 P2P discovery 양방향 검색 **PASS** (multicast entitlement 신청 우회).
 - S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
