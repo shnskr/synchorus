@@ -2093,6 +2093,51 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (37) — Android 게스트 BT 시나리오 측정 — (33-2) 가설 부분 반증 (문서 only)
+
+**배경**: (33-2)에서 "Android 게스트 BT는 Oboe `calculateLatencyMillis()`가 BT codec/radio 단계 거의 안 잡아서 게이팅(옵션 A)만으론 부족 → acoustic loopback(C)이 거의 유일"이라고 추정. v0.0.42 검증 후 미관측 케이스(iPhone 호스트 내장 + S22 게스트 갤럭시 버즈 BT) 측정해 가설 검증.
+
+**시나리오**: iPhone(172.30.1.93, 호스트, 내장 스피커) + S22(172.30.1.25, 게스트, 갤럭시 버즈 BT). 2분 재생 + 끝부분 재생/정지/seek 연타.
+
+**S22 logcat (`OboeEngine:W`) — 11회 streak**:
+
+| 시각 | streak | 비고 |
+|---|---|---|
+| 17:46:17 | **6회/507ms** | 재생 시작 직후, anchor establish 시점 |
+| 17:48:23 ~ 17:49:09 | 1회/26~79ms × 6번 | 정상 짧은 streak (state=Started, xrun=0) |
+| 17:49:53 | 8회/729ms | 끝부분 연타 시작 |
+| 17:49:58 | 3회/263ms | 연타 |
+| 17:50:08 | 4회/327ms | 연타 |
+
+**사용자 체감 보고**: "짧게는 바로, 길게는 2초 정도 후에 싱크가 맞기 시작해서 쭉 잘됐어. 재생/정지 연타나 seek 연타 해봤는데도 안정."
+
+**결과 분석**:
+- **(30) 같은 비정상 긴 streak 미재현** — 모두 `ErrorInvalidState + state=Started + xrun=0` 정상 stream 전환만
+- 첫 streak(507ms, 6회)이 사용자 체감 "~2초 정착"의 일부 — 정착 후 음향 안정
+- 연타 구간 streak(>200ms)도 사용자 행동에 따른 정상 거동 (정지/재시작/seek가 stream 일시 전환 유발), 음향 어긋남 없었음
+- 호스트가 iPhone이라 drift csv는 iPhone sandbox 안에 있음 — adb 직접 pull 불가, 본 분석엔 제외 (사용자 체감 + S22 logcat이 1차 데이터)
+
+**(33-2) 가설 부분 반증**:
+- "Android 게스트 BT는 acoustic loopback 거의 유일"이라는 가설이 **Galaxy + 갤럭시 버즈 조합에선 반증**됨. OS 보고가 충분히 정확해 v0.0.38 anchor 베이크인만으로 사용자 체감 만족 (~2초 정착, 이후 안정)
+- 가능 원인: Samsung 자체 BT 코덱 또는 Samsung HAL이 BT latency를 Oboe wiki 일반론보다 더 정확히 보고. Galaxy 생태계 통합 효과
+- iPhone+버즈(처음 40초 잔여)와 대비: **Android 게스트 정착 시간이 더 짧음**. iOS의 워밍업 50~60ms 과소보고가 베이크인에 더 큰 영향을 줬을 가능성
+- 일반화 보류: 다른 BT 기기(일반 BT 스피커, Pixel + AirPods 등) 미검증
+
+**남은 BT 케이스** (검증 안 됨):
+- AirPods on iPhone (W1/H1 통합 — Apple Forum 데이터로 추정 가능, 안정화 후 정확)
+- 일반 BT 스피커 (예: JBL) — 코덱 의존성 클 것
+- AirPods on Android (반대 통합)
+- aptX/LDAC 사용 시
+
+**의미**:
+- v0.0.38 anchor 베이크인이 OS 보고 정확도가 충분한 케이스(Galaxy + 버즈)에선 acoustic loopback 없이도 충분
+- (33-2) 옵션 C(acoustic loopback) 우선순위 ↓. iPhone+버즈 같은 OS 보고 부정확 케이스는 옵션 A(워밍업 게이팅)만으로도 잡힐 가능성 ↑
+- BT 워밍업 잔여 fix는 **iPhone+버즈 시나리오에 한정한 옵션 A 시도가 가성비 1순위**
+
+**변경 범위**: 없음 (측정·문서). v0.0.42 그대로.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

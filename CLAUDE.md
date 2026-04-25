@@ -36,7 +36,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.42 (2026-04-25 (36))**: **mDNS stale 방 fix — found/lost 즉시 반영 PASS**. v0.0.41 후 사용자 발견: 같은 호스트에서 방 만들기 → 나가기 반복 시 게스트 검색 화면에 stale 방 누적. 원인 두 가지 — 호스트 측 `discovery.stop()`이 await 없이 호출되어 ref.invalidate 전에 unregister 미완료 + 게스트 측 `ServiceStatus.lost` 미처리. **fix**: `room_screen.dart` `await discovery.stop()` + `discovery_service.dart`에 `_knownHosts` 맵 + `Stream<String> hostLeftStream` getter + lost 분기 emit + `home_screen.dart`이 구독해서 removeWhere. 검증: 한쪽 검색 켜놓고 다른쪽 방 만들었다 나갔다 반복 → 즉시 생겼다 사라짐 PASS. 상세: `docs/HISTORY.md` 2026-04-25 (36)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **BT 워밍업 잔여 개선 — (32) 후속, 외부 자료 조사 완료 (33-2)**. 정지/재생마다 anchor reset되어 처음 ~40초 잔여 패턴 반복. iOS는 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) / B(rolling median) / C(acoustic loopback) / D(UX만)로 분기. **Android 게스트 BT는 Oboe `calculateLatencyMillis()`가 codec/radio 안 잡아서 게이팅만으론 부족 → C가 거의 유일** (Oboe wiki 명시). 결정 필요. 상세: `docs/HISTORY.md` 2026-04-25 (33-2)
+1. **BT 워밍업 잔여 개선 — (32) 후속, (33-2) 조사 + (37) Android 게스트 측정**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴 반복(정지/재생마다 anchor reset). **Android 게스트 BT(Galaxy+버즈)는 ~2초 정착으로 의외로 양호 — (33-2)의 "Android는 acoustic loopback 거의 유일" 가설 부분 반증** (Samsung HAL 정확 보고 추정). 우선순위 1순위는 **iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅)** 시도. C(acoustic loopback)는 우선순위 ↓. D(UX만)도 가능. 상세: `docs/HISTORY.md` 2026-04-25 (33-2), (37)
 2. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기 모드** ((30) 발견 → v0.0.36 진단 1차 → v0.0.37 진단 2차 + 1차 측정 재현 X). 같은 코드/같은 파일/같은 출력인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류 → 완화 방향 결정(보간 obs / state 마스킹 / 버퍼 점검).
 3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
 4. **acoustic loopback 1회 calibration 설계** (선택 — 1번 검증에서 잔여 100ms+ 시 우선순위 ↑). OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 출력 녹음 → round-trip 측정. 마이크 권한 + 정숙 환경 + 사용자 트리거 필요. AOSP CTS 표준 방식.
@@ -51,6 +51,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.39 + v0.0.40 iOS 파일 선택 크래시 fix (`NSAppleMusicUsageDescription`) + `FileType.custom + allowedExtensions`로 Files/iCloud 모든 source 표시.
 - v0.0.41 `discovery_service` nsd 마이그레이션 — iPhone 호스트 P2P discovery 양방향 검색 **PASS** (multicast entitlement 신청 우회).
 - v0.0.42 mDNS stale 방 fix — 호스트 await stop + 게스트 hostLeftStream lost 처리. found/lost 즉시 반영 PASS.
+- (37) Android 게스트 BT 시나리오 측정 — Galaxy+버즈는 ~2초 정착, (33-2) 가설 부분 반증.
 - S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
