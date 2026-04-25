@@ -28,6 +28,11 @@ class AudioObs {
   /// 호스트 재생 상태.
   final bool playing;
 
+  /// 호스트 출력 라우트 latency (ms). 게스트가 자기 outputLatency와 함께
+  /// drift 공식에서 빼주면 비대칭(특히 한쪽 BT) 보정 가능. 0이면 보고 불가/무효.
+  /// 호환성: 구버전 호스트는 이 필드 없음 → fromJson에서 0 fallback.
+  final double hostOutputLatencyMs;
+
   const AudioObs({
     required this.seq,
     required this.hostTimeMs,
@@ -36,6 +41,7 @@ class AudioObs {
     required this.virtualFrame,
     required this.sampleRate,
     required this.playing,
+    this.hostOutputLatencyMs = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -47,6 +53,7 @@ class AudioObs {
         'virtualFrame': virtualFrame,
         'sampleRate': sampleRate,
         'playing': playing,
+        'hostOutputLatencyMs': hostOutputLatencyMs,
       };
 
   factory AudioObs.fromJson(Map<String, dynamic> m) => AudioObs(
@@ -57,6 +64,8 @@ class AudioObs {
         virtualFrame: (m['virtualFrame'] as num).toInt(),
         sampleRate: (m['sampleRate'] as num?)?.toInt() ?? 0,
         playing: m['playing'] as bool,
+        hostOutputLatencyMs:
+            (m['hostOutputLatencyMs'] as num?)?.toDouble() ?? 0,
       );
 
   String encodeLine() => '${jsonEncode(toJson())}\n';

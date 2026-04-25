@@ -64,6 +64,10 @@ class NativeAudioSyncService {
   int? _anchorHostFrame;
   int? _anchorGuestFrame;
   double? _offsetAtAnchor; // 앵커 설정 시점의 filteredOffsetMs
+  // v0.0.38: 앵커 설정 시점의 outputLatency 비대칭(게스트-호스트, ms).
+  // anchor의 콘텐츠 정렬 seek에 이 값을 베이크인 → framePos 기준 drift는 0
+  // 으로 시작. 이후 _recomputeDrift는 (현재 - 앵커) 변화분만 보정.
+  double _anchoredOutLatDeltaMs = 0;
   // 최신 drift
   double? _latestDriftMs;
   // ignore: unused_field
@@ -508,6 +512,7 @@ class NativeAudioSyncService {
       virtualFrame: ts.virtualFrame,
       sampleRate: ts.sampleRate,
       playing: _playing,
+      hostOutputLatencyMs: ts.safeOutputLatencyMs,
     );
 
     _p2p.broadcastToAll(obs.toJson());
@@ -946,7 +951,9 @@ class NativeAudioSyncService {
     final elapsedMs = (hostWallNow - obs.hostTimeMs).toDouble();
     final expectedPositionMs = obs.virtualFrame / hostFpMs + elapsedMs;
     final guestPositionMs = ts.virtualFrame / _framesPerMs;
-    final driftMs = guestPositionMs - expectedPositionMs;
+    // _recomputeDrift와 동일하게 outputLatency 비대칭 보정 (v0.0.38).
+    final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final driftMs = guestPositionMs - expectedPositionMs - outLatDelta;
 
     // 500ms마다 drift report (fallback mode)
     if (ts.wallMs - _lastDriftReportMs >= 500) {
@@ -1001,7 +1008,12 @@ class NativeAudioSyncService {
     final hostContentFrame = obs.virtualFrame +
         ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
     final hostContentMs = hostContentFrame / hostFpMs;
-    final targetGuestVf = (hostContentMs * _framesPerMs).round();
+    // v0.0.38: outputLatency 비대칭을 anchor seek에 베이크인.
+    // 게스트가 BT(+200ms), 호스트가 내장(+5ms)이면 outLatDelta = +195ms.
+    // 게스트 콘텐츠를 호스트보다 195ms 앞선 위치로 seek해야 음향 시각 정렬.
+    final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final targetGuestVf = (hostContentMs * _framesPerMs).round() +
+        (outLatDelta * _framesPerMs).round();
     final currentEffective = ts.framePos + _seekCorrectionAccum;
     final initialCorrection = targetGuestVf - currentEffective;
     unawaited(_engine.seekToFrame(targetGuestVf));
@@ -1010,6 +1022,7 @@ class NativeAudioSyncService {
     _anchorHostFrame = anchorHostFrame;
     _anchorGuestFrame = ts.framePos + _seekCorrectionAccum;
     _offsetAtAnchor = offset; // 앵커 시점의 offset 기록
+    _anchoredOutLatDeltaMs = outLatDelta;
 
     // HAL 버퍼 안정화 쿨다운
     _seekCooldownUntilMs = ts.wallMs + _seekCooldown.inMilliseconds;
@@ -1072,7 +1085,13 @@ class NativeAudioSyncService {
     // 각각의 sampleRate로 ms 변환 후 비교 (cross-rate 안전)
     final dHms = dH / hostFpMs;
     final dGms = dG / _framesPerMs;
-    final driftMs = dGms - dHms; // 양수: 게스트 앞섬
+    // v0.0.38: anchor에 outputLatency 비대칭이 베이크인되어 있으므로,
+    // 여기선 (현재 - 앵커) 변화분만 보정. BT 분 단위 30~70ms 변동만 잡힘.
+    // 큰 비대칭(150~250ms)은 anchor establishment 시점에 이미 처리됨.
+    final currentOutLatDelta =
+        ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
+    final driftMs = dGms - dHms - dynLatDeltaMs; // 양수: 게스트 음향이 앞섬
 
     _latestDriftMs = driftMs;
     _driftSampleCount++;

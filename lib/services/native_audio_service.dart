@@ -21,6 +21,13 @@ class NativeTimestamp {
   final int totalFrames;
   final bool ok;
 
+  /// 출력 라우트 latency (ms). 디코더 출력 → DAC/transducer까지 OS 추정값.
+  /// 내장 스피커는 5~30ms, BT는 150~300ms (코덱·기기 의존, 워밍업 직후 50~60ms
+  /// 과소보고 / 분 단위 ±30~70ms 변동 가능). drift 공식에서 호스트·게스트
+  /// 양쪽이 빼주면 비대칭(특히 한쪽 BT)이 줄어듦.
+  /// null = 미지원/측정 불가 (Dart 측에서 0 fallback).
+  final double? outputLatencyMs;
+
   const NativeTimestamp({
     required this.framePos,
     required this.timeNs,
@@ -29,10 +36,19 @@ class NativeTimestamp {
     required this.sampleRate,
     required this.totalFrames,
     required this.ok,
+    this.outputLatencyMs,
   });
 
   /// wallAtFramePosNs를 밀리초로 변환.
   int get wallMs => wallAtFramePosNs ~/ 1000000;
+
+  /// drift 공식에 적용할 안전한 값. null/음수/500ms 초과는 0으로 무시.
+  /// (OS 보고 비정상 시 보정 자체가 노이즈가 되지 않도록 차단.)
+  double get safeOutputLatencyMs {
+    final v = outputLatencyMs;
+    if (v == null || v < 0 || v > 500) return 0.0;
+    return v;
+  }
 
   factory NativeTimestamp.fromMap(Map<String, dynamic> m) => NativeTimestamp(
         framePos: (m['framePos'] as num?)?.toInt() ?? 0,
@@ -42,6 +58,7 @@ class NativeTimestamp {
         sampleRate: (m['sampleRate'] as num?)?.toInt() ?? 0,
         totalFrames: (m['totalFrames'] as num?)?.toInt() ?? 0,
         ok: m['ok'] as bool? ?? false,
+        outputLatencyMs: (m['outputLatencyMs'] as num?)?.toDouble(),
       );
 }
 

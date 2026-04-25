@@ -36,6 +36,10 @@ class MainActivity : AudioServiceActivity() {
                     "stop" -> result.success(NativeAudio.nativeStop())
                     "getTimestamp" -> {
                         val arr = NativeAudio.nativeGetTimestamp()
+                        // arr[7]는 outputLatencyMs를 micro 단위 long으로 인코딩한 값.
+                        // -1L은 미지원/측정 불가 → null로 변환해 Dart sanity check에 위임.
+                        val outLatMs: Double? =
+                            if (arr[7] < 0) null else arr[7] / 1000.0
                         result.success(
                             mapOf(
                                 "framePos" to arr[0],
@@ -45,6 +49,7 @@ class MainActivity : AudioServiceActivity() {
                                 "virtualFrame" to arr[4],
                                 "sampleRate" to arr[5],
                                 "totalFrames" to arr[6],
+                                "outputLatencyMs" to outLatMs,
                             )
                         )
                     }

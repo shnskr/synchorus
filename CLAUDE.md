@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.37** (2026-04-25) — 호스트 `oboe::getTimestamp` streak 진단 로그 보강 (start/end + state + xrun delta + wall ms). 같은 코드/입력에서도 streak 길이 비결정적이라 자연 재발 대기 후 풍부한 컨텍스트로 분류 (A 방향).
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.38** (2026-04-25) — drift 공식에 호스트·게스트 양쪽 outputLatency 반영 + anchor establishment에 outLatDelta 베이크인 (BT 비대칭 보정). 검증 PASS: BT 게스트 시 ~300ms 어긋남 → 처음 40초 약간 + 그 후 정확. 양쪽 내장은 (30)/(31)와 동등 거동(<5ms), seek_count 0회. acoustic loopback 트랙 후순위 확정.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -30,18 +30,21 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.35 (2026-04-24 (28))**: **재연결 경로 직렬화** — v0.0.34는 loop만 차단했지 race 자체는 남아 재연결 2번 + 재동기화 2번 호출 → 1번은 "재동기화 실패" 스낵바. `room_lifecycle_coordinator.dart`에 `_reconnectInProgress` flag 추가해 `_handleDisconnected` + `_waitForWifiAndReconnect` 중 먼저 진입한 쪽이 끝날 때까지 다른 쪽 skip. `_handleDisconnected`는 `finally` 대신 명시적 flag 해제로 errno 분기→`_waitForWifiAndReconnect` 이어받기 지원. 실측(3 사이클): Reconnect 7→3, 재동기화 실패 0, `[RECONNECT] _handleDisconnected skip` 3회 발동 확인. 상세: `docs/HISTORY.md` 2026-04-24 (28)
 - **v0.0.36 (2026-04-24, commit 392b1c8)**: 묶음 보강 — (1) `_handleDisconnected` flag leak 방지(try/finally + errno 분기 try 밖 배치), (2) `oboe::getTimestamp` 실패 1차 LOGW 추가(streak 첫 회만), (3) `SyncMeasurementLogger` Android 외부 저장소(`getExternalStorageDirectory()`) 우선 사용 → S22 dual-app(user 95)에서도 csv `adb pull` 가능. HISTORY 별도 항목 없음(commit 본문 참고).
 - **v0.0.37 (2026-04-25 (31))**: **호스트 `oboe::getTimestamp` streak 진단 2차 보강 + 1차 측정**. 멤버 `mTsFailStreakCount`, `mTsFailStreakStartMonoNs`, `mTsFailStreakStartXRun` 추가. start 로그에 result + state + xrun + wallMs, end 로그에 last + count + duration + state + xrunDelta + wallMs. **1차 측정 결과**: result 코드 `ErrorInvalidState` (-895) 확정, 단 (30)의 26·15회 긴 streak 미재현 (1·1회, ≤142ms). drift csv는 두 측정 모두 안정(<7ms) → 같은 코드/입력에서 차이 = 시스템 레벨 비결정성. **A 방향**: 자연 재발 대기 + 풍부한 로그로 분류 (사용자 합의). 상세: `docs/HISTORY.md` 2026-04-25 (31)
+- **v0.0.38 (2026-04-25 (32))**: **drift 공식에 양쪽 outputLatency 반영 + anchor 베이크인 (BT 비대칭 보정)**. (a) baseline (BT 게스트, 3분)에서 csv <7ms 안정인데 음향 ~300ms 어긋남 = framePos가 BT codec/DAC 안 잡는 구조적 한계 발견. (b) 1차 변경(공식만 보정): csv -275ms 일관 + seek 0회 무한 anchor reset 발견. (b') anchor establishment에 outLatDelta 베이크인 (`_anchoredOutLatDeltaMs` 멤버, `_recomputeDrift`는 변화분만). **검증 PASS** (b'-1) BT: csv |d| <5ms + 사용자 체감 처음 40초 약간 + 이후 정확, (b'-2) 양쪽 내장: (30)/(31)와 동등 거동(<5ms, seek_count 0회). 처음 40초 잔여는 iOS outputLatency 워밍업 과소보고(Apple Forum #679274), 옵션 A(안정화 대기)·B(사전 워밍업)·C(acoustic loopback)·D(UX 명시)로 추가 개선 가능. 상세: `docs/HISTORY.md` 2026-04-25 (32)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **호스트 `oboe::getTimestamp` 간헐 실패 — 체감 싱크 깨짐 원인 (자연 재발 대기 모드)**. (30) 발견 → v0.0.36 진단 로그 1차 → v0.0.37 진단 로그 2차 보강(state + xrun delta + wallMs) + 1차 측정에선 긴 streak 미재현. 같은 코드/같은 파일/같은 출력 장치인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그에서 `streak start` / `streak end` 짝짓기 → state·xrun·wallMs를 Dart 라이프사이클·재생 컨트롤 호출 시각과 매칭해 분류. 분류 결과로 완화 방향(보간 obs / state 마스킹 신호 / 버퍼 점검) 결정.
-2. **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency` ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반. iOS는 이미 측정 중이지만 Dart drift 공식에 미반영. **주의**: Apple Forum에서 outputLatency가 BT 실제 지연을 과소보고한다는 보고 있음 → Dart 반영해도 효과 제한적일 수 있음. 검증부터.
+1. **(선택) BT 워밍업 첫 40초 잔여 개선** — 옵션 A(outputLatency 안정화 대기 후 anchor) 또는 B(재생 전 0.5~1초 무음 워밍업) 중 가성비 좋음. C(acoustic loopback)는 큰 작업이라 후순위. 또는 D(UX 명시)로 보류 가능. MVP 우선순위에 따라 결정.
+2. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기 모드** ((30) 발견 → v0.0.36 진단 1차 → v0.0.37 진단 2차 + 1차 측정 재현 X). 같은 코드/같은 파일/같은 출력인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류 → 완화 방향 결정(보간 obs / state 마스킹 / 버퍼 점검).
 3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
-4. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-5. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-6. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+4. **acoustic loopback 1회 calibration 설계** (선택 — 1번 검증에서 잔여 100ms+ 시 우선순위 ↑). OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 출력 녹음 → round-trip 측정. 마이크 권한 + 정숙 환경 + 사용자 트리거 필요. AOSP CTS 표준 방식.
+5. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+6. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+7. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
 
 **완료됨 (이번 세션, 2026-04-25)**:
 - v0.0.37 호스트 `oboe::getTimestamp` streak 진단 로그 2차 보강 (state + xrun delta + wallMs) + S22 1차 측정 PASS (긴 streak 미재현, 자연 재발 대기로 전환).
-- S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화. (이전 세션 v0.0.36 logger external storage fallback이 dual-app에서도 작동 확인.)
+- v0.0.38 drift 공식 outputLatency 반영 + anchor 베이크인. **검증 PASS** (BT 게스트 + 양쪽 내장 회귀 모두). seek_count 0회로 부드럽게 동작. 처음 40초 BT 워밍업 잔여만 남음.
+- S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
 

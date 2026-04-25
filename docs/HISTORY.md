@@ -1815,6 +1815,114 @@ Reconnected successfully
 
 ---
 
+### 2026-04-25 (32) — BT outputLatency 비대칭 발견 + drift 공식에 양쪽 outputLatency 반영 (v0.0.38)
+
+**배경**: PLAN 우선순위 2 "BT outputLatency 동적 보정"의 선검증. 조사 후(general-purpose agent + Apple/Google/SO/audio_session 출처 검증) 결론: iOS `AVAudioSession.outputLatency`는 안정화 후엔 ±10ms 정확하나 워밍업 50~60ms 과소보고 / 분 단위 30~70ms 변동 / A2DP↔HFP 전환 100ms+ 누락 가능. Android Oboe `getLatency()`는 BT codec/radio 단계 거의 안 잡음(Oboe wiki 명시).
+
+**(a) baseline 측정 (v0.0.37, outputLatency 미반영)** — S22 호스트 내장 + iPhone 게스트 + 갤럭시 버즈 BT, 3분 재생:
+
+| 항목 | 값 |
+|---|---|
+| 사용자 체감 | 갤럭시 버즈 **~300ms 느림** |
+| csv 통계 | n=311, mean 3.56ms, p50 3.66ms, **p95 5.60ms, p99 6.38ms** |
+| 30~180초 구간 \|drift\| | 1.38~4.44ms (안정) |
+| streak | 1회 (51ms, state=Started, xrun=0) |
+
+→ **csv는 3분 내내 < 7ms 안정인데 음향은 ~300ms 어긋남**. 구조적 발견:
+- 호스트/게스트 양쪽 `framePos` = "디코더 → 출력 노드" 누적 카운터
+- 그 이후 BT codec/transmission/DAC 단계는 framePos에 안 들어감
+- 양쪽 다 outputLatency 무시하는 대칭 구조라 **BT 비대칭이 csv에 안 잡히고 음향에만 그대로 남음**
+- (30)의 호스트 TS 침묵 케이스와는 별개의 새 root cause
+
+**(b) 코드 변경 — outputLatency를 drift 공식에 반영**:
+
+1. **`oboe_engine.cpp`**: `getLatestTimestamp` 시그니처에 `double* outOutputLatencyMs` out 파라미터 추가. `mStream->calculateLatencyMillis()` (Oboe API) 호출 → ResultWithValue가 OK면 값, 실패면 -1. JNI nativeGetTimestamp의 jlongArray 7→8개로 확장, outputLatencyMs를 micro 단위 long으로 인코딩(`* 1000.0`, -1은 그대로).
+2. **`MainActivity.kt`**: getTimestamp Map에 `"outputLatencyMs" to outLatMs` 추가. -1 → null 변환.
+3. **`NativeTimestamp` (`native_audio_service.dart`)**: `double? outputLatencyMs` 필드 추가, fromMap에 파싱. `safeOutputLatencyMs` getter — null/음수/500ms 초과는 0으로 무시(OS 보고 비정상 시 보정 노이즈 차단).
+4. **`AudioObs` (`models/audio_obs.dart`)**: `double hostOutputLatencyMs` 필드 추가(기본 0), toJson/fromJson에 포함. 구버전 호스트 호환은 0 fallback.
+5. **`_broadcastObs` (line 503)**: `hostOutputLatencyMs: ts.safeOutputLatencyMs`.
+6. **drift 공식 (line 1075)**: `final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs; final driftMs = dGms - dHms - outLatDelta;`
+7. **`_fallbackAlignment` (line 949)**: 동일하게 `- outLatDelta` 보정 추가.
+
+**iOS는 이미 `AVAudioSession.outputLatency`를 dict에 보내고 있어 native 변경 없음** (`AudioEngine.swift:158`, 단 v0.0.37까지 Dart는 받지도 사용하지도 않은 dead data였음).
+
+**예상 효과** (Apple Forum 출처 + (a) baseline 기반):
+- 호스트·게스트 둘 다 같은 기종 내장: 보정값 거의 상쇄, drift 변화 ≈ 0
+- 다른 기종 내장 (S22+iPhone): ±10ms 보정으로 약간 개선 가능
+- 한쪽 BT (이번 케이스): ~150~250ms 보정 → 잔여 50~100ms (OS 보고 정확도 한계)
+- OS 보고 비정상값(>500ms 등)은 sanity check로 0 fallback, 회귀 위험 차단
+
+**(b) 1차 측정 (이번 세션 후속)** — S22 내장 호스트 + iPhone 게스트 + 갤럭시 버즈 BT, 3분 재생:
+
+| 항목 | 값 |
+|---|---|
+| 사용자 체감 | 약 ~150ms 잔여 어긋남 (이전 ~300ms의 절반 개선) |
+| csv 통계 | n=283, mean **-275.81ms**, p95 **-274.49 ~ -278.40ms** (3분 내내 ±2ms 변동만) |
+| seekCount | **0회** (3분 내내 자동 보정 seek 발동 안 함) |
+
+→ **csv가 -275ms로 일관 = 보정값은 정확히 들어갔지만 무한 anchor reset 루프**. 원인: `_maybeTriggerSeek` (line 1124)이 `|drift| ≥ _reAnchorThresholdMs (200ms)`이면 anchor만 리셋하고 seek 안 함 → 다음 poll에서 _tryEstablishAnchor 재진입 → 같은 framePos 기준으로 정렬 → 또 -275ms drift → 또 reset. 사용자 체감 150ms 잔여는 _fallbackAlignment 일부 작동 또는 체감 정확도 ±100ms 오차로 추정.
+
+**(b') 수정 — outputLatency 비대칭을 anchor에 베이크인** (`_tryEstablishAnchor` line 1003~1018):
+
+```dart
+final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+final targetGuestVf = (hostContentMs * _framesPerMs).round() +
+    (outLatDelta * _framesPerMs).round();          // ← BT 비대칭만큼 앞선 위치로 seek
+...
+_anchoredOutLatDeltaMs = outLatDelta;              // 신규 멤버, 시간 변화 추적용
+```
+
+`_recomputeDrift` (line 1075):
+```dart
+final currentOutLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
+final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
+```
+
+**효과 예상**:
+- anchor establishment 시점에 게스트가 outLatDelta 만큼 앞선 콘텐츠 위치로 seek됨 → 처음부터 음향 시각 정렬
+- 그 후 drift csv는 framePos 기준 ≈ 0 + BT 분 단위 변동(±30~70ms)만 표시
+- 메인 seek 임계(20ms)는 변동분만 트리거 → 무한 reset 루프 해소
+
+**(b') 검증 측정 결과 — 모두 PASS**:
+
+**(b'-1) 개선 검증** (S22 내장 + iPhone 버즈 BT, 같은 파일, 약 2분):
+
+| 항목 | (a) 미반영 | (b) 1차 | **(b') 베이크인** |
+|---|---|---|---|
+| csv mean(\|d\|) | 3.56ms | 275.81ms | **0.5~1.5ms** |
+| csv max\|d\| | 6.99ms | 278.40ms | **4.18ms** (15~30s) |
+| seek_count | - | 0 (무한 reset) | **0** (보정 불필요) |
+| 사용자 체감 | ~300ms 어긋남 | ~150ms 어긋남 | **40초 후 정확** |
+
+처음 40초 약간 잔여 = **iOS `outputLatency` 워밍업 과소보고**(Apple Forum #679274와 일치, AirPods 220ms 실측 vs 160ms 보고). 시간 지나며 보고값 안정 + `_recomputeDrift` 변화분 추적이 따라감. csv는 보고값 기준이라 잔여를 못 잡고 체감만 잡힘.
+
+**(b'-2) 회귀 검증** (S22 내장 + iPhone 내장, (30)/(31)와 동일 조건, 3분 + 끝부분 재생/정지/seek 연타):
+
+| 구간(s) | mean\|d\| | max\|d\| | 비교 |
+|---|---|---|---|
+| 30~60 | 1.51 | 4.55 | (30) 0.47/1.4, (31) 2.03/3.91 — 동등 |
+| 60~90 | 1.87 | 4.10 | (30) 0.53/1.4, (31) 1.38/3.23 — 동등 |
+| 90~150 | 1.13~1.29 | 3.74 | 동등 |
+| 150~180 | 1.54 | 4.25 | (30) 2.74/4.1 — 동등 |
+| 180~210 (연타) | 0.68 | 2.43 | 라이프사이클 회귀 없음 |
+
+→ 양쪽 내장에선 `outLatDelta ≈ 0`이라 사실상 보정 없음 = (30)/(31)와 동등 거동. **회귀 없음 PASS**.
+
+**최종 결론**:
+- BT 비대칭은 anchor 베이크인으로 처음부터 음향 시각 정렬 → seek 0회로 부드럽게 동작
+- 양쪽 내장은 보정 항이 자동으로 0에 가까워져 회귀 없음
+- 잔여 30~50ms는 OS API 한계 (acoustic loopback 트랙은 후순위 확정)
+- 처음 40초 잔여 잡고 싶으면 옵션 A (outputLatency 안정화 대기)·B (사전 무음 워밍업)·C (acoustic loopback) 중 선택. 현재 MVP 단계에선 D (UX 명시)도 합리적
+
+**남은 한계**:
+- 첫 anchor establishment 직후 ~40초 BT 워밍업 잔여 (사용자 체감)
+- BT 코덱 전환(A2DP↔HFP) 100ms+ 누락은 OS가 보고 안 함 → 발생 시 큰 어긋남 가능. 발생 빈도 적음
+
+**변경 범위**: `oboe_engine.cpp`, `MainActivity.kt`, `lib/services/native_audio_service.dart`, `lib/models/audio_obs.dart`, `lib/services/native_audio_sync_service.dart`(+anchor 베이크인 + `_anchoredOutLatDeltaMs` 멤버), `pubspec.yaml`(0.0.37→0.0.38). iOS native 변경 없음(이미 `AVAudioSession.outputLatency` 송신 중). iOS Dart는 NativeTimestamp.fromMap/AudioObs 호환만 필요(자동).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

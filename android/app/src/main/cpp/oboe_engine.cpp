@@ -254,7 +254,8 @@ public:
         int64_t* outFramePos,
         int64_t* outTimeNs,
         int64_t* outWallAtFramePosNs,
-        int64_t* outVirtualFrame) {
+        int64_t* outVirtualFrame,
+        double* outOutputLatencyMs) {
 
         // virtualFrame은 항상 유효 (오디오 콜백이 매 프레임 갱신)
         *outVirtualFrame = mVirtualFrame.load(std::memory_order_relaxed);
@@ -268,12 +269,22 @@ public:
         const int64_t monoNow =
             static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
 
+        // outputLatencyMs default: -1 (미지원/측정 불가). Dart에서 sanity check.
+        // BT codec/radio 단계는 Oboe 가이드상 잘 안 잡힘 — 어디까지 보고되는지는
+        // 디바이스/HAL 의존. 그래도 OS가 알고 있는 만큼은 drift 공식 보정에 활용.
+        *outOutputLatencyMs = -1.0;
+
         std::lock_guard<std::mutex> lock(mLock);
         if (!mStream) {
             *outFramePos = -1;
             *outTimeNs = -1;
             *outWallAtFramePosNs = wallNow;
             return false;
+        }
+
+        auto latRes = mStream->calculateLatencyMillis();
+        if (latRes) {
+            *outOutputLatencyMs = latRes.value();
         }
 
         int64_t framePos = 0;
@@ -831,14 +842,20 @@ JNIEXPORT jlongArray JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeGetTimestamp(
     JNIEnv* env, jobject /*thiz*/) {
     int64_t framePos = -1, timeNs = -1, wallNs = -1, vf = 0;
+    double outputLatencyMs = -1.0;
     const bool ok = engine().getLatestTimestamp(
-        &framePos, &timeNs, &wallNs, &vf);
-    jlongArray arr = env->NewLongArray(7);
-    const jlong vals[7] = {
+        &framePos, &timeNs, &wallNs, &vf, &outputLatencyMs);
+    // outputLatencyMs는 micro 단위(long)로 인코딩해 long array에 실음.
+    // -1.0 (미지원/측정 불가)은 -1로 보존. Kotlin/Dart에서 ÷1000.0으로 복원.
+    const int64_t outLatMicro =
+        outputLatencyMs < 0 ? -1
+                            : static_cast<int64_t>(outputLatencyMs * 1000.0);
+    jlongArray arr = env->NewLongArray(8);
+    const jlong vals[8] = {
         framePos, timeNs, wallNs, ok ? 1L : 0L, vf,
-        engine().getSampleRate(), engine().getTotalFrames()
+        engine().getSampleRate(), engine().getTotalFrames(), outLatMicro
     };
-    env->SetLongArrayRegion(arr, 0, 7, vals);
+    env->SetLongArrayRegion(arr, 0, 8, vals);
     return arr;
 }
 
