@@ -1923,6 +1923,72 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (33) — `_resetDriftState` 베이크인 안전성 + BT 워밍업 잔여 조사 + iOS 호스트 P2P discovery 버그 발견
+
+**(33-1) 코드 한 줄 — `_resetDriftState`에 `_anchoredOutLatDeltaMs = 0;` 추가**
+
+`_startGuestPlayback`에서 매번 `_resetDriftState`로 anchor 초기화하지만 v0.0.38의 `_anchoredOutLatDeltaMs`는 명시 리셋 안 함. 다음 anchor establish 시점에 새 값 저장되므로 동작은 동일하지만, anchor null인 동안의 의미적 일관성·가독성 위해 명시 리셋. `_recomputeDrift`는 anchor null이면 early return이라 실제 영향 0.
+
+**(33-2) BT 워밍업 잔여 — 사용자 관찰 + 외부 자료 조사**
+
+(b') 검증에서 사용자 관찰: "처음 40초 약간 어긋남, 이후 정확". 정지 후 재생 재개 시 같은 패턴 반복 (코드상 `_resetDriftState`가 매번 호출되어 anchor 새로 잡힘). 원인 분석:
+
+- iOS `AVAudioSession.outputLatency`는 BT 라우트 활성 직후 30~60ms 과소보고 (Apple Developer Forums #679274 검증)
+- 우리 코드는 첫 anchor 시점에 그 작은 값을 베이크인 → 보정 부족 → 잔여 어긋남
+- 시간 지나며 OS 보고가 안정 + `_recomputeDrift`의 변화분 추적이 따라잡음
+
+**외부 자료 조사 결과** (general-purpose agent, 출처: Apple Forums, Apple Developer Documentation, Android NDK Audio Latency, Oboe Wiki, Stephen Coyle, iDropNews, WWDC 2014 Session 502):
+
+1. **iOS 표준 안정화 시간 없음**. Apple 공식 헤더에 outputLatency를 "estimation, **least reliable with Bluetooth**"로 표기. 자체 휴리스틱 필요.
+2. **Android NDK 공식 권장 패턴**: warmup latency 피하려면 silence buffer를 계속 enqueue하다가 실제 오디오로 전환 (developer.android.com/ndk/guides/audio/audio-latency). iOS도 동일 원리 적용 가능 — `AVAudioPlayerNode.scheduleBuffer`로 무음 PCM 흘림.
+3. **Oboe `calculateLatencyMillis()`도 같은 워밍업 패턴** — getTimestamp 기반이라 호스트 BT 시 동일 영향. Issue #357: "BT 헤드셋 0.5초 상수 지연이 calculateLatencyMillis 미반영".
+4. **acoustic loopback이 OS API 외 유일한 ground truth** (Apple Forum 합의). lower-level API(AudioUnit / Audio Queue Tap / Oboe lower-level)도 BT 라우트 너머의 수신측 지연은 못 봄.
+5. **코덱별 워밍업 시간 차이**: AirPods Pro 144ms, AirPods (W1/H1) 274/178ms. 갤럭시 버즈 같은 일반 BT는 가시화된 코덱 협상 데이터 부족. 가설로만.
+
+**조사 권장 (효과/복잡도)**:
+
+| # | 방법 | 효과 | 복잡도 |
+|---|---|---|---|
+| **A** | iOS 무음 prebuffer + outputLatency 수렴 게이팅 (`_engine.start()` 직후 `setMuted(true)` 1~3초, outputLatency 표본 ±5ms 안정 확인 후 anchor) | **상** | 중 |
+| **B** | outputLatency rolling median(3~5 샘플) → spike 흡수 | 중 | 하 |
+| **C** | acoustic loopback 1회 calibration → 이어폰 ID + 측정값 저장 → 정지/재생 무관 즉시 적용 (근본 해결) | 상 (정확도 ±5ms) | 큰 작업 |
+| **D** | UX 명시 ("BT 이어폰은 재생 시작마다 잠깐 워밍업") | 0 | 0 |
+
+**Android 게스트 BT 시 추가 한계**:
+- Oboe `calculateLatencyMillis()`가 BT codec/radio 단계 거의 안 잡음 (Oboe wiki TechNote_BluetoothAudio 명시) → OS 보고가 iOS보다 부족 → 베이크인 자체가 작아 음향 어긋남 큼 가능
+- 같은 게이팅(A) 적용해도 codec/radio 누락분이 상시 잔여로 남음 → 이 케이스는 acoustic loopback(C)이 거의 유일한 해결
+
+**다음 세션 결정**: A/B/C 중 진행 또는 D로 보류. 사용자 시나리오 우선순위(MVP 마감 vs 정확도)에 따라.
+
+**(33-3) 신규 발견 — iOS 호스트 시 P2P discovery 게스트 검색·접속 안 됨**
+
+검증 매트릭스 확장 시도(Android 게스트 BT 케이스 측정) 중 발견:
+- **Android 호스트 + iPhone 게스트**: 정상 작동 (이번 세션 (b'-1) (b'-2) PASS의 시나리오)
+- **iPhone 호스트 + Android 게스트**: **검색 안 됨 + 접속 안 됨**
+
+코드 분석:
+- `discovery_service.dart:40` — discovery는 mDNS/Bonjour가 아니라 **raw UDP `255.255.255.255:41234` broadcast** 사용 (`RawDatagramSocket`)
+- iOS Info.plist는 `NSLocalNetworkUsageDescription` + `NSBonjourServices=_synchorus._tcp` 등록되어 있음. **하지만 코드는 Bonjour 안 씀** → 불일치
+- iOS entitlements 파일 자체 부재 (`Runner.entitlements` 없음) → `com.apple.developer.networking.multicast` entitlement 없음. iOS 14+에서 raw multicast/broadcast 송신은 이 entitlement 필요할 수 있음 (Apple 신청 필요)
+- `discovery_service.dart`에 Platform 분기 없음 → iOS/Android 같은 코드라 iOS 측만 silent fail 가능
+
+권한 확인 (사용자 보고): iPhone 설정 → 개인정보 보호 및 보안 → 로컬 네트워크 → Synchorus 토글 **켜져 있음** (권한은 OK).
+
+**임시 우회 가능**: 게스트 측 `home_screen.dart:295`에 "IP 직접 입력" UI 이미 존재. 호스트 측 화면에 IP 표시 + 클립보드 복사 (`room_screen.dart:436~446`)도 이미 있음. → **iPhone 호스트 IP를 Android 게스트가 직접 입력해서 우회 가능 가능성** (검증 필요).
+
+**진단 분기 (다음 액션)**:
+- IP 직접 입력으로 접속 됨 → discovery(UDP broadcast)만 막힘, ServerSocket(TCP listen) 정상 = iOS multicast/broadcast 송신 entitlement 부재 확정. 단기 IP 우회 + 장기 nsd/multicast_dns 패키지 마이그레이션
+- IP 직접 입력으로도 접속 안 됨 → ServerSocket 자체 차단 (더 큰 보안 문제, 별도 진단)
+
+**fix 옵션** (다음 세션):
+- **A**: `nsd` 패키지로 discovery 마이그레이션 (정석, 30분~1시간, multicast entitlement 불필요 — 시스템 mDNS 사용. iOS NSNetServiceBrowser + Android NsdManager wrap)
+- **B**: Apple `com.apple.developer.networking.multicast` entitlement 신청 + 추가 (1~2주 승인, 코드 변경 0, raw broadcast 그대로)
+- **C**: 임시 우회만 — 게스트 IP 입력 UI는 이미 있으니 UX 안내만 보강
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` (한 줄). 코드 동작 변화 없음 (가독성 보강). 워밍업 조사 + iOS 호스트 버그는 문서만 — 다음 세션 결정 + fix.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

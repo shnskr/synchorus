@@ -872,6 +872,10 @@ class NativeAudioSyncService {
     _offsetAtAnchor = null;
     _seekCorrectionAccum = 0;
     _seekCooldownUntilMs = 0;
+    // anchor가 무효화됐으면 베이크인 값도 같이 0으로. 다음 anchor establish
+    // 시점에 새 outLatDelta가 저장되므로 동작은 동일하지만, 의미적 일관성
+    // 위해 명시 리셋 (anchor null인 동안 _recomputeDrift는 early return).
+    _anchoredOutLatDeltaMs = 0;
     _fallbackAlignCooldownMs = 0;
     _latestDriftMs = null;
     _driftSampleCount = 0;
