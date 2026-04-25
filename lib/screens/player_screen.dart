@@ -30,8 +30,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Future<void> _pickFile() async {
+    // file_picker iOS는 FileType.audio일 때 MPMediaPickerController를 띄워
+    // Music 앱 라이브러리만 보여줌 → Files/iCloud/On My iPhone의 mp3가
+    // 안 보임. custom + allowedExtensions로 UIDocumentPickerViewController
+    // 사용 → 모든 source 표시. Android는 동일 인터페이스로 mime 필터.
     final result = await FilePicker.platform.pickFiles(
-      type: FileType.audio,
+      type: FileType.custom,
+      allowedExtensions: ['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg'],
     );
     if (result != null && result.files.single.path != null) {
       try {

@@ -1989,6 +1989,36 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (34) — iOS 파일 선택 크래시 + Apple Music DRM 한계 발견 (v0.0.39 + v0.0.40)
+
+**배경**: (33-3) iOS 호스트 P2P discovery 진단 시도 중 사용자가 iPhone 호스트로 방 만들기 + 파일 선택 시도 → **앱 즉시 크래시** 발견. 원인 분석 + fix.
+
+**원인 1 (v0.0.39)**: `file_picker-8.3.7` iOS 구현(`FilePickerPlugin.m:369`)이 `FileType.audio`일 때 `MPMediaPickerController` 사용 → iOS Music 앱 라이브러리 접근 → **`NSAppleMusicUsageDescription`** Info.plist description 필수. iOS는 권한 description 없는 권한 요청 시 앱을 SIGABRT로 강제 종료. 우리 Info.plist엔 `NSLocalNetworkUsageDescription`만 있고 음악 라이브러리 description 누락 → 크래시.
+
+**v0.0.39 fix**: `ios/Runner/Info.plist`에 `NSAppleMusicUsageDescription` 추가 ("재생할 음악을 라이브러리에서 선택하기 위해 음악 라이브러리에 접근합니다"). iPhone 재빌드 후 사용자 검증 — **앱 안 튕김 PASS** (보관함 picker 정상 표시).
+
+**원인 2 (v0.0.40)**: 보관함 picker는 열렸지만 **파일이 아무것도 안 보임**. 추가 분석:
+- `MPMediaPickerController`는 **iOS Music 앱 라이브러리**만 표시 (Apple Music 구독 곡, iTunes 동기화 곡, Music 앱에 다운로드한 음악)
+- **Files 앱·iCloud Drive·On My iPhone에 직접 저장한 mp3/m4a는 안 보임** (Music vs Files 별개 sandbox)
+- 사용자 iPhone에 Music 앱 라이브러리가 비어 있어 picker가 빈 화면
+- 추가 함정: **Apple Music 구독 곡은 FairPlay DRM 보호** → 일반 앱이 라이선스 키 못 받음 → `MPMediaItem.assetURL`로 가져오려 해도 `AVAssetExportSession`이 export 거부 (`FilePickerPlugin.m`의 `exportMusicAsset` silent fail) → **picker로 가져와도 우리 엔진이 디코드 불가**. 즉 `FileType.audio`는 iOS에선 사실상 무용에 가까움 (DRM-free 동기화 음악 가진 사용자만 작동)
+
+**v0.0.40 fix**: `player_screen.dart:_pickFile` + `native_test_screen.dart:_pickAndLoad`의 `pickFiles` 호출을 `FileType.custom + allowedExtensions: ['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg']`로 변경. iOS는 이때 `UIDocumentPickerViewController` 사용 → **Files 앱 / iCloud Drive / On My iPhone / 외부 Storage Provider(Dropbox 등) 모든 source 표시**. 사용자가 명시적으로 저장한 DRM-free 파일 선택 → 우리 엔진 디코드 가능.
+
+**Android 영향**: `FileType.custom + allowedExtensions`는 Android에서도 SAF mime 필터로 처리되어 기존 `FileType.audio`와 거의 동일한 picker 표시. 사용자 검증 — **회귀 없음 PASS**.
+
+**`NSAppleMusicUsageDescription`**: v0.0.40 코드에선 사실상 dead 권한이지만 안전성·미래 확장(혹시 음악 라이브러리 옵션 추가 시)을 위해 Info.plist에 유지.
+
+**고려·기각된 옵션**:
+- BottomSheet로 두 source(`Files` + `Music 라이브러리`) 같이 노출 — 사용자 선택. 단 Music 라이브러리 path는 DRM 곡 비율 높아 실용성 낮음 → 기각, custom만 사용.
+- DRM 보호 곡 silent fail 시 친절한 에러 메시지 — `loadFile` catch에 SnackBar 이미 있음, 메시지 정교화는 필요 시 후속.
+
+**변경 범위**: `ios/Runner/Info.plist`(`NSAppleMusicUsageDescription` 추가), `lib/screens/player_screen.dart`(custom + extensions), `lib/screens/native_test_screen.dart`(동일), `pubspec.yaml`(0.0.38→0.0.39→0.0.40 두 단계 bump 합쳐 0.0.40 최종). Android native·Dart 프로토콜 변경 0, P2P 호환 유지.
+
+**남은 (33-3) 작업**: iOS 호스트 시 P2P discovery(UDP broadcast)는 여전히 막힘. fix는 nsd 패키지 마이그레이션 또는 multicast entitlement 신청 — 다음 진행.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

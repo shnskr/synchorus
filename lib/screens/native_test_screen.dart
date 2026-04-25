@@ -31,7 +31,10 @@ class _NativeTestScreenState extends State<NativeTestScreen> {
   }
 
   Future<void> _pickAndLoad() async {
-    final result = await FilePicker.platform.pickFiles(type: FileType.audio);
+    final result = await FilePicker.platform.pickFiles(
+      type: FileType.custom,
+      allowedExtensions: ['mp3', 'm4a', 'wav', 'aac', 'flac', 'ogg'],
+    );
     if (result == null || result.files.single.path == null) return;
 
     final path = result.files.single.path!;
