@@ -37,13 +37,14 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.43 (2026-04-25 (38))**: **iPhone 호스트 정지/재생/seek 버그 fix**. (1) 정지 상태 seek 안 됨 (-5/+5 버튼 무반응, seek바 드래그 후 되돌아감), (2) 정지→재생 시 정지 시점이 아닌 마지막 seek 위치/0:00부터 재생, (3) 게스트 측 잠깐 끝 위치 잔상. 원인: iOS `AudioEngine.swift`의 `getTimestamp()` 정지 분기가 ok=false만 반환해 vf/sampleRate 누락 → Dart `_skipSeconds`가 0:00 기준으로 계산 + `stop()`이 vf를 `seekFrameOffset`에 저장 안 함. **fix**: getTimestamp 정지 분기에 stoppedReturn(vf/sampleRate/totalFrames/wallMs/outputLatencyMs 포함) + stop()에서 `seekFrameOffset += sampleTime` 누적. Android oboe는 이미 정상이라 변경 0. 사용자 체감 PASS. 상세: `docs/HISTORY.md` 2026-04-25 (38)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
-1. **BT 워밍업 잔여 개선 — (32) 후속, (33-2) 조사 + (37) Android 게스트 측정**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴 반복(정지/재생마다 anchor reset). **Android 게스트 BT(Galaxy+버즈)는 ~2초 정착으로 의외로 양호 — (33-2)의 "Android는 acoustic loopback 거의 유일" 가설 부분 반증** (Samsung HAL 정확 보고 추정). 우선순위 1순위는 **iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅)** 시도. C(acoustic loopback)는 우선순위 ↓. D(UX만)도 가능. 상세: `docs/HISTORY.md` 2026-04-25 (33-2), (37)
-2. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기 모드** ((30) 발견 → v0.0.36 진단 1차 → v0.0.37 진단 2차 + 1차 측정 재현 X). 같은 코드/같은 파일/같은 출력인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류 → 완화 방향 결정(보간 obs / state 마스킹 / 버퍼 점검).
-3. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
-4. **acoustic loopback 1회 calibration 설계** (선택 — 1번 검증에서 잔여 100ms+ 시 우선순위 ↑). OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 출력 녹음 → round-trip 측정. 마이크 권한 + 정숙 환경 + 사용자 트리거 필요. AOSP CTS 표준 방식.
-5. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
-6. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
-7. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
+1. **첫 재생 정착 시간 — BT 무관 (39)**. 모든 시나리오에서 첫 재생 직후 ~수 초 동안 잠깐 어긋남. 원인 — 게스트 `engine.start()` 자체 지연(iOS 100~500ms) + 첫 anchor establish 전 fallback alignment 정밀도 + clock sync 수렴 시간. RTT 자체는 보정됨(사용자 가설 부분 반증). 옵션: (1) NTP-style 예약 재생(가장 정석, `AVAudioPlayerNode.play(at:)`/oboe frame 예약 활용) / (2) 게스트 사전 워밍업 / (3) 첫 anchor 가속(회귀 위험). 가성비 2번, 효과 1번. 상세: `docs/HISTORY.md` 2026-04-25 (39)
+2. **BT 워밍업 잔여 개선 — (32) 후속, (33-2) 조사 + (37) Android 게스트 측정**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴 반복(정지/재생마다 anchor reset). **Android 게스트 BT(Galaxy+버즈)는 ~2초 정착으로 의외로 양호 — (33-2)의 "Android는 acoustic loopback 거의 유일" 가설 부분 반증** (Samsung HAL 정확 보고 추정). 우선순위 1순위는 **iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅)** 시도. C(acoustic loopback)는 우선순위 ↓. D(UX만)도 가능. 상세: `docs/HISTORY.md` 2026-04-25 (33-2), (37)
+3. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기 모드** ((30) 발견 → v0.0.36 진단 1차 → v0.0.37 진단 2차 + 1차 측정 재현 X). 같은 코드/같은 파일/같은 출력인데 streak 길이 비결정적 = 시스템 레벨. 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류 → 완화 방향 결정(보간 obs / state 마스킹 / 버퍼 점검).
+4. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — iPhone의 connectivity_plus가 즉시 반응해 우회됨. 다른 AP 이동 or 호스트가 네트워크 변경 시나리오에서만 캡처 가능할 것. 코드 변경 0, 실기기 2대 + 2개 AP 필요.
+5. **acoustic loopback 1회 calibration 설계** (선택 — 2번 검증에서 잔여 100ms+ 시 우선순위 ↑). OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 출력 녹음 → round-trip 측정. 마이크 권한 + 정숙 환경 + 사용자 트리거 필요. AOSP CTS 표준 방식.
+6. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관, 우선순위 낮음
+7. **PLAN Phase 3 (Firebase 인증·결제)** — 수익화 단계 진입
+8. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 위한 다듬기
 
 **완료됨 (이번 세션, 2026-04-25)**:
 - v0.0.37 호스트 `oboe::getTimestamp` streak 진단 로그 2차 보강 (state + xrun delta + wallMs) + S22 1차 측정 PASS (긴 streak 미재현, 자연 재발 대기로 전환).
@@ -54,6 +55,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.42 mDNS stale 방 fix — 호스트 await stop + 게스트 hostLeftStream lost 처리. found/lost 즉시 반영 PASS.
 - (37) Android 게스트 BT 시나리오 측정 — Galaxy+버즈는 ~2초 정착, (33-2) 가설 부분 반증.
 - v0.0.43 iPhone 호스트 정지/재생/seek 버그 fix — getTimestamp 정지 분기 vf 포함 + stop()에서 vf 저장. 사용자 체감 PASS.
+- (39) 첫 재생 정착 시간 이슈 분석·기록 — RTT는 보정되고 진짜 원인은 게스트 engine.start() 지연 + clock sync 수렴. 옵션 1·2·3 정리.
 - S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`
