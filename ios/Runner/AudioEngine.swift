@@ -76,6 +76,17 @@ class AudioEngine {
 
     @discardableResult
     func stop() -> Bool {
+        // 정지 직전 위치를 seekFrameOffset에 누적 → 다음 start()의 scheduleAndPlay
+        // 가 그 위치부터 재생. 안 하면 마지막 seek 위치(또는 0)부터 재생됨 (v0.0.43).
+        if let node = playerNode,
+           let nodeTime = node.lastRenderTime,
+           nodeTime.isSampleTimeValid,
+           let playerTime = node.playerTime(forNodeTime: nodeTime) {
+            seekFrameOffset += Int64(playerTime.sampleTime)
+            if let file = audioFile {
+                seekFrameOffset = max(0, min(seekFrameOffset, file.length))
+            }
+        }
         isEngineRunning = false
         playerNode?.stop()
         engine.stop()
@@ -112,17 +123,32 @@ class AudioEngine {
     }
 
     func getTimestamp() -> [String: Any] {
+        let session = AVAudioSession.sharedInstance()
+        let outputLatency = session.outputLatency
+        let ioBufDuration = session.ioBufferDuration
+        // 정지 또는 timestamp 무효 시에도 virtualFrame/sampleRate/totalFrames/wallMs는
+        // 유효 → ok=false라도 반환해야 호스트 UI seek바·_skipSeconds 동작 + 게스트
+        // 측 fallback alignment 가능 (v0.0.43, 이전엔 ok=false만 반환했음).
+        let vf = getVirtualFrame()
+        let totalFrames = Int64(audioFile?.length ?? 0)
+        let wallNowNs = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
+        let stoppedReturn: [String: Any] = [
+            "ok": false,
+            "virtualFrame": vf,
+            "sampleRate": sampleRate,
+            "totalFrames": totalFrames,
+            "wallAtFramePosNs": wallNowNs,
+            "outputLatencyMs": outputLatency * 1000,
+        ]
+
         guard let node = playerNode,
               let lastRenderTime = engine.outputNode.lastRenderTime,
               lastRenderTime.isSampleTimeValid,
               lastRenderTime.isHostTimeValid
         else {
-            return ["ok": false]
+            return stoppedReturn
         }
 
-        let session = AVAudioSession.sharedInstance()
-        let outputLatency = session.outputLatency
-        let ioBufDuration = session.ioBufferDuration
         let nodeLatency = node.latency
             + engine.mainMixerNode.latency
             + engine.outputNode.latency
@@ -133,11 +159,7 @@ class AudioEngine {
         let timeNs = Int64(hostTime) * Int64(info.numer) / Int64(info.denom)
 
         let monoNowNs = Int64(mach_absolute_time()) * Int64(info.numer) / Int64(info.denom)
-        let wallNowNs = Int64(Date().timeIntervalSince1970 * 1_000_000_000)
         let wallAtFramePosNs = wallNowNs - (monoNowNs - timeNs)
-
-        let vf = getVirtualFrame()
-        let totalFrames = Int64(audioFile?.length ?? 0)
 
         // outputNode의 sampleTime은 세션(hw) rate로 카운트될 수 있음.
         // VF/totalFrames/sampleRate와 일관되도록 파일 rate로 정규화.

@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.42** (2026-04-25) — mDNS stale 방 fix. 호스트 측 `await discovery.stop()` + 게스트 측 `hostLeftStream`(ServiceStatus.lost) 구독으로 found/lost 양방향 즉시 반영 PASS. v0.0.41 nsd 마이그레이션 + v0.0.38 BT outputLatency 베이크인 + v0.0.40 iOS 파일 선택 fix 그대로 유지.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.43** (2026-04-25) — iPhone 호스트 정지/재생/seek 버그 fix. iOS `AudioEngine.swift`의 `stop()`이 정지 시점 vf를 `seekFrameOffset`에 누적 + `getTimestamp()` 정지 분기에 vf/sampleRate/totalFrames 포함 반환. 정지 후 재생 시 정지 시점부터 이어지고, 정지 상태 seek도 정상 동작. v0.0.42 stale 방 fix + v0.0.41 nsd + v0.0.40 iOS 파일 선택 + v0.0.38 BT outputLatency 베이크인 그대로 유지.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -34,6 +34,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.39 + v0.0.40 (2026-04-25 (34))**: **iOS 파일 선택 크래시 + DRM 한계 발견·fix**. (33-3) 진단 중 iPhone 호스트 파일 선택 시 즉시 크래시 발견 → file_picker 8.x가 `FileType.audio`일 때 `MPMediaPickerController` 사용 + `NSAppleMusicUsageDescription` Info.plist 누락이라 SIGABRT. **v0.0.39 fix**: Info.plist에 `NSAppleMusicUsageDescription` 추가. 이후 picker는 열렸지만 Music 라이브러리만 보여줘 비어 보임 + Apple Music 구독곡은 FairPlay DRM이라 어차피 우리 엔진 디코드 불가. **v0.0.40 fix**: `pickFiles`를 `FileType.custom + allowedExtensions: ['mp3','m4a','wav','aac','flac','ogg']`로 변경 → iOS는 `UIDocumentPickerViewController` 사용 → Files/iCloud/On My iPhone 모든 source 표시. Android는 SAF mime 필터로 동일 동작, 회귀 없음. 상세: `docs/HISTORY.md` 2026-04-25 (34)
 - **v0.0.41 (2026-04-25 (35))**: **`discovery_service` nsd 마이그레이션 — 양방향 검색 PASS**. (33-3) 본격 fix. raw UDP `255.255.255.255` broadcast(iOS multicast entitlement 필요) → nsd 패키지(시스템 mDNS Bonjour, NSNetService + NsdManager). 인터페이스(`startBroadcast`/`discoverHosts`/`stop`) 호환 유지로 호출부 수정 0. roomCode는 mDNS TXT records로 전달. iOS Info.plist `NSBonjourServices=_synchorus._tcp` 이미 등록되어 추가 변경 0. **검증**: iPhone 호스트 + Android 게스트, Android 호스트 + iPhone 게스트 양방향 PASS. multicast entitlement 신청(1~2주) 우회. 상세: `docs/HISTORY.md` 2026-04-25 (35)
 - **v0.0.42 (2026-04-25 (36))**: **mDNS stale 방 fix — found/lost 즉시 반영 PASS**. v0.0.41 후 사용자 발견: 같은 호스트에서 방 만들기 → 나가기 반복 시 게스트 검색 화면에 stale 방 누적. 원인 두 가지 — 호스트 측 `discovery.stop()`이 await 없이 호출되어 ref.invalidate 전에 unregister 미완료 + 게스트 측 `ServiceStatus.lost` 미처리. **fix**: `room_screen.dart` `await discovery.stop()` + `discovery_service.dart`에 `_knownHosts` 맵 + `Stream<String> hostLeftStream` getter + lost 분기 emit + `home_screen.dart`이 구독해서 removeWhere. 검증: 한쪽 검색 켜놓고 다른쪽 방 만들었다 나갔다 반복 → 즉시 생겼다 사라짐 PASS. 상세: `docs/HISTORY.md` 2026-04-25 (36)
+- **v0.0.43 (2026-04-25 (38))**: **iPhone 호스트 정지/재생/seek 버그 fix**. (1) 정지 상태 seek 안 됨 (-5/+5 버튼 무반응, seek바 드래그 후 되돌아감), (2) 정지→재생 시 정지 시점이 아닌 마지막 seek 위치/0:00부터 재생, (3) 게스트 측 잠깐 끝 위치 잔상. 원인: iOS `AudioEngine.swift`의 `getTimestamp()` 정지 분기가 ok=false만 반환해 vf/sampleRate 누락 → Dart `_skipSeconds`가 0:00 기준으로 계산 + `stop()`이 vf를 `seekFrameOffset`에 저장 안 함. **fix**: getTimestamp 정지 분기에 stoppedReturn(vf/sampleRate/totalFrames/wallMs/outputLatencyMs 포함) + stop()에서 `seekFrameOffset += sampleTime` 누적. Android oboe는 이미 정상이라 변경 0. 사용자 체감 PASS. 상세: `docs/HISTORY.md` 2026-04-25 (38)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
 1. **BT 워밍업 잔여 개선 — (32) 후속, (33-2) 조사 + (37) Android 게스트 측정**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴 반복(정지/재생마다 anchor reset). **Android 게스트 BT(Galaxy+버즈)는 ~2초 정착으로 의외로 양호 — (33-2)의 "Android는 acoustic loopback 거의 유일" 가설 부분 반증** (Samsung HAL 정확 보고 추정). 우선순위 1순위는 **iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅)** 시도. C(acoustic loopback)는 우선순위 ↓. D(UX만)도 가능. 상세: `docs/HISTORY.md` 2026-04-25 (33-2), (37)
@@ -52,6 +53,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - v0.0.41 `discovery_service` nsd 마이그레이션 — iPhone 호스트 P2P discovery 양방향 검색 **PASS** (multicast entitlement 신청 우회).
 - v0.0.42 mDNS stale 방 fix — 호스트 await stop + 게스트 hostLeftStream lost 처리. found/lost 즉시 반영 PASS.
 - (37) Android 게스트 BT 시나리오 측정 — Galaxy+버즈는 ~2초 정착, (33-2) 가설 부분 반증.
+- v0.0.43 iPhone 호스트 정지/재생/seek 버그 fix — getTimestamp 정지 분기 vf 포함 + stop()에서 vf 저장. 사용자 체감 PASS.
 - S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`

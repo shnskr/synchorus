@@ -2138,6 +2138,35 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (38) — iPhone 호스트 정지/재생/seek 버그 fix (v0.0.43)
+
+**배경**: iPhone 호스트일 때 두 가지 버그 사용자 보고:
+1. **정지 상태에서 seek 안 됨**: -5/+5 버튼은 아예 안 움직이고, seek바 드래그앤드랍은 일시적으로 움직이지만 손 떼면 이전 위치로 돌아감
+2. **재생 → 정지 → 재생 시 정지 시점이 아닌 이전 위치(마지막 seek/0:00)부터 재생**
+3. (게스트 관찰) 호스트 재생 시작 시 게스트 화면이 잠깐 최대 재생시간으로 튀었다가 현재 위치로 돌아오는 잔상
+
+**원인 — iOS native (`AudioEngine.swift`) 두 곳**:
+
+1. `getTimestamp()` 정지 분기 (line 119~121): `["ok": false]`만 반환 → **`virtualFrame`/`sampleRate`/`totalFrames`/`wallAtFramePosNs` 키 모두 누락** → Dart `NativeTimestamp.fromMap`에서 fallback 0으로 → `_engine.latest.virtualFrame = 0` + `sampleRate = 0` → `_skipSeconds`의 `currentMs = 0`으로 계산 → seek가 0:00으로 되돌아감 + 게스트 측에 일시적 잘못된 vf 노출
+2. `stop()` (line 78~88): `playerNode.stop()` + `engine.stop()` + node 분리만 처리, **정지 시점의 vf를 `seekFrameOffset`에 저장 안 함** → 다음 `start()`의 `scheduleAndPlay(from: seekFrameOffset)`이 정지 직전 위치 모름 → 마지막 seek 위치(또는 0)부터 재생
+
+Android oboe는 `getLatestTimestamp`가 vf를 atomic load로 항상 유효 반환 + `mVirtualFrame`이 callback에서 매 frame 갱신 → 같은 버그 없음. iOS native만 수정.
+
+**v0.0.43 fix** (`ios/Runner/AudioEngine.swift`):
+1. `getTimestamp()`에 `stoppedReturn` 추가 — 정지/timestamp 무효 분기에서도 `virtualFrame`/`sampleRate`/`totalFrames`/`wallAtFramePosNs`/`outputLatencyMs` 포함해 반환. ok=false flag만 다름. ok=true 분기는 기존대로 framePos·timeNs 포함.
+2. `stop()` 진입 시 현재 `lastRenderTime` + `playerTime`으로 vf 계산 → `seekFrameOffset += sampleTime` 누적. 음수·totalFrames 초과는 clamp. 그 후 기존 stop 처리.
+
+**검증** (사용자 보고): "잘 되는 것 같아" — 체감 OK. 간접 데이터(logcat) 검증은 보조 옵션, 사용자 체감으로 1차 PASS.
+
+**남은 한계**:
+- iOS native만 변경, Android는 영향 없음 (이미 정상)
+- `_skipSeconds` 등 Dart 측은 변경 없음 — 호스트가 정확한 vf/sampleRate 받으니 자동으로 정상 동작
+- v0.0.42 게스트(Android)는 호환 그대로 (P2P 메시지·Dart 코드 변경 0)
+
+**변경 범위**: `ios/Runner/AudioEngine.swift` (`stop()` vf 저장 + `getTimestamp()` 정지 분기 stoppedReturn), `pubspec.yaml`(0.0.42→0.0.43). Dart·Android·iOS Info.plist 변경 0.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
