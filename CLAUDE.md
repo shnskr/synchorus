@@ -3,7 +3,7 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.41** (2026-04-25) — `discovery_service`를 raw UDP broadcast → nsd 패키지(시스템 mDNS/Bonjour) 마이그레이션. iOS multicast entitlement 신청 없이 양방향(iPhone 호스트 ↔ Android 게스트) 검색 PASS. v0.0.38 BT outputLatency 베이크인 + v0.0.40 iOS 파일 선택 fix 그대로 유지.
+v3 본 구현 진행 중. 최신 릴리스 **v0.0.42** (2026-04-25) — mDNS stale 방 fix. 호스트 측 `await discovery.stop()` + 게스트 측 `hostLeftStream`(ServiceStatus.lost) 구독으로 found/lost 양방향 즉시 반영 PASS. v0.0.41 nsd 마이그레이션 + v0.0.38 BT outputLatency 베이크인 + v0.0.40 iOS 파일 선택 fix 그대로 유지.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작
@@ -33,6 +33,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - **v0.0.38 (2026-04-25 (32))**: **drift 공식에 양쪽 outputLatency 반영 + anchor 베이크인 (BT 비대칭 보정)**. (a) baseline (BT 게스트, 3분)에서 csv <7ms 안정인데 음향 ~300ms 어긋남 = framePos가 BT codec/DAC 안 잡는 구조적 한계 발견. (b) 1차 변경(공식만 보정): csv -275ms 일관 + seek 0회 무한 anchor reset 발견. (b') anchor establishment에 outLatDelta 베이크인 (`_anchoredOutLatDeltaMs` 멤버, `_recomputeDrift`는 변화분만). **검증 PASS** (b'-1) BT: csv |d| <5ms + 사용자 체감 처음 40초 약간 + 이후 정확, (b'-2) 양쪽 내장: (30)/(31)와 동등 거동(<5ms, seek_count 0회). 처음 40초 잔여는 iOS outputLatency 워밍업 과소보고(Apple Forum #679274), 옵션 A(안정화 대기)·B(사전 워밍업)·C(acoustic loopback)·D(UX 명시)로 추가 개선 가능. 상세: `docs/HISTORY.md` 2026-04-25 (32)
 - **v0.0.39 + v0.0.40 (2026-04-25 (34))**: **iOS 파일 선택 크래시 + DRM 한계 발견·fix**. (33-3) 진단 중 iPhone 호스트 파일 선택 시 즉시 크래시 발견 → file_picker 8.x가 `FileType.audio`일 때 `MPMediaPickerController` 사용 + `NSAppleMusicUsageDescription` Info.plist 누락이라 SIGABRT. **v0.0.39 fix**: Info.plist에 `NSAppleMusicUsageDescription` 추가. 이후 picker는 열렸지만 Music 라이브러리만 보여줘 비어 보임 + Apple Music 구독곡은 FairPlay DRM이라 어차피 우리 엔진 디코드 불가. **v0.0.40 fix**: `pickFiles`를 `FileType.custom + allowedExtensions: ['mp3','m4a','wav','aac','flac','ogg']`로 변경 → iOS는 `UIDocumentPickerViewController` 사용 → Files/iCloud/On My iPhone 모든 source 표시. Android는 SAF mime 필터로 동일 동작, 회귀 없음. 상세: `docs/HISTORY.md` 2026-04-25 (34)
 - **v0.0.41 (2026-04-25 (35))**: **`discovery_service` nsd 마이그레이션 — 양방향 검색 PASS**. (33-3) 본격 fix. raw UDP `255.255.255.255` broadcast(iOS multicast entitlement 필요) → nsd 패키지(시스템 mDNS Bonjour, NSNetService + NsdManager). 인터페이스(`startBroadcast`/`discoverHosts`/`stop`) 호환 유지로 호출부 수정 0. roomCode는 mDNS TXT records로 전달. iOS Info.plist `NSBonjourServices=_synchorus._tcp` 이미 등록되어 추가 변경 0. **검증**: iPhone 호스트 + Android 게스트, Android 호스트 + iPhone 게스트 양방향 PASS. multicast entitlement 신청(1~2주) 우회. 상세: `docs/HISTORY.md` 2026-04-25 (35)
+- **v0.0.42 (2026-04-25 (36))**: **mDNS stale 방 fix — found/lost 즉시 반영 PASS**. v0.0.41 후 사용자 발견: 같은 호스트에서 방 만들기 → 나가기 반복 시 게스트 검색 화면에 stale 방 누적. 원인 두 가지 — 호스트 측 `discovery.stop()`이 await 없이 호출되어 ref.invalidate 전에 unregister 미완료 + 게스트 측 `ServiceStatus.lost` 미처리. **fix**: `room_screen.dart` `await discovery.stop()` + `discovery_service.dart`에 `_knownHosts` 맵 + `Stream<String> hostLeftStream` getter + lost 분기 emit + `home_screen.dart`이 구독해서 removeWhere. 검증: 한쪽 검색 켜놓고 다른쪽 방 만들었다 나갔다 반복 → 즉시 생겼다 사라짐 PASS. 상세: `docs/HISTORY.md` 2026-04-25 (36)
 
 ### 다음 세션 재개 포인트 (우선순위 제안)
 1. **BT 워밍업 잔여 개선 — (32) 후속, 외부 자료 조사 완료 (33-2)**. 정지/재생마다 anchor reset되어 처음 ~40초 잔여 패턴 반복. iOS는 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) / B(rolling median) / C(acoustic loopback) / D(UX만)로 분기. **Android 게스트 BT는 Oboe `calculateLatencyMillis()`가 codec/radio 안 잡아서 게이팅만으론 부족 → C가 거의 유일** (Oboe wiki 명시). 결정 필요. 상세: `docs/HISTORY.md` 2026-04-25 (33-2)
@@ -49,6 +50,7 @@ v2 AudioSyncService 삭제됨 — NativeAudioSyncService로 교체. audio_handle
 - (33) `_resetDriftState`에 `_anchoredOutLatDeltaMs = 0` 한 줄 추가 (안전성). BT 워밍업 잔여 외부 자료 조사 완료(옵션 A/B/C/D 평가).
 - v0.0.39 + v0.0.40 iOS 파일 선택 크래시 fix (`NSAppleMusicUsageDescription`) + `FileType.custom + allowedExtensions`로 Files/iCloud 모든 source 표시.
 - v0.0.41 `discovery_service` nsd 마이그레이션 — iPhone 호스트 P2P discovery 양방향 검색 **PASS** (multicast entitlement 신청 우회).
+- v0.0.42 mDNS stale 방 fix — 호스트 await stop + 게스트 hostLeftStream lost 처리. found/lost 즉시 반영 PASS.
 - S22 dual-app(user 95) 환경 발견 + csv 위치 가이드 메모리화.
 
 상세: `docs/HISTORY.md` (최근 섹션 #14~#17), `docs/LIFECYCLE.md`, `docs/PLAN.md`

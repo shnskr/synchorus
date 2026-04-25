@@ -351,7 +351,10 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
 
     // 정리 완료 후 이동 (구독 취소했으므로 블로킹 없음)
     sync.reset();
-    discovery.stop();
+    // mDNS unregister가 goodbye 패킷 송신을 끝낼 때까지 await.
+    // await 없이 다음 줄의 ref.invalidate가 즉시 인스턴스 교체하면 unregister
+    // 중간 중단 → 게스트 cache에 stale 방이 남아 검색에 계속 보임 (#35 후속).
+    await discovery.stop();
     // 호스트가 정식 나가기: host-closed broadcast 후 disconnect.
     // 이미 host-closed 수신(게스트측)이거나 비정상 경로면 일반 disconnect.
     if (widget.isHost && !_lifecycle.hostClosed.value) {

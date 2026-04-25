@@ -18,7 +18,7 @@ final p2pServiceProvider = Provider<P2PService>((ref) {
 
 final discoveryServiceProvider = Provider<DiscoveryService>((ref) {
   final service = DiscoveryService();
-  ref.onDispose(() => service.stop());
+  ref.onDispose(() => service.dispose());
   return service;
 });
 

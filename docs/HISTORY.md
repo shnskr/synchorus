@@ -2052,6 +2052,47 @@ final driftMs = dGms - dHms - dynLatDeltaMs;       // 시간 변화분만 보정
 
 ---
 
+### 2026-04-25 (36) — mDNS stale 방 fix (v0.0.42) — found/lost 즉시 반영 PASS
+
+**배경**: v0.0.41 nsd 마이그레이션 후 사용자가 같은 호스트 기기에서 방 만들기 → 나가기 반복하니 게스트 검색 화면에 stale 방이 누적 발견. 이미지 보고: S22(172.30.1.25)에서 만든 방 코드 7728/6457/3323 등 동시에 표시됨. 원인은 두 가지.
+
+**원인 1 — 호스트 측 unregister 누락**:
+- `room_screen.dart:354`의 `discovery.stop()`이 **await 없이 fire-and-forget** 호출
+- 바로 다음 줄들에서 `ref.invalidate(discoveryServiceProvider)` 등 인스턴스 교체 → `nsd.unregister()`가 mDNS goodbye 패킷 송신 완료 전 중단되거나 실행 안 됨
+- → 게스트 cache에 stale record가 TTL(75~120초) 만료까지 남음
+
+**원인 2 — 게스트 측 lost 이벤트 미처리**:
+- `discovery_service.dart`의 listener가 `ServiceStatus.found`만 emit
+- `ServiceStatus.lost`(mDNS goodbye 또는 TTL 만료) 발생해도 게스트 UI는 그대로 → `home_screen.dart`가 lost 알 길 없음
+
+**v0.0.42 fix**:
+1. **`room_screen.dart:354`**: `discovery.stop()` → `await discovery.stop()`. ref.invalidate 전에 unregister + goodbye 송신 완료 보장
+2. **`discovery_service.dart`**:
+   - `Map<String, DiscoveredHost> _knownHosts` (service.name → host) 내부 맵 추가, found 시 등록
+   - `ServiceStatus.lost` 분기 추가: `_knownHosts.remove(serviceName)` → `_hostLostController.add(roomCode)`
+   - `Stream<String> get hostLeftStream` getter 추가 (broadcast)
+   - `dispose()` 메서드 추가: stop() + lost controller close
+3. **`app_providers.dart`**: `discoveryServiceProvider`의 `onDispose`를 `stop()` → `dispose()`로 (broadcast controller leak 방지)
+4. **`home_screen.dart`**:
+   - `StreamSubscription? _hostLeftSub` 필드 추가
+   - `_startDiscovery`에서 `discovery.hostLeftStream.listen((roomCode) → removeWhere)` 구독
+   - `_stopDiscovery`/`dispose`/`_joinRoom` 흐름에 `_hostLeftSub?.cancel()` 추가
+
+**검증** (사용자 보고): "한쪽에선 검색 눌러놓고 다른쪽은 방만들었다 나갔다하면 검색하는쪽에선 바로바로 생겼다가 사라졌다해" — found/lost 양방향 즉시 반영 **PASS**. stale 방 누적 0.
+
+**효과**:
+- 호스트 → 게스트 cache 동기화가 mDNS goodbye 기반으로 즉시 작동
+- 호스트가 비정상 종료(force kill)되면 lost 이벤트가 TTL 만료 시점에 emit (75~120초). 정상 흐름은 즉시
+- list에 표시되는 방의 신뢰도 ↑, 사용자가 눌러서 connect 시도 시 "호스트 응답 없음" 비율 ↓
+
+**남은 한계**:
+- 호스트 비정상 종료(앱 강제 종료, 라우터 끊김) 시 lost 이벤트는 TTL 만료까지 지연 — mDNS 표준 거동. 사용자 체감엔 보통 75~120초 후 사라짐
+- 다른 LAN segment(VLAN 등) 분리되면 원래 mDNS 자체가 안 뜸 (라우터 재구성 외 fix 불가)
+
+**변경 범위**: `lib/screens/room_screen.dart`(await 한 줄), `lib/services/discovery_service.dart`(_knownHosts + lost 분기 + dispose), `lib/providers/app_providers.dart`(onDispose dispose로 변경), `lib/screens/home_screen.dart`(_hostLeftSub 구독 + 정리), `pubspec.yaml`(0.0.41→0.0.42). native·iOS Info.plist·Android Manifest 변경 0.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -34,6 +34,14 @@ class DiscoveryService {
   nsd.Registration? _registration;
   nsd.Discovery? _discovery;
   StreamController<DiscoveredHost>? _hostController;
+  // 호스트가 mDNS goodbye 또는 TTL 만료로 사라진 경우 emit. 호출자(home_screen)는
+  // 이걸 들어 검색 리스트에서 제거 → stale 방이 계속 표시되는 문제 차단.
+  // service.name 기반 내부 맵으로 found↔lost 매칭, lost 시 roomCode를 emit.
+  final StreamController<String> _hostLostController =
+      StreamController<String>.broadcast();
+  final Map<String, DiscoveredHost> _knownHosts = {};
+
+  Stream<String> get hostLeftStream => _hostLostController.stream;
 
   /// 호스트: 자기 서비스를 mDNS에 publish.
   Future<void> startBroadcast({
@@ -76,6 +84,16 @@ class DiscoveryService {
 
     discovery.addServiceListener((service, status) {
       if (controller.isClosed) return;
+      final serviceName = service.name;
+      if (serviceName == null) return;
+
+      if (status == nsd.ServiceStatus.lost) {
+        final lost = _knownHosts.remove(serviceName);
+        if (lost != null && !_hostLostController.isClosed) {
+          _hostLostController.add(lost.roomCode);
+        }
+        return;
+      }
       if (status != nsd.ServiceStatus.found) return;
 
       final addresses = service.addresses;
@@ -103,12 +121,14 @@ class DiscoveryService {
         }
       }
 
-      controller.add(DiscoveredHost(
+      final host = DiscoveredHost(
         name: service.name ?? 'Unknown',
         ip: addr.address,
         port: port,
         roomCode: roomCode,
-      ));
+      );
+      _knownHosts[serviceName] = host;
+      controller.add(host);
     });
 
     yield* controller.stream;
@@ -127,10 +147,18 @@ class DiscoveryService {
       } catch (_) {}
       _discovery = null;
     }
+    _knownHosts.clear();
     final c = _hostController;
     _hostController = null;
     if (c != null && !c.isClosed) {
       await c.close();
+    }
+  }
+
+  Future<void> dispose() async {
+    await stop();
+    if (!_hostLostController.isClosed) {
+      await _hostLostController.close();
     }
   }
 }

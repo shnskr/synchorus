@@ -22,6 +22,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   final _codeController = TextEditingController();
   List<DiscoveredHost> _discoveredHosts = [];
   StreamSubscription? _discoverySub;
+  StreamSubscription? _hostLeftSub;
   bool _isSearching = false;
   bool _isJoining = false;
   String _versionLabel = '';
@@ -43,6 +44,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   void dispose() {
     _codeController.dispose();
     _discoverySub?.cancel();
+    _hostLeftSub?.cancel();
     super.dispose();
   }
 
@@ -97,12 +99,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
         _discoveredHosts.add(host);
       });
     });
+    // mDNS lost(호스트 종료/TTL 만료) 신호 → 리스트에서 제거.
+    // 없으면 stale 방이 검색에 계속 남음 (#35-2).
+    _hostLeftSub = discovery.hostLeftStream.listen((roomCode) {
+      setState(() {
+        _discoveredHosts.removeWhere((h) => h.roomCode == roomCode);
+      });
+    });
   }
 
   /// 검색 취소
   void _stopDiscovery() {
     _discoverySub?.cancel();
     _discoverySub = null;
+    _hostLeftSub?.cancel();
+    _hostLeftSub = null;
     ref.read(discoveryServiceProvider).stop();
     setState(() {
       _isSearching = false;
@@ -131,6 +142,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       } catch (_) {}
 
       _discoverySub?.cancel();
+      _hostLeftSub?.cancel();
       ref.read(discoveryServiceProvider).stop();
 
       if (mounted) {
