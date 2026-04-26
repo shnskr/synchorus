@@ -32,8 +32,21 @@ class MainActivity : AudioServiceActivity() {
                             }.start()
                         }
                     }
+                    "prewarm" -> result.success(NativeAudio.nativePrewarm())
+                    "coolDown" -> result.success(NativeAudio.nativeCoolDown())
                     "start" -> result.success(NativeAudio.nativeStart())
                     "stop" -> result.success(NativeAudio.nativeStop())
+                    "scheduleStart" -> {
+                        val args = call.arguments as? Map<*, *>
+                        val wallMs = (args?.get("wallEpochMs") as? Number)?.toLong()
+                        val fromFrame = (args?.get("fromFrame") as? Number)?.toLong()
+                        if (wallMs == null || fromFrame == null) {
+                            result.error("ARG", "scheduleStart requires wallEpochMs+fromFrame", null)
+                        } else {
+                            result.success(NativeAudio.nativeScheduleStart(wallMs, fromFrame))
+                        }
+                    }
+                    "cancelSchedule" -> result.success(NativeAudio.nativeCancelSchedule())
                     "getTimestamp" -> {
                         val arr = NativeAudio.nativeGetTimestamp()
                         // arr[7]는 outputLatencyMs를 micro 단위 long으로 인코딩한 값.

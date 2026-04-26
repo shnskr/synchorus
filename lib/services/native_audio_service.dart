@@ -117,8 +117,21 @@ class NativeAudioService {
     }
   }
 
+  /// 엔진 사전 워밍업 (오디오 세션 활성화 + 엔진 가동, PCM 송신 0).
+  /// loadFile 직후 호출하면 BT codec/AVAudioSession 워밍업 + outputLatency 안정화가
+  /// 미리 끝나, 다음 start() 지연이 100~500ms → 수십 ms로 단축. (v0.0.44)
+  Future<bool> prewarm() async {
+    return await _channel.invokeMethod<bool>('prewarm') ?? false;
+  }
+
+  /// prewarm 효과 해제 (엔진/세션 내림). audioFile 보존, 다음 prewarm/start 시
+  /// 디코딩 재사용. iOS는 setActive(false)로 다른 앱 오디오 풀어줌. (v0.0.44)
+  Future<bool> coolDown() async {
+    return await _channel.invokeMethod<bool>('coolDown') ?? false;
+  }
+
   /// 엔진 시작 (오디오 세션 활성화 + 재생 시작).
-  /// loadFile 호출 후 사용.
+  /// loadFile 호출 후 사용. prewarm 됐으면 그 효과 활용.
   Future<bool> start() async {
     return await _channel.invokeMethod<bool>('start') ?? false;
   }
@@ -126,6 +139,23 @@ class NativeAudioService {
   /// 엔진 정지.
   Future<bool> stop() async {
     return await _channel.invokeMethod<bool>('stop') ?? false;
+  }
+
+  /// NTP-style 예약 재생 (v0.0.47).
+  /// [wallEpochMs]: 시작할 wall clock 시각 (ms epoch).
+  /// [fromFrame]: 시작할 콘텐츠 frame (sample rate는 파일 sr 기준).
+  /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
+  /// iOS는 `AVAudioPlayerNode.play(at:)`, Android는 oboe 콜백 안에서 wall 비교.
+  Future<bool> scheduleStart(int wallEpochMs, int fromFrame) async {
+    return await _channel.invokeMethod<bool>('scheduleStart', {
+      'wallEpochMs': wallEpochMs,
+      'fromFrame': fromFrame,
+    }) ?? false;
+  }
+
+  /// 진행 중인 schedule 취소 (호스트 syncPause 등).
+  Future<bool> cancelSchedule() async {
+    return await _channel.invokeMethod<bool>('cancelSchedule') ?? false;
   }
 
   /// 타임스탬프 조회 (sync용).

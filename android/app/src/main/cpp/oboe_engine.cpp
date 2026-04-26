@@ -188,16 +188,22 @@ public:
         return true;
     }
 
-    bool start() {
+    // stream을 미리 만들고 requestStart까지 수행하되, mPrewarmIdle=true로 콜백을
+    // 무음 + vf 동결 모드로 만든다. 다음 start()에서 flag만 풀면 즉시 정상 출력 →
+    // BT codec/HAL 워밍업 + outputLatency 안정값 수렴이 미리 끝나 있음. (v0.0.44)
+    bool prewarm() {
         std::lock_guard<std::mutex> lock(mLock);
         if (mStream) {
-            LOGI("start: stream already exists, returning true");
+            LOGI("prewarm: stream already exists, returning true");
             return true;
         }
         if (!mFileLoaded) {
-            LOGE("start: no file loaded");
+            LOGE("prewarm: no file loaded");
             return false;
         }
+        // start() 시 콜백이 정상 동작하도록 false로 시작 — 그 후 release-store로
+        // true 설정 (콜백이 캐시한 값을 못 읽도록).
+        mPrewarmIdle.store(true, std::memory_order_release);
 
         oboe::AudioStreamBuilder builder;
         oboe::Result result = builder
@@ -213,37 +219,140 @@ public:
             ->openStream(mStream);
 
         if (result != oboe::Result::OK) {
-            LOGE("openStream: %s", oboe::convertToText(result));
+            LOGE("prewarm openStream: %s", oboe::convertToText(result));
             mStream.reset();
+            mPrewarmIdle.store(false, std::memory_order_relaxed);
             return false;
         }
 
         mStreamSampleRate = mStream->getSampleRate();
-        LOGI("stream OK: reqSR=%d actualSR=%d burst=%d",
+        LOGI("prewarm stream OK: reqSR=%d actualSR=%d burst=%d",
              mDecodedSampleRate, mStreamSampleRate,
              mStream->getFramesPerBurst());
 
         result = mStream->requestStart();
         if (result != oboe::Result::OK) {
-            LOGE("requestStart: %s", oboe::convertToText(result));
+            LOGE("prewarm requestStart: %s", oboe::convertToText(result));
+            mStream->close();
+            mStream.reset();
+            mPrewarmIdle.store(false, std::memory_order_relaxed);
+            return false;
+        }
+        return true;
+    }
+
+    bool start() {
+        // v0.0.46: pause/resume 모델. stop()이 close + reset 안 하고 pause만 함.
+        // 이미 stream 있으면 requestStart로 재개 (setup latency 0 — Android edge case
+        // (42) fix: 정지/재생 시 stream 새로 open 안 해 게스트가 즉시 출력).
+        // 첫 호출 또는 unload 후엔 stream 새로 open.
+        std::lock_guard<std::mutex> lock(mLock);
+        if (mStream) {
+            mPrewarmIdle.store(false, std::memory_order_release);
+            // pause 상태면 resume. 이미 active면 무해.
+            if (mStream->getState() == oboe::StreamState::Paused ||
+                mStream->getState() == oboe::StreamState::Pausing) {
+                oboe::Result result = mStream->requestStart();
+                if (result != oboe::Result::OK) {
+                    LOGE("start (resume): %s", oboe::convertToText(result));
+                    return false;
+                }
+            }
+            return true;
+        }
+        if (!mFileLoaded) {
+            LOGE("start: no file loaded");
+            return false;
+        }
+        // prewarm은 mLock을 잡으므로 lock 풀고 호출.
+        // (mStream 없는 게 확정이므로 race 없음 — Dart 측에서 직렬 호출.)
+        return prewarmInternal_locked();
+    }
+
+private:
+    // start 내부에서 호출 (lock 이미 잡혀있음).
+    bool prewarmInternal_locked() {
+        if (mStream) {
+            return true;
+        }
+        if (!mFileLoaded) return false;
+        mPrewarmIdle.store(false, std::memory_order_release);
+
+        oboe::AudioStreamBuilder builder;
+        oboe::Result result = builder
+            .setDirection(oboe::Direction::Output)
+            ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+            ->setSharingMode(oboe::SharingMode::Exclusive)
+            ->setFormat(oboe::AudioFormat::Float)
+            ->setChannelCount(oboe::ChannelCount::Stereo)
+            ->setSampleRate(mDecodedSampleRate)
+            ->setSampleRateConversionQuality(
+                oboe::SampleRateConversionQuality::Medium)
+            ->setDataCallback(this)
+            ->openStream(mStream);
+
+        if (result != oboe::Result::OK) {
+            LOGE("start openStream: %s", oboe::convertToText(result));
+            mStream.reset();
+            return false;
+        }
+
+        mStreamSampleRate = mStream->getSampleRate();
+        LOGI("start stream OK: reqSR=%d actualSR=%d burst=%d",
+             mDecodedSampleRate, mStreamSampleRate,
+             mStream->getFramesPerBurst());
+
+        result = mStream->requestStart();
+        if (result != oboe::Result::OK) {
+            LOGE("start requestStart: %s", oboe::convertToText(result));
             mStream->close();
             mStream.reset();
             return false;
         }
         return true;
     }
+public:
 
+    // v0.0.46 (42) fix: pause/resume 모델. stream을 close하지 않고 pause만 함.
+    // 다음 start() 시 stream 새로 open 안 해 setup latency 0 → 정지/재생 시
+    // 게스트가 즉시 출력 (HISTORY (42) edge case). 진짜 close는 unload()에서.
     bool stop() {
+        std::lock_guard<std::mutex> lock(mLock);
+        if (!mStream) return true;
+        if (mStream->getState() == oboe::StreamState::Started ||
+            mStream->getState() == oboe::StreamState::Starting) {
+            oboe::Result result = mStream->requestPause();
+            if (result != oboe::Result::OK) {
+                LOGE("stop (pause): %s", oboe::convertToText(result));
+                // pause 실패 시 close + reset으로 fallback.
+                mStream->requestStop();
+                mStream->close();
+                mStream.reset();
+            }
+        }
+        mPrewarmIdle.store(false, std::memory_order_relaxed);
+        return true;
+    }
+
+    // 완전 close (방 나가기 / 새 파일 로드 시 unload에서 호출).
+    bool fullStop() {
         std::lock_guard<std::mutex> lock(mLock);
         if (!mStream) return true;
         mStream->requestStop();
         mStream->close();
         mStream.reset();
+        mPrewarmIdle.store(false, std::memory_order_relaxed);
         return true;
     }
 
+    // idle 자동 해제용. v0.0.46 기준 stop과 동일 (호출은 dead path).
+    bool coolDown() {
+        return stop();
+    }
+
     bool unload() {
-        stop();
+        // v0.0.46: stop은 pause만 하므로 unload에선 진짜 close 필요.
+        fullStop();
         stopDecodeThread();
         resetState();
         mVirtualFrame.store(0, std::memory_order_relaxed);
@@ -354,6 +463,43 @@ public:
         return mMuted.load(std::memory_order_relaxed);
     }
 
+    /// NTP-style 예약 재생 (v0.0.47). data callback 안에서 wall clock과 비교 →
+    /// 예약 시각 도달 시 정상 출력 시작 (그 전엔 silent + vf 동결).
+    /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
+    bool scheduleStart(int64_t wallEpochMs, int64_t fromFrame) {
+        if (!mFileLoaded) {
+            LOGE("scheduleStart: no file loaded");
+            return false;
+        }
+
+        // 시작 frame 미리 갱신 (silent 동안 동결됨, 도달 시 +elapsed 보정)
+        int64_t clamped = std::max(int64_t(0), std::min(fromFrame, mDecodedTotalFrames));
+        mVirtualFrame.store(clamped, std::memory_order_relaxed);
+        mScheduledStartFromFrame.store(clamped, std::memory_order_relaxed);
+
+        // 시작 wall ns 등록
+        mScheduledStartWallNs.store(wallEpochMs * 1000000LL, std::memory_order_release);
+        mScheduledStartActive.store(true, std::memory_order_release);
+
+        // stream 보장 (없으면 새로 open + start, 있으면 resume)
+        bool ok = start();
+        if (!ok) {
+            mScheduledStartActive.store(false, std::memory_order_relaxed);
+            LOGE("scheduleStart: start() failed");
+            return false;
+        }
+        LOGI("scheduleStart: wallMs=%lld fromFrame=%lld",
+             static_cast<long long>(wallEpochMs),
+             static_cast<long long>(clamped));
+        return true;
+    }
+
+    /// 진행 중인 schedule 취소 + 출력 정지 (pause 모델).
+    bool cancelSchedule() {
+        mScheduledStartActive.store(false, std::memory_order_relaxed);
+        return stop();
+    }
+
     bool seekToFrame(int64_t newFrame) {
         if (!mFileLoaded) return false;
         int64_t clamped = std::max(
@@ -387,6 +533,46 @@ public:
             memset(audioData, 0,
                    static_cast<size_t>(numFrames * outCh) * sizeof(float));
             return oboe::DataCallbackResult::Continue;
+        }
+
+        // prewarmed but not playing: 무음 출력 + vf 동결. AAudio/BT codec은
+        // 깨어있어 워밍업 효과는 유지되지만 PCM은 0이고 시간도 진행 안 함.
+        // start() 시 mPrewarmIdle=false로 전환되면 다음 콜백부터 정상 출력. (v0.0.44)
+        if (mPrewarmIdle.load(std::memory_order_acquire)) {
+            memset(audioData, 0,
+                   static_cast<size_t>(numFrames * outCh) * sizeof(float));
+            return oboe::DataCallbackResult::Continue;
+        }
+
+        // NTP-style 예약 재생 (v0.0.47): 시작 wall time 도달 전엔 silent + vf 동결.
+        // 도달 시 elapsed만큼 vf 보정 후 active=false → 정상 출력.
+        if (mScheduledStartActive.load(std::memory_order_acquire)) {
+            struct timespec ts;
+            clock_gettime(CLOCK_REALTIME, &ts);
+            int64_t nowWallNs =
+                static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
+            int64_t startWallNs =
+                mScheduledStartWallNs.load(std::memory_order_relaxed);
+            if (nowWallNs < startWallNs) {
+                // 아직 시작 시각 안 됨 → silent
+                memset(audioData, 0,
+                       static_cast<size_t>(numFrames * outCh) * sizeof(float));
+                return oboe::DataCallbackResult::Continue;
+            }
+            // 시작 시각 도달 — elapsed만큼 frame 보정 후 active=false
+            int64_t elapsedNs = nowWallNs - startWallNs;
+            int64_t elapsedFrames =
+                elapsedNs * mDecodedSampleRate / 1000000000LL;
+            int64_t fromFrame =
+                mScheduledStartFromFrame.load(std::memory_order_relaxed);
+            mVirtualFrame.store(fromFrame + elapsedFrames,
+                               std::memory_order_relaxed);
+            mScheduledStartActive.store(false, std::memory_order_release);
+            LOGI("scheduledStart fired: elapsedNs=%lld elapsedFrames=%lld vf=%lld",
+                 static_cast<long long>(elapsedNs),
+                 static_cast<long long>(elapsedFrames),
+                 static_cast<long long>(fromFrame + elapsedFrames));
+            // 그 다음 정상 출력 코드 그대로 진행 (아래로 떨어짐)
         }
 
         const bool muted = mMuted.load(std::memory_order_relaxed);
@@ -425,6 +611,13 @@ private:
     int32_t mStreamSampleRate = 48000;
     std::atomic<int64_t> mVirtualFrame{0};
     std::atomic<bool> mMuted{false};
+    // prewarm 상태에서 콜백을 무음 + vf 동결 모드로 만드는 플래그. (v0.0.44)
+    std::atomic<bool> mPrewarmIdle{false};
+    // NTP-style 예약 재생 (v0.0.47). active=true이면 콜백이 wall clock과 비교해
+    // mScheduledStartWallNs 도달 전엔 silent + vf 동결, 도달 후 elapsed 보정 후 정상 출력.
+    std::atomic<bool> mScheduledStartActive{false};
+    std::atomic<int64_t> mScheduledStartWallNs{0};
+    std::atomic<int64_t> mScheduledStartFromFrame{0};
     std::mutex mLock;
 
     // getTimestamp 실패 원인 진단용. logcat 폭주를 막기 위해 연속 실패(streak)
@@ -827,6 +1020,18 @@ Java_com_synchorus_synchorus_NativeAudio_nativeGetLastError(
 }
 
 JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativePrewarm(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().prewarm() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeCoolDown(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().coolDown() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeStart(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().start() ? JNI_TRUE : JNI_FALSE;
@@ -836,6 +1041,20 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeStop(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().stop() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeScheduleStart(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong wallEpochMs, jlong fromFrame) {
+    return engine().scheduleStart(
+        static_cast<int64_t>(wallEpochMs), static_cast<int64_t>(fromFrame))
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeCancelSchedule(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().cancelSchedule() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jlongArray JNICALL

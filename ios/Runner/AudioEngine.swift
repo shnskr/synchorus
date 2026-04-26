@@ -10,6 +10,10 @@ class AudioEngine {
     private var sampleRate: Double = 48000
     private var seekFrameOffset: Int64 = 0
     private var isEngineRunning = false
+    // prewarm: AVAudioSession + engine만 미리 데움. 노드는 attach만 하고 play X.
+    // 다음 start()에서 scheduleAndPlay만 하면 BT codec/세션 워밍업이 이미 끝나
+    // 있어 첫 재생 정착 시간 단축 (v0.0.44).
+    private var sessionActivated = false
 
     private static var timebaseInfo: mach_timebase_info_data_t = {
         var info = mach_timebase_info_data_t()
@@ -40,38 +44,87 @@ class AudioEngine {
         }
     }
 
-    func start() -> Bool {
+    /// AVAudioSession만 미리 active. **engine.start / 노드 attach는 start()에서**.
+    /// 이유: engine을 prewarm에서 start하면 `outputNode.lastRenderTime.sampleTime`
+    /// 이 prewarm 시점부터 누적되어 `getTimestamp().framePos`가 콘텐츠 frame과
+    /// 분리됨 → anchor establish 시 호스트 콘텐츠 frame 외삽이 부정확 + 음향상
+    /// ~5ms 어긋남 (v0.0.44 (40-1) 실측: guest fpVfDiff 54,467초 누적 확인).
+    /// → setActive(true)까지만 미리 = BT routing/codec 워밍업 + outputLatency
+    /// 측정 시작은 가능, framePos 누적은 차단 (v0.0.44 (40-2)).
+    func prewarm() -> Bool {
         if isEngineRunning { return true }
-        guard let file = audioFile else {
-            print("[AudioEngine] start: no file loaded")
+        guard audioFile != nil else {
+            print("[AudioEngine] prewarm: no file loaded")
             return false
         }
-
+        if sessionActivated { return true }
         do {
             let session = AVAudioSession.sharedInstance()
             try session.setCategory(.playback, mode: .default)
             try session.setPreferredSampleRate(sampleRate)
             try session.setPreferredIOBufferDuration(0.005)
             try session.setActive(true)
+            sessionActivated = true
+            print("[AudioEngine] prewarm: session active outLat=\(session.outputLatency)")
+            return true
+        } catch {
+            print("[AudioEngine] prewarm error: \(error)")
+            sessionActivated = false
+            return false
+        }
+    }
 
-            let hwRate = session.sampleRate
-            print("[AudioEngine] hw sr=\(hwRate), file sr=\(sampleRate), ioBuf=\(session.ioBufferDuration), outLatency=\(session.outputLatency)")
+    func start() -> Bool {
+        if isEngineRunning {
+            scheduleAndPlay(from: seekFrameOffset)
+            return true
+        }
+        guard let file = audioFile else {
+            print("[AudioEngine] start: no file loaded")
+            return false
+        }
+        do {
+            // prewarm이 setActive까지만 하므로 여기서 session 보장 + engine 가동.
+            if !sessionActivated {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default)
+                try session.setPreferredSampleRate(sampleRate)
+                try session.setPreferredIOBufferDuration(0.005)
+                try session.setActive(true)
+                sessionActivated = true
+            }
+            let session = AVAudioSession.sharedInstance()
+            print("[AudioEngine] start: hw sr=\(session.sampleRate), file sr=\(sampleRate), ioBuf=\(session.ioBufferDuration), outLat=\(session.outputLatency)")
 
             let node = AVAudioPlayerNode()
             playerNode = node
-
             engine.attach(node)
             engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
-
             try engine.start()
             isEngineRunning = true
-
             scheduleAndPlay(from: seekFrameOffset)
             return true
         } catch {
             print("[AudioEngine] start error: \(error)")
             return false
         }
+    }
+
+    /// idle 자동 해제용. engine + AVAudioSession을 내려 다른 앱 오디오를 풀어줌.
+    /// audioFile은 유지 → 다음 prewarm/start 시 디코딩 재사용. (v0.0.44)
+    @discardableResult
+    func coolDown() -> Bool {
+        if isEngineRunning { stop() }
+        if sessionActivated {
+            do {
+                try AVAudioSession.sharedInstance().setActive(
+                    false, options: .notifyOthersOnDeactivation)
+            } catch {
+                print("[AudioEngine] coolDown deactivate error: \(error)")
+            }
+            sessionActivated = false
+        }
+        return true
     }
 
     @discardableResult
@@ -98,11 +151,101 @@ class AudioEngine {
         return true
     }
 
+    /// NTP-style 예약 재생 (v0.0.47). wall clock ms → mach hostTime 변환 후
+    /// `playerNode.play(at: AVAudioTime)`로 정확한 시각에 출력 시작.
+    /// 양쪽 (호스트·게스트)가 같은 wallEpochMs를 약속해 동시 출력 → anchor 의존 제거.
+    func scheduleStart(wallEpochMs: Int64, fromFrame: Int64) -> Bool {
+        guard let file = audioFile else {
+            print("[AudioEngine] scheduleStart: no file loaded")
+            return false
+        }
+        // 세션·엔진 보장
+        do {
+            if !sessionActivated {
+                let session = AVAudioSession.sharedInstance()
+                try session.setCategory(.playback, mode: .default)
+                try session.setPreferredSampleRate(sampleRate)
+                try session.setPreferredIOBufferDuration(0.005)
+                try session.setActive(true)
+                sessionActivated = true
+            }
+            if !isEngineRunning {
+                let node = AVAudioPlayerNode()
+                playerNode = node
+                engine.attach(node)
+                engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
+                try engine.start()
+                isEngineRunning = true
+            }
+        } catch {
+            print("[AudioEngine] scheduleStart engine setup error: \(error)")
+            return false
+        }
+        guard let node = playerNode else { return false }
+
+        // 이전 schedule/재생 취소
+        node.stop()
+        seekFrameOffset = max(0, min(fromFrame, Int64(file.length)))
+
+        // 콘텐츠 segment schedule (즉시 큐만)
+        let remaining = file.length - AVAudioFramePosition(seekFrameOffset)
+        guard remaining > 0 else { return false }
+        node.scheduleSegment(
+            file,
+            startingFrame: AVAudioFramePosition(seekFrameOffset),
+            frameCount: AVAudioFrameCount(remaining),
+            at: nil
+        )
+
+        // wall time → mach hostTime 변환
+        let wallNowMs = Int64(Date().timeIntervalSince1970 * 1000)
+        let delayMs = wallEpochMs - wallNowMs
+        let info = Self.timebaseInfo
+        let nowHostTime = mach_absolute_time()
+        // delay (ms) → host ticks: ms * 1e6 ns/ms * denom / numer
+        let delayHostTicks: UInt64
+        if delayMs > 0 {
+            delayHostTicks = UInt64(delayMs) * 1_000_000 * UInt64(info.denom) / UInt64(info.numer)
+        } else {
+            delayHostTicks = 0
+        }
+        let scheduledHostTime = nowHostTime + delayHostTicks
+        let avTime = AVAudioTime(hostTime: scheduledHostTime)
+
+        node.play(at: avTime)
+        print("[AudioEngine] scheduleStart: wallMs=\(wallEpochMs) delayMs=\(delayMs) fromFrame=\(seekFrameOffset)")
+        return true
+    }
+
+    /// 진행 중인 schedule 취소 + 노드 정지. session·engine은 유지.
+    func cancelSchedule() -> Bool {
+        if let node = playerNode {
+            // 정지 시점 vf를 seekFrameOffset에 누적 (v0.0.43 (38) 패턴)
+            if let nodeTime = node.lastRenderTime,
+               nodeTime.isSampleTimeValid,
+               let playerTime = node.playerTime(forNodeTime: nodeTime) {
+                seekFrameOffset += Int64(playerTime.sampleTime)
+                if let file = audioFile {
+                    seekFrameOffset = max(0, min(seekFrameOffset, file.length))
+                }
+            }
+            node.stop()
+        }
+        return true
+    }
+
     func seekToFrame(_ newFrame: Int64) -> Bool {
         guard let file = audioFile else { return false }
         seekFrameOffset = max(0, min(newFrame, Int64(file.length)))
 
         guard let node = playerNode, isEngineRunning else {
+            return true
+        }
+
+        // prewarmed but not playing 상태에서 seek 호출 가능 (게스트 seek-notify).
+        // 이때 reschedule하면 의도치 않게 재생 시작됨 → seekFrameOffset만 갱신,
+        // 다음 start()가 새 위치에서 scheduleAndPlay. (v0.0.44)
+        guard node.isPlaying else {
             return true
         }
 
@@ -193,7 +336,7 @@ class AudioEngine {
     }
 
     func unload() -> Bool {
-        if isEngineRunning { stop() }
+        coolDown()
         audioFile = nil
         seekFrameOffset = 0
         return true

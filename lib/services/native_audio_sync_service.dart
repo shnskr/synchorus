@@ -25,6 +25,11 @@ const int _driftMedianWindow = 5;        // ~500ms (poll 100ms 기준)
 // B(200ms) 롤백: 파일 선택창 등 paused 복귀 시 heartbeat Timer와 경쟁하며 끊김 유발 의심.
 // 500ms 유지로 원상복구 후 재현 여부 확인. 재현 안 되면 B가 원인, 재현 시 C/A 의심.
 const double _obsBroadcastIntervalMs = 500.0;
+// v0.0.47: NTP-style 예약 재생 buffer (ms). 호스트 syncPlay/syncSeek 시점부터 양쪽
+// 동시 출력 시작까지의 여유. broadcast RTT(~10~20ms) + 메시지 처리 + native 예약 등록 +
+// stream 시작 latency(저가형 oboe ~100~수백ms 가능) + 마진. 200ms은 일반 LAN에서 안전.
+// 사용자 체감 "버튼 누르고 잠깐 후 재생"이지만 음악 동기 앱 특성상 무시 수준.
+const int _scheduleBufferMs = 200;
 
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
@@ -148,6 +153,10 @@ class NativeAudioSyncService {
         await _handleAudioUrl(message['data']);
       } else if (type == 'seek-notify' && !_isHost) {
         _handleSeekNotify(message);
+      } else if (type == 'schedule-play' && !_isHost) {
+        await _handleSchedulePlay(message['data']);
+      } else if (type == 'schedule-pause' && !_isHost) {
+        await _handleSchedulePause(message['data']);
       } else if (type == 'audio-request' && _isHost) {
         _handleAudioRequest(message['_from']);
       } else if (type == 'state-request' && _isHost) {
@@ -404,6 +413,9 @@ class NativeAudioSyncService {
         _durationController.add(_currentDuration);
       }
     }
+    // v0.0.44 prewarm 호출 제거 (v0.0.45 롤백): prewarm으로 호스트·게스트 양쪽
+    // framePos가 hardware sample 누적값으로 어긋나 anchor establishment 식이 깨짐
+    // → 곡 전체에 걸쳐 ±5~7ms 게스트 앞섬 회귀. v0.0.43 baseline 회복.
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -422,7 +434,7 @@ class NativeAudioSyncService {
       vf = 0;
     }
 
-    // play 직전 position 캡처 (start 직후 첫 poll까지 seek bar 0:00 점프 방지)
+    // play 직전 position 캡처 (scheduleStart 후 첫 poll까지 seek bar 0:00 점프 방지)
     if (sr > 0) {
       final pos = Duration(milliseconds: (vf * 1000 / sr).round());
       _seekOverridePosition = pos;
@@ -433,12 +445,15 @@ class NativeAudioSyncService {
       });
     }
 
+    // v0.0.48 롤백: NTP 예약 재생 보류, v0.0.45 동작 회복.
+    // (NTP 코드 인프라는 보존 — 다음 세션 재활용. _engine.scheduleStart / cancelSchedule
+    // 와 schedule-play/schedule-pause 메시지 핸들러 모두 dead path로 남김.)
     final ok = await _engine.start();
     if (!ok) return;
     _playing = true;
     _playingController.add(true);
+    debugPrint('[SYNCPLAY-HOST] engine.start ok');
 
-    // 즉시 audio-obs broadcast (playing 상태 변경 알림)
     _broadcastObs();
     _startObsBroadcast();
   }
@@ -446,9 +461,9 @@ class NativeAudioSyncService {
   Future<void> syncPause() async {
     _playing = false;
     _playingController.add(false);
+    // v0.0.48 롤백: 직접 stop (oboe pause/resume 모델은 v0.0.46 그대로 유지)
     await _engine.stop();
 
-    // 정지 상태 broadcast 후 주기 broadcast 중단
     _broadcastObs();
     _stopObsBroadcast();
   }
@@ -458,7 +473,6 @@ class NativeAudioSyncService {
     final ts = _engine.latest;
     if (ts == null || ts.sampleRate <= 0) return;
 
-    // 즉시 UI에 target position 반영 (폴링이 이전 위치를 덮어쓰는 것 방지)
     _seekOverridePosition = position;
     _positionController.add(position);
     _seekOverrideTimer?.cancel();
@@ -468,16 +482,15 @@ class NativeAudioSyncService {
 
     final targetFrame =
         (position.inMilliseconds * ts.sampleRate / 1000).round();
+    final clampedTarget = targetFrame.clamp(0, ts.totalFrames);
 
-    await _engine.seekToFrame(targetFrame.clamp(0, ts.totalFrames));
-
-    // seek-notify 전송 (절대 위치 ms — 몇 번 수신해도 같은 위치로 seek)
+    // v0.0.48 롤백: 재생 중/정지 모두 seekToFrame 직접 (NTP schedule 사용 안 함).
+    await _engine.seekToFrame(clampedTarget);
     _p2p.broadcastToAll({
       'type': 'seek-notify',
       'data': {'targetMs': position.inMilliseconds},
     });
 
-    // 즉시 obs broadcast (seek 후 위치 알림)
     _broadcastObs();
   }
 
@@ -770,8 +783,14 @@ class NativeAudioSyncService {
       }
 
       // 호스트가 재생 중이면 엔진 시작
-      debugPrint('[GUEST] loadFile done, hostPlaying=$hostPlaying, audioReady=$_audioReady');
-      if (hostPlaying) {
+      // hostPlaying은 audio-url broadcast 시점 호스트 상태로 stale 가능성 있음.
+      // 다운로드 + loadFile 동안 (수 초) 호스트가 syncPause 눌렀으면 _latestObs.playing
+      // 이 false → 게스트만 재생 시작 방지. (v0.0.46 fix — 사용자 보고 케이스)
+      final currentHostPlaying = _latestObs?.playing ?? hostPlaying;
+      debugPrint(
+          '[GUEST] loadFile done, urlHostPlaying=$hostPlaying, '
+          'currentHostPlaying=$currentHostPlaying, audioReady=$_audioReady');
+      if (currentHostPlaying) {
         await _startGuestPlayback();
       }
     } catch (e) {
@@ -797,11 +816,34 @@ class NativeAudioSyncService {
   void _handleAudioObs(Map<String, dynamic> message) {
     try {
       final obs = AudioObs.fromJson(message);
+      final isFirstObs = _latestObs == null;
+      final transitionToPlaying = _latestObs != null &&
+          !_latestObs!.playing && obs.playing;
       _latestObs = obs;
 
+      if (isFirstObs || transitionToPlaying) {
+        final fpMs = obs.sampleRate > 0
+            ? obs.framePos * 1000.0 / obs.sampleRate
+            : -1.0;
+        final vfMs = obs.sampleRate > 0
+            ? obs.virtualFrame * 1000.0 / obs.sampleRate
+            : -1.0;
+        final tag = isFirstObs ? '[OBS-FIRST]' : '[OBS-PLAYSTART]';
+        debugPrint(
+          '$tag fp=${obs.framePos} vf=${obs.virtualFrame} '
+          'sr=${obs.sampleRate} fp_ms=${fpMs.toStringAsFixed(1)} '
+          'vf_ms=${vfMs.toStringAsFixed(1)} '
+          'fpVfDiff_ms=${(fpMs - vfMs).toStringAsFixed(1)} '
+          'hostOutLat=${obs.hostOutputLatencyMs.toStringAsFixed(1)} '
+          'hostTimeMs=${obs.hostTimeMs} playing=${obs.playing}',
+        );
+      }
+
+      // v0.0.48 롤백: schedule-play 호스트 broadcast 안 함 → audio-obs 기반으로만
+      // 게스트 재생 시작/정지. v0.0.45 동작.
       if (obs.playing) {
         if (!_playing && _audioReady) {
-          debugPrint('[GUEST] obs→startPlayback (playing=$_playing, ready=$_audioReady)');
+          debugPrint('[GUEST] obs→startPlayback');
           unawaited(_startGuestPlayback());
         }
       } else {
@@ -812,6 +854,95 @@ class NativeAudioSyncService {
     } catch (e) {
       debugPrint('audio-obs parse error: $e');
     }
+  }
+
+  // v0.0.47: schedule 진행 중 race 방지. _handleSchedulePlay와 _scheduleFromObs가
+  // 동시 호출되면 둘 다 scheduleStart → 호스트와 다른 fromVf로 시작 → 큰 drift.
+  bool _scheduleInProgress = false;
+
+  /// v0.0.47: 합류 게스트의 자체 schedule 계산. (v0.0.48에서 호출 비활성화 — NTP 재도입 시 재활용)
+  /// 호스트 obs로부터 현재 호스트 콘텐츠 위치 외삽 → 200ms 후 양쪽 시작 위치 계산.
+  // ignore: unused_element
+  Future<void> _scheduleFromObs() async {
+    if (_playing || _scheduleInProgress) return;
+    final obs = _latestObs;
+    if (obs == null || !_sync.isSynced) return;
+    _scheduleInProgress = true;
+
+    // _playing은 schedule 등록 직전 set — race 방지 (await yield 동안 다른 메시지가
+    // _scheduleFromObs/_handleSchedulePlay 다시 호출 못 함).
+    _playing = true;
+    _playingController.add(true);
+
+    try {
+      final guestNowMs = DateTime.now().millisecondsSinceEpoch;
+      final hostNowMs = guestNowMs + _sync.filteredOffsetMs.round();
+      final hostFpMs =
+          obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
+      final hostContentFrameNow = obs.virtualFrame +
+          ((hostNowMs - obs.hostTimeMs) * hostFpMs).round();
+      final hostContentFrameAtStart =
+          hostContentFrameNow + (_scheduleBufferMs * hostFpMs).round();
+      final startGuestWallMs = guestNowMs + _scheduleBufferMs;
+
+      debugPrint(
+          '[GUEST] scheduleFromObs startWallMs=$startGuestWallMs '
+          'fromVf=$hostContentFrameAtStart hostOffset=${_sync.filteredOffsetMs.round()}');
+
+      final ok = await _engine.scheduleStart(
+          startGuestWallMs, hostContentFrameAtStart);
+      if (!ok) {
+        _playing = false;
+        _playingController.add(false);
+        return;
+      }
+      _resetDriftState();
+    } finally {
+      _scheduleInProgress = false;
+    }
+  }
+
+  /// v0.0.47: 호스트의 schedule-play 메시지 처리. wall time 변환 후 native schedule 등록.
+  /// 호스트가 정확한 fromVf 보내므로 _scheduleFromObs보다 정확. race 시 우선.
+  Future<void> _handleSchedulePlay(Map<String, dynamic>? data) async {
+    if (data == null || !_audioReady) return;
+    final hostStartWallMs = (data['startWallMs'] as num?)?.toInt();
+    final fromVf = (data['fromVf'] as num?)?.toInt();
+    if (hostStartWallMs == null || fromVf == null) return;
+
+    // 진행 중이면 잠깐 대기 — 마지막 schedule-play가 이김 (멱등). 단순화 위해 reentrant 허용.
+    _scheduleInProgress = true;
+    // _playing을 await 전 set — _handleAudioObs의 _scheduleFromObs 호출 차단
+    _playing = true;
+    _playingController.add(true);
+
+    try {
+      final guestStartWallMs =
+          hostStartWallMs - _sync.filteredOffsetMs.round();
+      debugPrint(
+          '[GUEST] schedule-play hostWallMs=$hostStartWallMs '
+          'guestWallMs=$guestStartWallMs fromVf=$fromVf '
+          'offset=${_sync.filteredOffsetMs.round()}');
+
+      final ok = await _engine.scheduleStart(guestStartWallMs, fromVf);
+      if (!ok) {
+        _playing = false;
+        _playingController.add(false);
+        return;
+      }
+      _resetDriftState();
+    } finally {
+      _scheduleInProgress = false;
+    }
+  }
+
+  /// v0.0.47: 호스트의 schedule-pause 메시지 처리. 즉시 정지.
+  Future<void> _handleSchedulePause(Map<String, dynamic>? data) async {
+    debugPrint('[GUEST] schedule-pause');
+    if (!_playing) return;
+    _playing = false;
+    _playingController.add(false);
+    await _engine.cancelSchedule();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -843,6 +974,7 @@ class NativeAudioSyncService {
   // 게스트: 재생 시작/정지
   // ═══════════════════════════════════════════════════════════
 
+  // v0.0.48 롤백: v0.0.45 동작 — engine.start 직접 호출 + _resetDriftState.
   Future<void> _startGuestPlayback() async {
     if (_playing) {
       debugPrint('[GUEST] _startGuestPlayback: already playing, skip');
@@ -854,8 +986,6 @@ class NativeAudioSyncService {
     if (!ok) return;
     _playing = true;
     _playingController.add(true);
-
-    // 앵커/보정 상태 리셋 (엔진 재시작 시 mVirtualFrame=0)
     _resetDriftState();
   }
 
@@ -972,11 +1102,9 @@ class NativeAudioSyncService {
       );
     }
 
+    // v0.0.48 롤백: 30ms 이상 차이나면 보정, 쿨다운 1초. (v0.0.45 동작 회복)
     if (ts.wallMs < _fallbackAlignCooldownMs) return;
-
-    // 30ms 이상 차이나면 보정, 쿨다운 1초
     if (driftMs.abs() > 30) {
-      // 게스트 frame 공간으로 변환하여 seek
       final targetGuestVf = (expectedPositionMs * _framesPerMs).round();
       unawaited(_engine.seekToFrame(targetGuestVf));
       _fallbackAlignCooldownMs = ts.wallMs + 1000;
@@ -1023,6 +1151,11 @@ class NativeAudioSyncService {
     unawaited(_engine.seekToFrame(targetGuestVf));
     _seekCorrectionAccum += initialCorrection;
 
+    // v0.0.48 롤백: anchor establish 시 게스트 vf seek 보정 + _seekCorrectionAccum 누적
+    // (v0.0.45 동작). NTP 예약 재생 비활성화 → reactive 정렬 메커니즘 다시 활성화.
+    unawaited(_engine.seekToFrame(targetGuestVf));
+    _seekCorrectionAccum += initialCorrection;
+
     _anchorHostFrame = anchorHostFrame;
     _anchorGuestFrame = ts.framePos + _seekCorrectionAccum;
     _offsetAtAnchor = offset; // 앵커 시점의 offset 기록
@@ -1030,6 +1163,26 @@ class NativeAudioSyncService {
 
     // HAL 버퍼 안정화 쿨다운
     _seekCooldownUntilMs = ts.wallMs + _seekCooldown.inMilliseconds;
+
+    // v0.0.44 진단: prewarm으로 framePos/vf 비대칭이 anchor에 잘못 베이크되는지
+    // 확인용. hostFpVfDiff_ms·guestFpVfDiff_ms가 크면 framePos가 콘텐츠 frame이
+    // 아니라 prewarm 누적 → 가설 H1 확정.
+    final guestFpMs = _framesPerMs;
+    debugPrint(
+      '[ANCHOR] establish wall=${ts.wallMs} '
+      'host[fp=${obs.framePos} vf=${obs.virtualFrame} '
+      'fp_ms=${(obs.framePos / hostFpMs).toStringAsFixed(1)} '
+      'vf_ms=${(obs.virtualFrame / hostFpMs).toStringAsFixed(1)} '
+      'fpVfDiff_ms=${((obs.framePos - obs.virtualFrame) / hostFpMs).toStringAsFixed(1)}] '
+      'guest[fp=${ts.framePos} vf=${ts.virtualFrame} '
+      'fp_ms=${(ts.framePos / guestFpMs).toStringAsFixed(1)} '
+      'vf_ms=${(ts.virtualFrame / guestFpMs).toStringAsFixed(1)} '
+      'fpVfDiff_ms=${((ts.framePos - ts.virtualFrame) / guestFpMs).toStringAsFixed(1)}] '
+      'outLat[host=${obs.hostOutputLatencyMs.toStringAsFixed(1)} '
+      'guest=${ts.safeOutputLatencyMs.toStringAsFixed(1)} '
+      'delta=${outLatDelta.toStringAsFixed(1)}] '
+      'targetGuestVf=$targetGuestVf initialCorrection=$initialCorrection',
+    );
   }
 
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).

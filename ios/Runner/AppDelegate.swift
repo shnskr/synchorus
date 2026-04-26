@@ -33,6 +33,24 @@ import UIKit
                     return
                 }
                 result(self.audioEngine.loadFile(path))
+            case "prewarm":
+                result(self.audioEngine.prewarm())
+            case "coolDown":
+                result(self.audioEngine.coolDown())
+            case "scheduleStart":
+                guard let args = call.arguments as? [String: Any],
+                      let wallEpochMs = (args["wallEpochMs"] as? NSNumber)?.int64Value,
+                      let fromFrame = (args["fromFrame"] as? NSNumber)?.int64Value
+                else {
+                    result(FlutterError(code: "BAD_ARGS",
+                                        message: "scheduleStart requires wallEpochMs+fromFrame",
+                                        details: nil))
+                    return
+                }
+                result(self.audioEngine.scheduleStart(
+                    wallEpochMs: wallEpochMs, fromFrame: fromFrame))
+            case "cancelSchedule":
+                result(self.audioEngine.cancelSchedule())
             case "start":
                 result(self.audioEngine.start())
             case "stop":
