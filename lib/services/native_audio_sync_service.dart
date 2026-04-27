@@ -977,6 +977,21 @@ class NativeAudioSyncService {
     _playing = true;
     _playingController.add(true);
 
+    // v0.0.50 race fix (idx 86 outlier): schedule 처리 윈도우 동안 drift 계산 보류.
+    // - anchor 즉시 무효화: await scheduleStart yield 동안 _recomputeDrift가 옛 anchor +
+    //   stale obs로 큰 drift 계산하는 케이스 차단.
+    // - _latestObs=null: 호스트가 syncSeek 직후 _broadcastObs 호출하면 그 obs는 호스트
+    //   _engine.latest(100ms poll 캐시)라 새 schedule 시점 vf 반영 안 된 stale 값 가능.
+    //   이 stale obs로 _tryEstablishAnchor 잘못 잡혀 게스트가 옛 위치로 reseek되는 더
+    //   심각한 race도 차단.
+    // - cooldown 1초: 다음 호스트 polling 사이클(~100ms) + obs broadcast 도달 + 첫 anchor
+    //   establish 안전 마진. 그 사이엔 fallback도 _latestObs null이라 동작 안 함.
+    _anchorHostFrame = null;
+    _anchorGuestFrame = null;
+    _driftSamples.clear();
+    _latestObs = null;
+    _seekCooldownUntilMs = DateTime.now().millisecondsSinceEpoch + 1000;
+
     try {
       final guestStartWallMs =
           hostStartWallMs - _sync.filteredOffsetMs.round();

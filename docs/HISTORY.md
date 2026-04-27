@@ -2485,6 +2485,37 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (45) — v0.0.50 schedule 처리 race fix (idx 86 outlier)
+
+**배경**: (44) v0.0.49 측정 결과 abs_mean 2.82ms로 baseline 동등 PASS 했으나 idx 86 (+55.7s)에서 drift +48,449ms 단발 outlier 발생. 실제 frame diff 80ms로 음향 정렬은 정상이었지만 drift 계산 글리치. 다음 사이클 self-correction. 사용자 청감으론 인지 못 함. 그래도 csv 통계 망치고 reactive seek 임계 잘못 트리거 가능성 → fix.
+
+**원인**:
+- 호스트 syncSeek 흐름: `cancelSchedule` + `_scheduleHostPlay`(scheduleStart + broadcast schedule-play) + `_broadcastObs`. 마지막 `_broadcastObs`는 `_engine.latest`(100ms poll 캐시)를 사용 — scheduleStart 직후엔 새 vf 아직 캐시에 안 들어옴 → stale 옛 vf로 obs broadcast.
+- 게스트 측: `_handleSchedulePlay` 시작 → `_playing=true` set → `await _engine.scheduleStart(...)` yield → 그 사이 stale obs 도착 → `_handleAudioObs`가 `_latestObs` 갱신 → 동시에 100ms timestamp poll → `_recomputeDrift`가 옛 anchor + 새 obs 외삽으로 큰 drift 계산.
+- 더 위험 시나리오: `_tryEstablishAnchor`가 stale obs 외삽으로 잘못 anchor 잡혀 게스트를 옛 위치로 reseek → 청감 끊김 가능. (이번 측정에선 발현 안 함, 단 이론적 가능)
+
+**Fix** (`lib/services/native_audio_sync_service.dart` `_handleSchedulePlay`):
+- `_anchorHostFrame=null`, `_anchorGuestFrame=null`, `_driftSamples.clear()` — anchor 즉시 무효화로 `_recomputeDrift` early return
+- `_latestObs=null` — stale obs 버림. 다음 fresh obs 도착까지 fallback/anchor 모두 동작 안 함
+- `_seekCooldownUntilMs = now + 1000ms` — 추가 안전 마진. 다음 호스트 polling(100ms) + obs broadcast 도달 + 첫 anchor establish 시간 커버
+
+모두 `await scheduleStart` 전에 set하여 yield window 닫음. 기존 `_resetDriftState()`는 await 후에도 호출되지만 anchor null 상태에 다시 null 호출이라 무해.
+
+**미적용**:
+- 호스트 측 `_broadcastObs`도 `await getTimestamp()`로 변경해 fresh obs 보내는 옵션은 보류. 게스트 측 fix만으로 충분 (stale obs 들어와도 게스트가 무시하는 구조).
+- syncPlay/syncSeek/syncPause 끝의 `_broadcastObs` 호출 자체 제거도 보류 — schedule-play/pause 메시지로 게스트 알림은 충분하지만 호스트 UI 즉시 갱신용으로 obs 유지.
+
+**예상 효과**:
+- idx 86 같은 drift 계산 outlier 발생 안 함
+- 잠재 risk: stale obs로 잘못 anchor establish → 게스트 reseek → 청감 끊김도 차단
+- csv 통계 깨끗해짐 (mean이 outlier에 망가지지 않음)
+
+**미검증**: 다음 측정에서 outlier 0개 확인 필요. 측정 환경은 v0.0.49와 동일 (S22 host + Tab A7 Lite guest). 정지/재생/seek 반복 패턴으로 race 발현 시도.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` `_handleSchedulePlay` 한 곳. `pubspec.yaml` (0.0.49→0.0.50). 다른 코드 변경 없음.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
