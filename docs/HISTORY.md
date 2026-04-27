@@ -2623,6 +2623,47 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (50) — v0.0.56 임계 복원 + outputLatency cap + anchor establish 중복 호출 버그 fix
+
+**배경**: (49) v0.0.55 측정 결과 fd abs_mean 358ms로 v0.0.54(261ms)보다 더 나빠짐. fallback 38회(이전 9회 4배) — 임계 200ms로 anchor reset 자주 발생 → 매번 같은 outputLatency 베이크인 → 같은 fd 290ms → 다시 reset **무한 loop** 발생. 안정 구간 fd 일관 +290ms = systemic outputLatency 부정확 보고.
+
+**전체 코드 재정독에서 발견 추가 버그**:
+`_tryEstablishAnchor`(line 1222-1228)에서 `_engine.seekToFrame(targetGuestVf)` + `_seekCorrectionAccum += initialCorrection`이 **두 번 호출**됨. v0.0.48 롤백 시점 중복 추가된 라인 발견 못 함. 게스트가 anchor establish마다 같은 위치로 두 번 seek + correction accumulator 2배 누적 → 모든 후속 fd 측정 부정확.
+
+**v0.0.56 fix 3가지**:
+
+1. **vf-sanity 임계 200→500 복원**: 200ms 임계 + outputLatency 부정확 베이크인 결합으로 무한 loop 발생 (v0.0.55 회귀). cap 적용이 본질 fix이고 sanity는 큰 어긋남(>500ms)만 잡는 역할.
+
+2. **outputLatency cap 200ms** (`_outLatDeltaCapMs`):
+   - anchor establish, _recomputeDrift, _fallbackAlignment 세 곳 모두 적용
+   - `clamp(-200, +200)`로 부정확 보고(예 +290ms)를 +200ms로 제한
+   - BT 정상 비대칭 200ms 안쪽이라 영향 없음
+   - Acoustic loopback 도입 전 임시 안전망
+
+3. **anchor establish 중복 호출 버그 fix** (`_tryEstablishAnchor` line 1222-1228):
+   - `unawaited(_engine.seekToFrame(...))` + `_seekCorrectionAccum += initialCorrection` 두 줄이 두 번 호출되던 것을 한 번으로 정리
+   - v0.0.49 부터 있던 잠재 버그로 보임 (코드 정독 부족으로 v0.0.49~v0.0.55 모든 측정에 영향)
+   - 이게 v0.0.49 baseline (2.82ms)에서도 "운 좋게" 작동한 이유는 두 번 seek가 같은 위치라 native 측이 중복 무시 + accum만 2배 누적이지만 anchor도 같이 _seekCorrectionAccum 포함해 잡혀서 측정에서 부분 상쇄됨. 단 호스트 정지/seek 후 재establish 시 부정확 누적.
+
+**예상 효과**:
+- cap 200ms로 부정확 outputLatency 베이크인 영향 제한 → fd ~290ms → 최대 ~200ms 어긋남
+- anchor 중복 호출 fix로 _seekCorrectionAccum 정확 (이전 2배 누적)
+- v0.0.55 무한 loop 차단
+
+**잠재 위험**:
+- cap 200ms가 BT 비대칭 정확값(예 195ms) 안 자르지만 양쪽 내장 부정확 +290ms는 +200ms로 자름. 부정확 시나리오에서 여전히 200ms 어긋남 잔여. 진짜 fix는 (c) outputLatency 비대칭 자동 보정 EMA.
+
+**미적용 (다음 후보)**:
+- (c) outputLatency 비대칭 자동 보정 EMA — anchor establish 후 fd 측정으로 _anchoredOutLatDeltaMs 미세 조정
+- 호스트 측 syncSeek 직렬화
+- 메시지 처리 큐 직렬화
+
+**미검증**: 다음 측정에서 fd abs_mean v0.0.54 baseline(261ms) 또는 더 작아야. 안정 구간 fd 일관 어긋남 cap 적용으로 ~200ms 이내 기대.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` (`_outLatDeltaCapMs` 상수 + 3곳 cap 적용 + sanity 임계 복원 + anchor 중복 호출 fix), `pubspec.yaml` (0.0.55→0.0.56).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

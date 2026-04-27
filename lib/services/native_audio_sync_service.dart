@@ -31,6 +31,12 @@ const double _obsBroadcastIntervalMs = 500.0;
 // 사용자 체감 "버튼 누르고 잠깐 후 재생"이지만 음악 동기 앱 특성상 무시 수준.
 const int _scheduleBufferMs = 200;
 
+// v0.0.56: outputLatency 비대칭 베이크인 cap. 양쪽 내장에서 OS가 systemic 부정확
+// 값(예 +290ms) 보고하는 경우 anchor에 그대로 베이크인되면 fd 일관 어긋남 누적
+// (HISTORY (49) v0.0.55 회귀). BT 정상 비대칭은 절대값 200ms 안쪽이라 영향 없고,
+// 부정확 보고는 cap으로 제한. acoustic loopback (옵션 5) 도입 전 임시 안전망.
+const double _outLatDeltaCapMs = 200.0;
+
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
 /// 게스트: 파일 다운로드 + 네이티브 엔진 재생 + drift 계산 + seek 보정.
@@ -1157,7 +1163,10 @@ class NativeAudioSyncService {
     final expectedPositionMs = obs.virtualFrame / hostFpMs + elapsedMs;
     final guestPositionMs = ts.virtualFrame / _framesPerMs;
     // _recomputeDrift와 동일하게 outputLatency 비대칭 보정 (v0.0.38).
-    final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    // v0.0.56: cap 적용 (anchor establish와 동일 정책).
+    final rawOutLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final outLatDelta =
+        rawOutLatDelta.clamp(-_outLatDeltaCapMs, _outLatDeltaCapMs);
     final driftMs = guestPositionMs - expectedPositionMs - outLatDelta;
 
     // 500ms마다 drift report (fallback mode)
@@ -1214,16 +1223,20 @@ class NativeAudioSyncService {
     // v0.0.38: outputLatency 비대칭을 anchor seek에 베이크인.
     // 게스트가 BT(+200ms), 호스트가 내장(+5ms)이면 outLatDelta = +195ms.
     // 게스트 콘텐츠를 호스트보다 195ms 앞선 위치로 seek해야 음향 시각 정렬.
-    final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    // v0.0.56: outLatDelta cap _outLatDeltaCapMs로 부정확 OS 보고 영향 제한.
+    // (HISTORY (49) 양쪽 내장에서 +290ms 부정확 보고 → fd ~290ms 일관 어긋남
+    // → vf-sanity 임계 낮춤이 무한 loop 만든 이유). BT 정상 비대칭 200ms는
+    // cap 값 안쪽이라 영향 없음, 부정확 보고 +290ms는 +200ms로 제한.
+    final rawOutLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final outLatDelta =
+        rawOutLatDelta.clamp(-_outLatDeltaCapMs, _outLatDeltaCapMs);
     final targetGuestVf = (hostContentMs * _framesPerMs).round() +
         (outLatDelta * _framesPerMs).round();
     final currentEffective = ts.framePos + _seekCorrectionAccum;
     final initialCorrection = targetGuestVf - currentEffective;
-    unawaited(_engine.seekToFrame(targetGuestVf));
-    _seekCorrectionAccum += initialCorrection;
-
-    // v0.0.48 롤백: anchor establish 시 게스트 vf seek 보정 + _seekCorrectionAccum 누적
-    // (v0.0.45 동작). NTP 예약 재생 비활성화 → reactive 정렬 메커니즘 다시 활성화.
+    // v0.0.56 버그 fix: 이전 코드에서 _engine.seekToFrame + _seekCorrectionAccum
+    // 가 두 번 호출되어 게스트가 두 번 seek + accum 2배 누적되는 버그 있었음
+    // (v0.0.48 롤백 시점에 중복 추가됨). 한 번만 호출.
     unawaited(_engine.seekToFrame(targetGuestVf));
     _seekCorrectionAccum += initialCorrection;
 
@@ -1316,8 +1329,11 @@ class NativeAudioSyncService {
     // v0.0.38: anchor에 outputLatency 비대칭이 베이크인되어 있으므로,
     // 여기선 (현재 - 앵커) 변화분만 보정. BT 분 단위 30~70ms 변동만 잡힘.
     // 큰 비대칭(150~250ms)은 anchor establishment 시점에 이미 처리됨.
-    final currentOutLatDelta =
+    // v0.0.56: cap 적용으로 부정확 OS 보고 영향 제한.
+    final rawCurrentOutLatDelta =
         ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
+    final currentOutLatDelta = rawCurrentOutLatDelta.clamp(
+        -_outLatDeltaCapMs, _outLatDeltaCapMs);
     final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
     final driftMs = dGms - dHms - dynLatDeltaMs; // 양수: 게스트 음향이 앞섬
 
@@ -1350,12 +1366,12 @@ class NativeAudioSyncService {
     }
 
     // v0.0.53: drift_ms 조건 제거. vfDiff 자체가 콘텐츠 어긋남 직접 측정이므로
-    // drift_ms 값 무관하게 큰 어긋남 시 발동. 이전 v0.0.52의 `drift < 50` 조건이
-    // drift 50~200ms 구간에서 sanity 발동 못 해 idx 60-61 -8.4초 어긋남 미회복.
-    // v0.0.55: 임계 500→200ms로 낮춤. v0.0.54 측정에서 fd 250~948ms 일관 어긋남이
-    // sanity 임계 안 넘어 미발동했음 (HISTORY (48) abs_mean 261ms). cooldown으로
-    // 첫 정착 단계 false-positive 차단.
-    if (vfDiffMs.abs() > 200) {
+    // drift_ms 값 무관하게 큰 어긋남 시 발동.
+    // v0.0.56: 임계 200→500 복원 (v0.0.55 임계 200ms는 outputLatency 베이크인
+    // 부정확과 결합되어 무한 loop 회귀 → fd ~290ms reset → 같은 outLat 베이크인
+    // → 같은 fd 290ms → 다시 reset 반복). 베이크인 cap(_outLatDeltaCapMs)으로
+    // 부정확 영향을 줄이는 게 본질 fix이고 sanity는 큰 어긋남(>500ms)만 잡음.
+    if (vfDiffMs.abs() > 500) {
       debugPrint('[DRIFT] vf sanity fail: vfDiff=${vfDiffMs.toStringAsFixed(0)}ms '
           'drift_ms=${driftMs.toStringAsFixed(1)}ms — anchor reset');
       _anchorHostFrame = null;
