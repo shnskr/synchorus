@@ -1328,15 +1328,34 @@ class NativeAudioSyncService {
     // vfDiff가 크고 driftMs가 작은 케이스는 anchor가 잘못된 obs로 잡혀 어긋난 채
     // 정렬 유지하는 거짓말 상황 → anchor 강제 reset → 다음 poll에서 fresh obs 기반
     // _tryEstablishAnchor가 정확히 재정렬.
+    // v0.0.55: obs 외삽 시간 가드. obs.hostTimeMs가 너무 옛 값이면 외삽 거리 길어
+    // hostVfExpectedMs 부정확 → vfDiffMs 거짓말 가능 (HISTORY (47) 마지막 10초 host_vf
+    // 정체 케이스에서 외삽이 1초+ 더해져 sanity 미발동). obs broadcast 주기 500ms +
+    // 네트워크 지연 고려해 1000ms 임계. 이상이면 sanity skip + 안전망으로 anchor
+    // reset + cooldown만.
+    final obsAgeMs = (hostWallNow - obs.hostTimeMs).abs();
     final guestVfMs = ts.virtualFrame / _framesPerMs;
     final hostVfExpectedMs = obs.virtualFrame / hostFpMs +
         (hostWallNow - obs.hostTimeMs).toDouble();
     final vfDiffMs = guestVfMs - hostVfExpectedMs - currentOutLatDelta;
 
+    if (obsAgeMs > 1000) {
+      debugPrint('[DRIFT] obs stale: age=${obsAgeMs.toInt()}ms — anchor reset (외삽 신뢰 못 함)');
+      _anchorHostFrame = null;
+      _anchorGuestFrame = null;
+      _offsetAtAnchor = null;
+      _driftSamples.clear();
+      _seekCooldownUntilMs = ts.wallMs + 300;
+      return;
+    }
+
     // v0.0.53: drift_ms 조건 제거. vfDiff 자체가 콘텐츠 어긋남 직접 측정이므로
     // drift_ms 값 무관하게 큰 어긋남 시 발동. 이전 v0.0.52의 `drift < 50` 조건이
     // drift 50~200ms 구간에서 sanity 발동 못 해 idx 60-61 -8.4초 어긋남 미회복.
-    if (vfDiffMs.abs() > 500) {
+    // v0.0.55: 임계 500→200ms로 낮춤. v0.0.54 측정에서 fd 250~948ms 일관 어긋남이
+    // sanity 임계 안 넘어 미발동했음 (HISTORY (48) abs_mean 261ms). cooldown으로
+    // 첫 정착 단계 false-positive 차단.
+    if (vfDiffMs.abs() > 200) {
       debugPrint('[DRIFT] vf sanity fail: vfDiff=${vfDiffMs.toStringAsFixed(0)}ms '
           'drift_ms=${driftMs.toStringAsFixed(1)}ms — anchor reset');
       _anchorHostFrame = null;
@@ -1487,9 +1506,15 @@ class NativeAudioSyncService {
     _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
+    // v0.0.55: logger도 flush + close. 정상 _leaveRoom 흐름에서 cleanupSync 안 호출
+    // 되고 clearTempFiles만 호출되니 여기서도 flush 해야 마지막 csv row 보존.
+    // 게스트는 logger.start 안 호출했으므로 isActive=false로 no-op.
+    await _logger.stop();
   }
 
-  void cleanupSync() {
+  /// 방 나가기 / 재초기화 시 정리. async — logger flush + close까지 await해
+  /// 마지막 N row csv 보존 (이전 unawaited 패턴은 측정 데이터 손실 가능).
+  Future<void> cleanupSync() async {
     _downloadAborted = true;
     _activeHttpClient?.close(force: true);
     _activeHttpClient = null;
@@ -1504,13 +1529,15 @@ class NativeAudioSyncService {
     _timestampSub = null;
     _stopObsBroadcast();
     _engine.stopPolling();
-    unawaited(_engine.stop());
-    unawaited(_engine.unload());
+    // engine stop/unload는 native 정리 — 다음 방 입장 전 끝나야 안전.
+    await _engine.stop();
+    await _engine.unload();
     _resetDriftState();
     _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
-    unawaited(_logger.stop());
+    // logger도 await — flush 보장.
+    await _logger.stop();
   }
 
   void _setDurationFromLoadResult(LoadResult lr) {
@@ -1531,7 +1558,7 @@ class NativeAudioSyncService {
   }
 
   Future<void> dispose() async {
-    cleanupSync();
+    await cleanupSync();
     _positionController.close();
     _durationController.close();
     _playingController.close();

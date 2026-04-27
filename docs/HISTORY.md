@@ -2586,6 +2586,43 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (49) — v0.0.55 sanity 임계 강화 + 외삽 가드 + logger flush
+
+**배경**: (48) v0.0.54 측정 결과 frame diff abs_mean **261ms** (사용자 청감 "안 맞음" 매칭). vf-sanity 0회 발동 — 임계 500ms 안 넘는데도 fd 250~948ms 일관 어긋남 발생. csv 분석:
+- 첫 5초 fd +374→-16ms 정착 (정상 NTP 패턴)
+- 5초 후 fd 다시 +250ms로 점프 후 일관 유지 (anchor establish 시 outputLatency 비대칭 잘못 베이크인 의심)
+- vf-sanity 미발동 이유: obs 외삽 보정 후 vfDiffMs는 임계 미만 (1초+ 외삽 거리 부정확)
+- v0.0.49 baseline (2.82ms) 대비 92배 회귀 — 사용자 정지/재생/seek 연타로 anchor 자주 reset → 매번 outputLatency 부정확 베이크인
+
+**v0.0.55 fix (3가지)**:
+
+1. **vf-sanity 외삽 시간 가드**: `obsAgeMs > 1000` 시 sanity skip + anchor reset (300ms cooldown). 외삽 거리 1초+면 hostVfExpectedMs 부정확해 vfDiffMs 거짓말 가능.
+
+2. **vf-sanity 임계 500→200ms로 낮춤**: v0.0.54에서 fd 250~948ms 어긋남이 vfDiff 임계 안 넘어 미발동. 200ms는 청감 인지 시작점 + cooldown 300ms로 첫 정착 단계 false-positive 차단.
+
+3. **logger flush 보장**: `clearTempFiles`에 `await _logger.stop()` 추가. 정상 _leaveRoom 흐름에서 cleanupSync 안 호출되니 logger.stop 누락됐던 케이스. 마지막 csv row 손실 방지. `cleanupSync` 자체도 async + await로 변경. `room_screen.dispose` 비정상 경로는 `unawaited(audio.cleanupSync())`.
+
+**예상 효과**:
+- 외삽 가드: host_vf 정체 1초+ 케이스에서 stale obs로 anchor 잘못 잡히는 거 차단
+- sanity 임계 낮춤: fd 200ms+ 감지 빈도 ↑ → anchor reset → outputLatency 다시 측정 → 누적 정확도 ↑
+- logger flush: csv 마지막 측정 row 보존
+
+**잠재 위험**:
+- 임계 200ms로 anchor reset 너무 자주 → 매번 같은 outputLatency 베이크인이면 무한 loop 가능 (cooldown 300ms는 막힘 보장). 다음 측정에서 vf-sanity 발동 빈도 + 청감 끊김 확인 필요.
+- 만약 baseline outLatDelta 베이크인이 systemic 부정확하면 (양쪽 내장인데 +250ms 베이크 등), 임계 낮춰도 무한 loop. → 다음 fix 후보 (c) outputLatency 자동 보정 EMA 또는 베이크인 상한 cap.
+
+**미적용 (다음 세션 후보)**:
+- (c) outputLatency 비대칭 자동 보정 EMA — anchor establish 후 fd 측정으로 _anchoredOutLatDeltaMs 미세 조정
+- 호스트 측 syncSeek/syncPlay/syncPause 직렬화 (`_hostOpInProgress` flag)
+- 메시지 처리 큐 직렬화 — 큰 변경
+
+**검토 결과 변경 불필요**:
+- 호스트 측 `_engine.latest` 사용처 (syncPlay/syncSeek/_handleStateRequest): syncPlay는 이미 `await getVirtualFrame()` fresh, syncSeek는 안정 필드(sampleRate/totalFrames)만 사용, _handleStateRequest는 합류 게스트용으로 catch-up obs가 정밀
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` (vf-sanity 가드 + 임계 + cleanupSync async + clearTempFiles logger.stop), `lib/screens/room_screen.dart` (unawaited cleanupSync), `pubspec.yaml` (0.0.54→0.0.55).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -392,7 +392,9 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
       final handler = ref.read(audioHandlerProvider);
       handler.detachSyncService();
       final audio = ref.read(nativeAudioSyncServiceProvider);
-      audio.cleanupSync();
+      // dispose는 sync — cleanupSync(async) fire-and-forget. 정상 _leaveRoom
+      // 경로에선 clearTempFiles가 logger.stop 포함해 csv flush 보장됨.
+      unawaited(audio.cleanupSync());
 
       // 비정상 종료 경로에서도 provider 무효화
       ref.invalidate(nativeAudioSyncServiceProvider);
