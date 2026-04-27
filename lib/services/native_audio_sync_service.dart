@@ -664,6 +664,7 @@ class NativeAudioSyncService {
       guestVf: (data['guestVf'] as num?)?.toInt() ?? 0,
       seekCount: seekCount,
       event: event,
+      hostObsWall: (data['hostObsWall'] as num?)?.toInt() ?? 0,
     );
     // 실시간 관측용 logcat 출력 (v0.0.24+)
     debugPrint(
@@ -1270,6 +1271,10 @@ class NativeAudioSyncService {
   }
 
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).
+  /// v0.0.57: hostObsWall 추가 — 호스트 측 obs 측정 시각(`obs.hostTimeMs`).
+  /// rate drift 정확 진단용 — 호스트 vf 변화 / 호스트 wall 차이로 측정해야
+  /// 게스트 측 polling 시각 차이의 lag artifact 제거. 게스트 측 wall_ms와
+  /// 함께 csv에 기록 → 분석에서 호스트 측 진짜 rate 측정 가능.
   void _sendDriftReport({
     required int wallMs,
     required double driftMs,
@@ -1278,6 +1283,7 @@ class NativeAudioSyncService {
     required int guestVf,
     required String event,
   }) {
+    final hostObsWall = _latestObs?.hostTimeMs ?? 0;
     _p2p.sendToHost({
       'type': 'drift-report',
       'data': {
@@ -1288,6 +1294,7 @@ class NativeAudioSyncService {
         'guestVf': guestVf,
         'seekCount': _seekCount,
         'event': event,
+        'hostObsWall': hostObsWall,
       },
     });
   }
