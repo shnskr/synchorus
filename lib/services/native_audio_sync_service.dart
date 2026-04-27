@@ -55,6 +55,13 @@ class NativeAudioSyncService {
   String? _currentUrl;
   int _obsBroadcastSeq = 0;
 
+  // v0.0.49: NTP-style 예약 재생 sequence number.
+  // 호스트: 매 schedule-play/schedule-pause broadcast마다 ++ 후 메시지에 포함.
+  // 게스트: 마지막으로 처리한 seq를 기억해 stale/out-of-order 메시지 무시.
+  // null = 아직 한 번도 schedule 메시지 처리 안 함 (obs 기반 catch-up 후보).
+  int _hostSchedSeq = 0;
+  int? _lastSeenSchedSeq;
+
   /// 게스트: 현재 다운로드 세션 ID. 새 audio-url마다 증가, 이전 다운로드 무효화용.
   int _downloadSessionId = 0;
   /// 게스트: 진행 중인 HttpClient (취소용)
@@ -317,7 +324,9 @@ class NativeAudioSyncService {
     if (_playing) {
       _playing = false;
       _playingController.add(false);
-      await _engine.stop();
+      // v0.0.49: schedule 진행 중일 수 있으니 cancel — Android는 pause, iOS는 node.stop.
+      // 다음 loadFile이 isEngineRunning 처리 (iOS) / unload→fullStop (Android).
+      await _engine.cancelSchedule();
       _stopObsBroadcast();
     }
     _positionController.add(Duration.zero);
@@ -445,24 +454,54 @@ class NativeAudioSyncService {
       });
     }
 
-    // v0.0.48 롤백: NTP 예약 재생 보류, v0.0.45 동작 회복.
-    // (NTP 코드 인프라는 보존 — 다음 세션 재활용. _engine.scheduleStart / cancelSchedule
-    // 와 schedule-play/schedule-pause 메시지 핸들러 모두 dead path로 남김.)
-    final ok = await _engine.start();
-    if (!ok) return;
+    // v0.0.49: NTP-style 예약 재생. 호스트도 자기 wall+200ms에 시작 → 게스트와 대칭.
+    // schedule-play broadcast → 게스트들이 같은 wallEpoch로 schedule.
+    await _scheduleHostPlay(fromVf: vf);
+
     _playing = true;
     _playingController.add(true);
-    debugPrint('[SYNCPLAY-HOST] engine.start ok');
 
     _broadcastObs();
     _startObsBroadcast();
   }
 
+  /// 호스트 자기 schedule + 모든 게스트에게 schedule-play broadcast.
+  /// `fromVf` 시작 콘텐츠 frame, lead time(_scheduleBufferMs) 후 양쪽 동시 출력.
+  Future<void> _scheduleHostPlay({required int fromVf}) async {
+    final hostStartWallMs =
+        DateTime.now().millisecondsSinceEpoch + _scheduleBufferMs;
+    final seq = ++_hostSchedSeq;
+
+    // 호스트 자기 scheduleStart (자기 wall 그대로)
+    final ok = await _engine.scheduleStart(hostStartWallMs, fromVf);
+    if (!ok) {
+      debugPrint('[SYNCPLAY-HOST] scheduleStart failed');
+      return;
+    }
+    debugPrint(
+        '[SYNCPLAY-HOST] scheduleStart seq=$seq wallMs=$hostStartWallMs fromVf=$fromVf');
+
+    _p2p.broadcastToAll({
+      'type': 'schedule-play',
+      'data': {
+        'seq': seq,
+        'startWallMs': hostStartWallMs,
+        'fromVf': fromVf,
+      },
+    });
+  }
+
   Future<void> syncPause() async {
     _playing = false;
     _playingController.add(false);
-    // v0.0.48 롤백: 직접 stop (oboe pause/resume 모델은 v0.0.46 그대로 유지)
-    await _engine.stop();
+    // v0.0.49: NTP cancel 경로. 호스트 cancelSchedule + schedule-pause broadcast.
+    final seq = ++_hostSchedSeq;
+    await _engine.cancelSchedule();
+    debugPrint('[SYNCPAUSE-HOST] cancelSchedule seq=$seq');
+    _p2p.broadcastToAll({
+      'type': 'schedule-pause',
+      'data': {'seq': seq},
+    });
 
     _broadcastObs();
     _stopObsBroadcast();
@@ -484,12 +523,19 @@ class NativeAudioSyncService {
         (position.inMilliseconds * ts.sampleRate / 1000).round();
     final clampedTarget = targetFrame.clamp(0, ts.totalFrames);
 
-    // v0.0.48 롤백: 재생 중/정지 모두 seekToFrame 직접 (NTP schedule 사용 안 함).
-    await _engine.seekToFrame(clampedTarget);
-    _p2p.broadcastToAll({
-      'type': 'seek-notify',
-      'data': {'targetMs': position.inMilliseconds},
-    });
+    if (_playing) {
+      // v0.0.49: 재생 중 seek = 양쪽 동시 점프. cancel + schedule(새 fromVf).
+      // anchor reset 후 fallback drift edge case (HISTORY (42)) 근본 제거.
+      await _engine.cancelSchedule();
+      await _scheduleHostPlay(fromVf: clampedTarget);
+    } else {
+      // 정지 상태: native seek만 — schedule 안 함. seek-notify로 게스트도 동일 위치.
+      await _engine.seekToFrame(clampedTarget);
+      _p2p.broadcastToAll({
+        'type': 'seek-notify',
+        'data': {'targetMs': position.inMilliseconds},
+      });
+    }
 
     _broadcastObs();
   }
@@ -638,9 +684,12 @@ class NativeAudioSyncService {
     if (_playing) {
       _playing = false;
       _playingController.add(false);
-      await _engine.stop();
+      await _engine.cancelSchedule();
     }
     _resetDriftState();
+    // v0.0.49: 새 곡 진입 시 schedule seq 가드 리셋 — 새 곡 첫 schedule-play 받기 위함.
+    // (_resetDriftState는 정지/재생 매번 호출되므로 거기엔 안 넣음.)
+    _lastSeenSchedSeq = null;
 
     _isLoading = true;
     _loadingController.add(true);
@@ -782,16 +831,16 @@ class NativeAudioSyncService {
         }
       }
 
-      // 호스트가 재생 중이면 엔진 시작
-      // hostPlaying은 audio-url broadcast 시점 호스트 상태로 stale 가능성 있음.
-      // 다운로드 + loadFile 동안 (수 초) 호스트가 syncPause 눌렀으면 _latestObs.playing
-      // 이 false → 게스트만 재생 시작 방지. (v0.0.46 fix — 사용자 보고 케이스)
+      // v0.0.49: NTP-style 합류 catch-up. 즉시 engine.start 안 하고 _scheduleFromObs로
+      // 호스트 obs 외삽 → 200ms lead 후 정렬 시작. 호스트 schedule-play를 못 받은 경우
+      // 한정. 호스트가 다음에 syncPlay/syncSeek 호출하면 더 정확한 fromVf로 보정됨.
+      // hostPlaying은 audio-url broadcast 시점 stale일 수 있어 _latestObs.playing 우선.
       final currentHostPlaying = _latestObs?.playing ?? hostPlaying;
       debugPrint(
           '[GUEST] loadFile done, urlHostPlaying=$hostPlaying, '
           'currentHostPlaying=$currentHostPlaying, audioReady=$_audioReady');
       if (currentHostPlaying) {
-        await _startGuestPlayback();
+        unawaited(_scheduleFromObs());
       }
     } catch (e) {
       debugPrint('Audio download/load error: $e');
@@ -839,34 +888,40 @@ class NativeAudioSyncService {
         );
       }
 
-      // v0.0.48 롤백: schedule-play 호스트 broadcast 안 함 → audio-obs 기반으로만
-      // 게스트 재생 시작/정지. v0.0.45 동작.
-      if (obs.playing) {
-        if (!_playing && _audioReady) {
-          debugPrint('[GUEST] obs→startPlayback');
-          unawaited(_startGuestPlayback());
-        }
-      } else {
-        if (_playing) {
-          unawaited(_stopGuestPlayback());
-        }
+      // v0.0.49: NTP 활성. 호스트 schedule-play/schedule-pause가 권위 — 한 번이라도
+      // schedule seq를 받았으면 obs.playing 변화로 자동 start/stop 안 함. schedule 메시지를
+      // 못 받은 합류 게스트만 _scheduleFromObs로 catch-up. 정지 전환은 schedule-pause로
+      // 보장되므로 obs 기반 자동 정지도 비활성 (stale obs로 잘못 정지 방지).
+      if (_lastSeenSchedSeq == null && _audioReady && !_playing && obs.playing) {
+        debugPrint('[GUEST] catch-up via _scheduleFromObs');
+        unawaited(_scheduleFromObs());
       }
     } catch (e) {
       debugPrint('audio-obs parse error: $e');
     }
   }
 
-  // v0.0.47: schedule 진행 중 race 방지. _handleSchedulePlay와 _scheduleFromObs가
+  // v0.0.49: schedule 진행 중 race 방지. _handleSchedulePlay와 _scheduleFromObs가
   // 동시 호출되면 둘 다 scheduleStart → 호스트와 다른 fromVf로 시작 → 큰 drift.
   bool _scheduleInProgress = false;
 
-  /// v0.0.47: 합류 게스트의 자체 schedule 계산. (v0.0.48에서 호출 비활성화 — NTP 재도입 시 재활용)
-  /// 호스트 obs로부터 현재 호스트 콘텐츠 위치 외삽 → 200ms 후 양쪽 시작 위치 계산.
-  // ignore: unused_element
+  /// v0.0.49: seq 비교. 더 큰(또는 같은) seq만 진행. seq 처음 보면 무조건 진행.
+  bool _isStaleSeq(int incoming) {
+    final last = _lastSeenSchedSeq;
+    if (last == null) return false;
+    return incoming < last;
+  }
+
+  /// v0.0.49: 합류 게스트의 자체 schedule 계산 (catch-up).
+  /// audio-url 다운로드+decode 끝 + 호스트 obs.playing=true이지만 호스트 schedule-play
+  /// 못 받은 경우(한 번 broadcast된 이후 합류) 호출. 호스트 obs로부터 현재 콘텐츠
+  /// 위치 외삽 → 200ms 후 양쪽 시작 위치 계산.
   Future<void> _scheduleFromObs() async {
     if (_playing || _scheduleInProgress) return;
+    if (_lastSeenSchedSeq != null) return; // 이미 호스트 schedule 받은 적 있으면 호스트 권위 우선
     final obs = _latestObs;
     if (obs == null || !_sync.isSynced) return;
+    if (!obs.playing) return;
     _scheduleInProgress = true;
 
     // _playing은 schedule 등록 직전 set — race 방지 (await yield 동안 다른 메시지가
@@ -902,15 +957,21 @@ class NativeAudioSyncService {
     }
   }
 
-  /// v0.0.47: 호스트의 schedule-play 메시지 처리. wall time 변환 후 native schedule 등록.
+  /// v0.0.49: 호스트의 schedule-play 메시지 처리. wall time 변환 후 native schedule 등록.
   /// 호스트가 정확한 fromVf 보내므로 _scheduleFromObs보다 정확. race 시 우선.
   Future<void> _handleSchedulePlay(Map<String, dynamic>? data) async {
     if (data == null || !_audioReady) return;
     final hostStartWallMs = (data['startWallMs'] as num?)?.toInt();
     final fromVf = (data['fromVf'] as num?)?.toInt();
-    if (hostStartWallMs == null || fromVf == null) return;
+    final seq = (data['seq'] as num?)?.toInt();
+    if (hostStartWallMs == null || fromVf == null || seq == null) return;
+    if (_isStaleSeq(seq)) {
+      debugPrint('[GUEST] schedule-play stale seq=$seq (last=$_lastSeenSchedSeq)');
+      return;
+    }
+    _lastSeenSchedSeq = seq;
 
-    // 진행 중이면 잠깐 대기 — 마지막 schedule-play가 이김 (멱등). 단순화 위해 reentrant 허용.
+    // 진행 중이면 마지막 메시지가 이김 (멱등). reentrant 허용.
     _scheduleInProgress = true;
     // _playing을 await 전 set — _handleAudioObs의 _scheduleFromObs 호출 차단
     _playing = true;
@@ -920,7 +981,7 @@ class NativeAudioSyncService {
       final guestStartWallMs =
           hostStartWallMs - _sync.filteredOffsetMs.round();
       debugPrint(
-          '[GUEST] schedule-play hostWallMs=$hostStartWallMs '
+          '[GUEST] schedule-play seq=$seq hostWallMs=$hostStartWallMs '
           'guestWallMs=$guestStartWallMs fromVf=$fromVf '
           'offset=${_sync.filteredOffsetMs.round()}');
 
@@ -936,9 +997,15 @@ class NativeAudioSyncService {
     }
   }
 
-  /// v0.0.47: 호스트의 schedule-pause 메시지 처리. 즉시 정지.
+  /// v0.0.49: 호스트의 schedule-pause 메시지 처리. 즉시 정지.
   Future<void> _handleSchedulePause(Map<String, dynamic>? data) async {
-    debugPrint('[GUEST] schedule-pause');
+    final seq = (data?['seq'] as num?)?.toInt();
+    if (seq != null && _isStaleSeq(seq)) {
+      debugPrint('[GUEST] schedule-pause stale seq=$seq (last=$_lastSeenSchedSeq)');
+      return;
+    }
+    if (seq != null) _lastSeenSchedSeq = seq;
+    debugPrint('[GUEST] schedule-pause seq=$seq');
     if (!_playing) return;
     _playing = false;
     _playingController.add(false);
@@ -971,30 +1038,8 @@ class NativeAudioSyncService {
   }
 
   // ═══════════════════════════════════════════════════════════
-  // 게스트: 재생 시작/정지
+  // 게스트: drift 상태 리셋
   // ═══════════════════════════════════════════════════════════
-
-  // v0.0.48 롤백: v0.0.45 동작 — engine.start 직접 호출 + _resetDriftState.
-  Future<void> _startGuestPlayback() async {
-    if (_playing) {
-      debugPrint('[GUEST] _startGuestPlayback: already playing, skip');
-      return;
-    }
-    debugPrint('[GUEST] _startGuestPlayback: calling engine.start()');
-    final ok = await _engine.start();
-    debugPrint('[GUEST] _startGuestPlayback: engine.start() → $ok');
-    if (!ok) return;
-    _playing = true;
-    _playingController.add(true);
-    _resetDriftState();
-  }
-
-  Future<void> _stopGuestPlayback() async {
-    if (!_playing) return;
-    _playing = false;
-    _playingController.add(false);
-    await _engine.stop();
-  }
 
   void _resetDriftState() {
     _anchorHostFrame = null;

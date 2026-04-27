@@ -2427,6 +2427,64 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (44) — v0.0.49 NTP 예약 재생 정밀 재도입 (B 단계: NTP only, prewarm 제외)
+
+**배경**: (43) v0.0.47 NTP 시도가 메시지 race + sequence ordering 부재 + 호스트 측 schedule 미적용 등 정밀 작업 부족으로 drift 60초 회귀 후 v0.0.48 롤백. 이번 세션은 한 줄기씩 (a)~(e) 항목 도입해 정공법 재진입. BT 워밍업 옵션 A는 분리해서 별도 측정 후 결정 (사용자 합의: B 먼저 → 측정 → 잔여 보고 A로).
+
+**변경 내역**:
+
+**(a) Sequence number 도입**:
+- `_hostSchedSeq`(호스트, 단조 증가) / `_lastSeenSchedSeq`(게스트, 마지막 처리한 seq) 멤버 추가.
+- `schedule-play` / `schedule-pause` 메시지 본문에 `seq: <int>` 필드.
+- 게스트 `_isStaleSeq` 헬퍼 — 작은 seq는 stale로 무시, 큰 seq만 처리. 새 곡(`_handleAudioUrl`) 진입 시 `_lastSeenSchedSeq=null`로 리셋해 새 곡 첫 schedule 받기.
+- 호스트는 새 곡에서도 `_hostSchedSeq` 그대로 유지(단조 증가 보장).
+
+**(b) Race 완전 제거**:
+- `_handleSchedulePlay`가 `_playing=true` + `_scheduleInProgress=true`를 `await scheduleStart` 전에 set. → 그 사이 `_handleAudioObs`가 `_scheduleFromObs` 호출 못 함.
+- `_scheduleFromObs`도 `_lastSeenSchedSeq != null` 체크 → 호스트 schedule 받은 적 있으면 자체 외삽 호출 안 함 (호스트 권위 우선).
+- `_handleAudioObs`에서 obs 기반 자동 start/stop 분기 완전 제거 — schedule 받은 게스트는 `obs.playing`으로 자동 전환 안 함. 합류 게스트(`_lastSeenSchedSeq==null`)만 `_scheduleFromObs` catch-up.
+
+**(e) 호스트도 schedule 적용 (대칭)**:
+- `syncPlay`: `_scheduleHostPlay` 헬퍼로 호스트 자기 `engine.scheduleStart(hostStartWallMs, fromVf)` 호출 + `schedule-play` broadcast. lead time 200ms 후 양쪽 동시 출력.
+- `syncSeek`(재생 중): `cancelSchedule` + `_scheduleHostPlay(fromVf=clampedTarget)` — 양쪽 동시 점프. anchor reset 후 fallback drift edge case((42), 최대 -634ms) 근본 제거.
+- `syncSeek`(정지 중): 기존대로 `engine.seekToFrame` + `seek-notify` broadcast (schedule 안 함).
+- `syncPause`: `engine.cancelSchedule` + `schedule-pause` broadcast.
+- 호스트 새 파일 로드 시(`loadFile`)도 `engine.cancelSchedule()`로 진행 중 schedule 정리.
+
+**합류 게스트 catch-up 활성화**:
+- `_handleAudioUrl` 마지막 (currentHostPlaying=true)에 `unawaited(_scheduleFromObs())` 호출. 이전 v0.0.48의 `_startGuestPlayback`(즉시 engine.start) 대체.
+- `_scheduleFromObs`는 `obs.playing=true` + `_sync.isSynced` + `_lastSeenSchedSeq==null` 모두 만족 시 호스트 obs로 콘텐츠 위치 외삽 → 200ms lead로 자체 schedule. 다음 호스트 syncPlay/Seek 호출 시 더 정확한 fromVf로 보정.
+
+**Reactive seek 정책**:
+- v0.0.47에서 비활성화 후 v0.0.48 롤백 시 다시 활성화한 `_fallbackAlignment` / `_recomputeDrift` / `_maybeTriggerSeek` 그대로 유지. NTP는 첫 정렬, reactive는 잔여 drift 누적 보정. NTP 정확도 보면 reactive seek 발동 줄어들 것 (드물게 발동 시에도 청감 영향 미미).
+
+**Dead code 제거**:
+- `_startGuestPlayback` / `_stopGuestPlayback` 제거 — schedule 경로로 일원화. `_handleAudioObs`에서 obs 기반 자동 stop 분기도 제거됨.
+
+**미적용 항목 (다음 세션 후보)**:
+- (c) outputLatency 비대칭 자동 보정 — anchor에 베이크인된 outLatDelta는 v0.0.38 그대로. NTP 정확 시 잔여 outLat은 reactive seek가 잡아줄 것으로 기대.
+- (d) Tab A7 Lite oboe pause/resume xrun 회피 — 변경 없음. NTP가 stream 시작 latency 자체를 lead time으로 흡수하므로 xrun 영향 줄어들 것 기대.
+- BT 워밍업 옵션 A (사용자 합의로 분리).
+
+**예상 효과**:
+- 첫 재생 정착 시간 ~수 초 → 200ms lead 후 즉시 정렬 (engine.start 지연 + clock sync 수렴 흡수).
+- 정지/재생/seek 매번 schedule → anchor reset 후 fallback drift edge case 근본 제거.
+- BT 게스트도 호스트 schedule 시점에 출력 시작 (단 outputLatency 비대칭은 anchor 베이크인에 의존, 처음 ~40초 잔여 가능).
+
+**미검증 / 측정 필요**:
+- drift csv (S22 host + iPhone guest 또는 + Tab A7 Lite guest): v0.0.45/v0.0.48 baseline (1.21ms / 2.01ms) 동등 또는 개선?
+- 첫 재생 정착 시간: 수 초 → 수백 ms?
+- 정지/재생/seek 반복 시 (42) edge case 재현 여부.
+- BT 게스트 (iPhone+버즈) 처음 40초 잔여 패턴 변화.
+- Tab A7 Lite oboe `requestPause` xrun 영향 (v0.0.46 (43) 발견 항목).
+- v0.0.47 1차 race(drift 38초) / 2차 race fix 후(63초) 회귀 재발 안 함 — 이번 세션에서 a/b/e 한꺼번에 적용했으니 다음 측정에서 회귀 시 bisect 어려움 위험.
+
+**롤백 기준**: 측정 drift abs 평균이 v0.0.48 baseline (2.01ms) 대비 2배 이상 증가, 또는 60초 이상 max drift 발생 시 즉시 v0.0.48 동작으로 롤백.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` (NTP 호출 재활성화 + seq 가드 + 합류 catch-up), `pubspec.yaml` (0.0.48→0.0.49). native 파일(iOS/Android scheduleStart/cancelSchedule + JNI/Channel 핸들러)는 v0.0.47 인프라 그대로 유지.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
