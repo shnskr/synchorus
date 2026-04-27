@@ -1313,7 +1313,10 @@ class NativeAudioSyncService {
         (hostWallNow - obs.hostTimeMs).toDouble();
     final vfDiffMs = guestVfMs - hostVfExpectedMs - currentOutLatDelta;
 
-    if (vfDiffMs.abs() > 500 && driftMs.abs() < 50) {
+    // v0.0.53: drift_ms 조건 제거. vfDiff 자체가 콘텐츠 어긋남 직접 측정이므로
+    // drift_ms 값 무관하게 큰 어긋남 시 발동. 이전 v0.0.52의 `drift < 50` 조건이
+    // drift 50~200ms 구간에서 sanity 발동 못 해 idx 60-61 -8.4초 어긋남 미회복.
+    if (vfDiffMs.abs() > 500) {
       debugPrint('[DRIFT] vf sanity fail: vfDiff=${vfDiffMs.toStringAsFixed(0)}ms '
           'drift_ms=${driftMs.toStringAsFixed(1)}ms — anchor reset');
       _anchorHostFrame = null;

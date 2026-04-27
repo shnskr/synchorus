@@ -2539,6 +2539,27 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (47) — v0.0.53 vf-sanity 조건 완화
+
+**배경**: (46) v0.0.52 측정 결과 vf-sanity 1회 발동(+40s, vfDiff=108초→700ms 회복 PASS) 했으나 idx 60-61(+42.7s, fd=-8.4초) 어긋남은 sanity 조건 `drift < 50` 안 만족(drift_ms=99.8ms)해 미발동. idx 24(+18.9s, drift_ms=14,864ms / fd=-4838ms)도 같은 이유로 미발동 → _maybeTriggerSeek anchor reset 경로로 1.6초 회복. 사용자 청감 "후 …" 어긋남 인지.
+
+**Fix**: `_recomputeDrift`의 vf-sanity 조건에서 `drift < 50` 제거. `vfDiff.abs() > 500ms`만으로 발동.
+- 이유: vfDiff는 콘텐츠 위치 직접 차이라 `drift_ms` 값 무관하게 큰 어긋남 직접 진단
+- 정상 구간 (vfDiff < 100ms)은 발동 안 함 → false-positive 없음
+- _maybeTriggerSeek와 중복 발동 가능하나 둘 다 anchor reset이라 무해
+
+**예상 효과**:
+- v0.0.52에서 못 잡은 drift 50~200ms + vfDiff 큰 케이스도 잡힘
+- 모든 drift_ms 거짓말 케이스 (anchor 잘못 잡힌 채 정렬 유지) 자동 회복
+
+**미적용**: 호스트 측 syncSeek/syncPlay/syncPause 직렬화 (B 옵션). v0.0.53 측정 후 잔여 발견 시 추가.
+
+**미검증**: 다음 측정에서 frame diff abs_max 1초 이내 + vf-sanity 발동 횟수 확인.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` `_recomputeDrift` 1줄 변경 (조건 단순화). `pubspec.yaml` (0.0.52→0.0.53).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
