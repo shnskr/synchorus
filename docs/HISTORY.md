@@ -2560,6 +2560,32 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (48) — v0.0.54 obs.playing=false 안전망
+
+**배경**: (47) v0.0.53 측정에서 사용자 정지/재생 + seek 연타 후 마지막 10초 frame diff 1.3초까지 누적. csv host_vf 분석 결과 idx 135-137 (98.6~99.7s) 호스트 vf=4656079로 **1.6초 정지**, 게스트만 계속 진행 → frame diff 누적. v0.0.49에서 `_handleAudioObs`의 `obs.playing=false` 자동 stop 분기를 stale obs 잘못 정지 우려로 제거한 게 안전망 사라짐.
+
+**가설**: 사용자 연타 중 호스트 syncPause → schedule-pause broadcast했지만 게스트의 `_handleSchedulePlay`/`_handleSchedulePause`가 동시 진행 race로 stale seq 무시 → 게스트가 정지 신호 못 받음. 또는 메시지 처리 순서 비결정. v0.0.51 fresh `_broadcastObs` 도입으로 stale obs 위험은 줄어든 상태라 안전망 다시 추가 가능.
+
+**Fix (`_handleAudioObs`)**: `_obsPlayingFalseStreak` 카운터 추가. obs.playing=false가 **2회 연속(~1초)** 도착하면 게스트 강제 정지 (`_engine.cancelSchedule`). 단발 stale obs로 잘못 정지하는 케이스는 streak 가드로 차단.
+
+**유지**:
+- 재생 방향(`obs.playing=true`)은 여전히 schedule-play 권위 — 합류 게스트만 `_scheduleFromObs` catch-up
+- v0.0.51 호스트 fresh `_broadcastObs`로 stale 위험 줄어든 환경 가정
+
+**예상 효과**:
+- 호스트 정지 후 ~1초 안에 게스트도 정지 (schedule-pause 손실 안전망)
+- frame diff 누적 1.3초+ 케이스 차단
+
+**미적용**:
+- 호스트 측 syncSeek/syncPlay/syncPause 직렬화 (B 옵션) — 측정 후 잔여 발견 시 추가
+- 메시지 처리 큐 직렬화 — 큰 변경, 보류
+
+**미검증**: 다음 측정에서 정지/재생/seek 연타 시 마지막 frame diff 100ms 이내 + `obs.playing=false streak` debug log 발동 빈도 확인.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` `_handleAudioObs` 분기 + 멤버 1개 추가 (~15줄). `pubspec.yaml` (0.0.53→0.0.54).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

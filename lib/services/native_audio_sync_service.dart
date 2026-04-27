@@ -62,6 +62,9 @@ class NativeAudioSyncService {
   int _hostSchedSeq = 0;
   int? _lastSeenSchedSeq;
 
+  // v0.0.54: obs.playing=false 연속 카운터 — schedule-pause 못 받은 케이스 안전망.
+  int _obsPlayingFalseStreak = 0;
+
   /// 게스트: 현재 다운로드 세션 ID. 새 audio-url마다 증가, 이전 다운로드 무효화용.
   int _downloadSessionId = 0;
   /// 게스트: 진행 중인 HttpClient (취소용)
@@ -895,12 +898,29 @@ class NativeAudioSyncService {
       }
 
       // v0.0.49: NTP 활성. 호스트 schedule-play/schedule-pause가 권위 — 한 번이라도
-      // schedule seq를 받았으면 obs.playing 변화로 자동 start/stop 안 함. schedule 메시지를
-      // 못 받은 합류 게스트만 _scheduleFromObs로 catch-up. 정지 전환은 schedule-pause로
-      // 보장되므로 obs 기반 자동 정지도 비활성 (stale obs로 잘못 정지 방지).
+      // schedule seq를 받았으면 obs.playing 변화로 자동 start 안 함. schedule 메시지를
+      // 못 받은 합류 게스트만 _scheduleFromObs로 catch-up.
       if (_lastSeenSchedSeq == null && _audioReady && !_playing && obs.playing) {
         debugPrint('[GUEST] catch-up via _scheduleFromObs');
         unawaited(_scheduleFromObs());
+      }
+
+      // v0.0.54: obs.playing=false 안전망 (정지 방향만, 재생 방향은 schedule-play 권위).
+      // (47) 측정에서 사용자 정지/재생 연타 시 호스트 정지 후 게스트가 schedule-pause 못
+      // 처리한 듯한 케이스 발견 (host_vf 같은 값 반복 + 게스트 vf 계속 진행). 메시지
+      // 손실 또는 _handleSchedulePlay/Pause 동시 처리 race로 stale seq 무시될 수 있음.
+      // streak 2회(~1초) 연속이면 정지 — 단발 stale obs로 잘못 정지하는 케이스 방지.
+      if (_playing && !obs.playing) {
+        _obsPlayingFalseStreak++;
+        if (_obsPlayingFalseStreak >= 2) {
+          debugPrint('[GUEST] obs.playing=false streak — fallback stop');
+          _playing = false;
+          _playingController.add(false);
+          unawaited(_engine.cancelSchedule());
+          _obsPlayingFalseStreak = 0;
+        }
+      } else {
+        _obsPlayingFalseStreak = 0;
       }
     } catch (e) {
       debugPrint('audio-obs parse error: $e');
