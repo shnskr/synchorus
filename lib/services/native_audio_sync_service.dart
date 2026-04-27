@@ -1372,6 +1372,32 @@ class NativeAudioSyncService {
       return;
     }
 
+    // v0.0.58: rate drift 보정 — 호스트와 게스트 native rate가 ~1% 다름 (HISTORY (51)
+    // host_obs_wall 기준 정밀 측정으로 확인). 60초 동안 ~640ms 누적 → 평균 fd 320ms.
+    // 100ms 어긋남에 도달하면 게스트 vf만 보정 (anchor 유지 → outLatDelta 베이크인 보존,
+    // v0.0.55 무한 loop 회피). 1.5초 cooldown 후 다음 발동 가능. 매 ~10초마다 작은
+    // reseek 1회 → 평균 fd ~50ms 청감 인지 한계 미만.
+    if (vfDiffMs.abs() > 100 &&
+        vfDiffMs.abs() <= 500 &&
+        ts.wallMs >= _seekCooldownUntilMs) {
+      final correctionFrames = (-vfDiffMs * _framesPerMs).round();
+      final newVf = ts.virtualFrame + correctionFrames;
+      debugPrint('[DRIFT] vf-correction: vfDiff=${vfDiffMs.toStringAsFixed(0)}ms '
+          '— guest reseek by $correctionFrames frames (rate drift)');
+      unawaited(_engine.seekToFrame(newVf));
+      _seekCorrectionAccum += correctionFrames;
+      _seekCooldownUntilMs = ts.wallMs + 1500;
+      _sendDriftReport(
+        wallMs: ts.wallMs,
+        driftMs: vfDiffMs,
+        offsetMs: offset,
+        hostVf: obs.virtualFrame,
+        guestVf: ts.virtualFrame,
+        event: 'vf-correction',
+      );
+      return;
+    }
+
     // v0.0.53: drift_ms 조건 제거. vfDiff 자체가 콘텐츠 어긋남 직접 측정이므로
     // drift_ms 값 무관하게 큰 어긋남 시 발동.
     // v0.0.56: 임계 200→500 복원 (v0.0.55 임계 200ms는 outputLatency 베이크인
