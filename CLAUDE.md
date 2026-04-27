@@ -3,9 +3,25 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. 최신 릴리스 **v0.0.48** (2026-04-26) — v0.0.46 oboe pause/resume + v0.0.47 NTP 예약 재생 시도 후 롤백. 측정 결과 (S22 host + Tab A7 Lite guest) drift abs 2.01ms로 v0.0.45 baseline 회복. v0.0.46의 oboe stop()을 pause/resume 모델로 변경 + stale hostPlaying fix는 유지 (회귀 없음). v0.0.47 NTP 예약 재생 (호스트 syncPlay 시 wall+200ms 후 양쪽 동시 시작 약속, native API `AVAudioPlayerNode.play(at:)` + oboe 콜백 wall 비교) 도입했으나 메시지 race + dart isolate ordering 등 정밀 작업 한 세션으로 부족 → drift 60초 회귀 → 롤백. NTP 인프라 코드 (native `scheduleStart`/`cancelSchedule`, JNI/Channel, 메시지 핸들러)는 dead path로 보존 — 다음 세션 정밀 작업 시 재활용. 진단 로그 `[SYNCPLAY-HOST]`/`[ANCHOR]`/`[OBS-FIRST]`/`[OBS-PLAYSTART]` 유지.
+v3 본 구현 진행 중. **현재 main = v0.0.48 (safe baseline)** — 사용자 청감 가장 안정으로 확인. 2026-04-27 세션에 v0.0.49~v0.0.61 NTP 정밀 재시도 13번 fix 사이클 진행했으나 사용자 청감 비교 결과 v0.0.48이 더 나음 → `git reset --hard 1c6da7d`로 main reset, 모든 시도는 `backup-v0.0.61-session` branch에 보존. 상세: `docs/HISTORY.md` (44).
 
-**다음 작업 (v0.0.49+)**: NTP 예약 재생 정밀 작업 — (a) schedule-play 메시지에 sequence number 추가, (b) `_scheduleFromObs`/`_handleSchedulePlay` race 완전 제거, (c) outputLatency 비대칭 자동 보정, (d) Tab A7 Lite oboe pause/resume xrun 회피. 또는 별도 트랙으로 (e) 환경 이슈 — iOS 26.4.1 + macOS 26.3 Tahoe에서 flutter run install/launch 단계 hung 발생 빈번 (다음 세션엔 IntelliJ Run 또는 Xcode IDE 직접 사용 권장).
+**v0.0.48 측정값** (S22 host + Tab A7 Lite guest):
+- drift_ms abs 평균 **2.01~2.43ms** (매우 안정)
+- frame diff abs 평균 ~350~400ms (anchor 베이크인 outputLatency 부정확으로 인한 거짓말 패턴 — drift_ms와 fd 불일치)
+- 알려진 한계: (42) Android 게스트 정지/재생/seek 시 fallback drift max -634ms (정상 사용 패턴엔 영향 없음)
+
+**다음 세션 후보 (우선순위)**:
+1. **csv 측정 인프라 강화** (sync 동작 변경 0, 측정만 정확) — `host_obs_wall`/`vf_diff_ms`/`out_lat_delta` 컬럼 추가. 진짜 음향 어긋남 직접 측정 가능. ~30줄.
+2. **(42) edge case** — NTP 정공법 재도입. 단 이번 세션 13번 fix 시행착오 학습 적용:
+   - 한 fix 도입 전 코드 정밀 분석 (라인 단위 + race 시뮬레이션) 필수
+   - 측정 환경 분리 (idle 측정 vs 사용자 연타 측정)
+   - 호스트/게스트 양쪽 FIFO 큐 직렬화 (마지막-이김 큐 X — v0.0.59 회귀 사례)
+3. **drift_ms vs frame diff 거짓말 패턴 fix** — anchor 베이크인 outputLatency 부정확. acoustic loopback 외부 측정 또는 EMA 자동 보정 (v0.0.60에서 anchor reset 자주로 누적 못 함 — 개선 여지)
+4. **첫 재생 정착 시간** — BT 워밍업 + clock sync 수렴. 옵션 A (BT prebuffer + outputLatency 수렴 게이팅)
+5. **v0.0.56 anchor 중복 호출 버그 fix** (line 1222-1228) — 진짜 버그. v0.0.48에 cherry-pick 검토할 가치
+6. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung. IntelliJ Run 또는 Xcode IDE 권장.
+
+**Backup branch**: `backup-v0.0.61-session` — v0.0.49~v0.0.61 commit 13번 모두 보존. 다음 세션에 `git log backup-v0.0.61-session --oneline`으로 시도 흐름 확인 가능.
 
 - **Step 1-1 ~ 1-4**: 완료 (네이티브 엔진 이식 + Dart 서비스 + P2P/clock sync/drift 보정 + 백그라운드 재생)
 - **Step 2 멀티 게스트**: 실기기 3대(S22 + iPhone 12 Pro + Galaxy Tab A7 Lite) 동시 테스트로 검증됨. 코드 변경 없이 1:N 동작

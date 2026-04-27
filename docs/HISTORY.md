@@ -2427,6 +2427,65 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (44) — v0.0.49~v0.0.61 NTP 정밀 재시도 13번 fix 사이클 → 사용자 청감 v0.0.48 더 나음 → main reset to v0.0.48
+
+**배경**: (43) v0.0.48 baseline에 (42) edge case (Android 게스트 정지/재생/seek 시 max -634ms drift) 잔존. NTP 정밀 작업 (sequence number + race 제거 + 호스트도 schedule 적용)으로 (42) 잡으려 한 세션. 한 세션 내 13번 fix 사이클 진행됐으나 사용자 청감 비교 결과 v0.0.48이 더 나음 → 모두 revert.
+
+**13번 fix 흐름 (v0.0.49~v0.0.61, backup branch `backup-v0.0.61-session`에 보존)**:
+
+| 버전 | 변경 | 결과 |
+|---|---|---|
+| v0.0.49 | NTP 정밀 (a)seq number + (b)race 제거 + (e)호스트 schedule | abs 2.82ms (정상 구간), idx 86 outlier 1번 (+48s) |
+| v0.0.50 | cooldown 1초 + anchor 즉시 무효화 | systemic +13ms drift 회귀 → revert |
+| v0.0.51 | 호스트 `_broadcastObs` async + fresh getTimestamp | seek 연타 시 5~118초 어긋남 부분 잡음 |
+| v0.0.52 | virtualFrame 기반 vf-sanity check (>500ms) | 1회 발동 PASS but 다른 케이스 미발동 |
+| v0.0.53 | vf-sanity 조건 완화 (`drift<50` 제거) | 발동 빈도 ↑ but fd 1.3초 잔여 |
+| v0.0.54 | obs.playing=false streak 2회 안전망 | 호스트 정지 신호 누락 fix |
+| v0.0.55 | vf-sanity 외삽 가드 + 임계 200ms + logger flush | 무한 loop 회귀 (fd 358ms) |
+| v0.0.56 | 임계 500 복원 + outputLatency cap 200ms + anchor 중복호출 버그 fix | abs 295ms |
+| v0.0.57 | 진단: csv에 host_obs_wall 컬럼 추가 | rate drift 진단 가능 |
+| v0.0.58 | rate drift 보정 (vf-correction, 100ms 임계) | abs 248ms — 이번 세션 best |
+| v0.0.59 | 호스트 측 sync 메서드 직렬화 | vf-sanity 발동 ↑ → revert |
+| v0.0.60 | outputLatency 자동 EMA 보정 | abs 279ms (회귀) |
+| v0.0.61 | obs.playing=false streak 2→1회 | abs 279ms |
+
+**진짜 원인 발견 (분석 단계)**:
+- **drift_ms (anchor 변화율 기반)**: 시간 정확성 측정 — v0.0.48에선 2~3ms 매우 안정
+- **frame diff (절대 콘텐츠 위치 차이)**: 진짜 음향 어긋남 측정 — v0.0.48에서도 350~400ms 잔존
+- 두 측정값 일치 안 함 = anchor 베이크인된 outputLatency 부정확. v0.0.48~v0.0.61 모두에 있던 한계.
+- `_tryEstablishAnchor` line 1222-1228 anchor 중복 호출 버그 발견 (v0.0.49부터 있던 잠재 버그)
+- 호스트와 게스트 native rate 미세 차이 (~1%) 의심 (artifact일 수도)
+
+**최종 측정 (v0.0.48 vs v0.0.61, 사용자 연타 환경)**:
+| | drift_ms abs_mean | frame diff abs_mean | 측정 시간 |
+|---|---|---|---|
+| v0.0.48 | **2.43ms** | 477ms (outlier 망침) → 정상 ~350ms | 228초 |
+| v0.0.61 | ~3ms | 279ms | 47초 |
+
+frame diff는 두 버전 비슷한 범위. 단 **사용자 청감으로 v0.0.48이 더 나음** 보고. v0.0.49+ 변경들이 race 만들어서 청감 잔여 어긋남 더 컸던 것으로 추정.
+
+**결정**:
+- `git reset --hard 1c6da7d`로 main을 v0.0.48 baseline으로 reset
+- v0.0.49~v0.0.61 commit은 `backup-v0.0.61-session` branch에 보존
+- 다음 세션에 NTP 다시 도입할 때 이 분석 결과 참고 (race fix 우선 + 한 줄기씩)
+
+**미해결 이슈 (다음 세션 후보)**:
+1. **(42) Android 게스트 fallback drift edge case** (HIGH) — NTP가 정공법이지만 race 정밀 작업 + acoustic loopback 기반 검증 필요
+2. **drift_ms vs frame diff 거짓말 패턴** — anchor 베이크인 outputLatency 부정확. acoustic loopback 또는 EMA 자동 보정 (v0.0.60 시도했지만 anchor reset 자주 발생해 누적 못 함)
+3. **호스트/게스트 양쪽 FIFO 큐 직렬화** — 사용자 연타 race 차단 (v0.0.59 마지막-이김 큐는 회귀, FIFO로 의도 보존하면서 직렬화)
+4. **첫 재생 정착 시간** (BT 워밍업 + clock sync 수렴, ~수 초 잠깐 어긋남) — 옵션 A (BT prebuffer + outputLatency 수렴 게이팅)
+
+**다음 세션 시작 가이드**:
+- 측정 환경 명확히: idle 측정 vs 사용자 연타 측정 분리
+- 한 fix 도입 전 → 코드 정밀 분석 (라인 단위) + race 시나리오 시뮬레이션
+- backup branch 참고: `git log backup-v0.0.61-session --oneline` 으로 13번 commit 확인 가능
+- v0.0.56 anchor 중복 호출 버그 fix는 진짜 버그 — v0.0.48에 cherry-pick 검토할 가치
+- HISTORY.md (50)~(54) 항목은 backup branch에만 있음 — 다음 세션에 main 통합할지 또는 새 분기로 진행할지 결정
+
+**변경 범위**: `git reset --hard` (main을 1c6da7d로). 코드 변경 0. backup branch만 새로 생성 (`backup-v0.0.61-session`).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
