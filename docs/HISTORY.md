@@ -2514,6 +2514,31 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (46) — v0.0.52 virtualFrame 기반 sanity check 추가
+
+**배경**: (45) v0.0.51 호스트 fresh `_broadcastObs` 측정 결과 idx 70~71 (1000~1001s, seek 연타 시점)에서 frame diff -146초→-144초→+48ms로 **2초 안 회복**되었으나 사용자 청감 "조금 틀어짐" 보고. csv `drift_ms`는 -3.8ms로 안정 보고했지만 frame diff(절대 콘텐츠 위치 차이)는 146초 어긋남 — `drift_ms` 공식이 framePos(HAL 단조 카운터) 변화율만 봐서 호스트 콘텐츠 점프 자체를 못 보는 구조적 한계. anchor가 잘못된 obs로 잡히면 이후 drift_ms는 작게 보이지만 실제 음향은 어긋난 채 유지.
+
+**Fix (`_recomputeDrift`)**:
+- driftMs 계산 후 virtualFrame 기반 `vfDiffMs` 별도 계산 (`guestVfMs - hostVfExpectedMs - currentOutLatDelta`)
+- `vfDiffMs > 500ms` AND `driftMs < 50ms` (driftMs 거짓말 패턴) 시 anchor 강제 reset → 다음 poll에서 fresh obs 기반 `_tryEstablishAnchor`로 정확히 재정렬
+- 무한 loop 방지: sanity fail 후 300ms 짧은 cooldown (다음 obs broadcast 도달 시간)
+- sanity 발동 분석용 csv `event=vf-sanity` 기록 (`vfDiffMs`를 `driftMs` 자리에)
+
+**미적용**:
+- `_tryEstablishAnchor` 진입 sanity 보류 — 첫 anchor establish도 막을 위험. v0.0.51 호스트 fresh broadcast로 schedule 직후 fresh obs 도달이 빠른 것으로 기대.
+- 호스트 측 `syncSeek/syncPlay/syncPause` 직렬화(B 옵션) 보류 — 이 fix(A)로 발생한 어긋남 자동 회복되면 충분. 측정 후 잔여 발생 빈도 보고 추가 결정.
+
+**예상 효과**:
+- frame diff 5~118초 어긋남 발생해도 **다음 obs(500ms) + 1 poll(100ms) 안에 자동 회복** (~600ms 이내)
+- csv `drift_ms`와 frame diff 일치도 ↑ — `vf-sanity` 이벤트로 잘못된 anchor 케이스 명시 추적
+- 사용자 청감 "잠깐 틀어짐"은 1초 안에 정렬되어 인지 부담 ↓
+
+**미검증**: 다음 측정에서 (1) frame diff abs_max 1초 이내 확인 (2) `event=vf-sanity` 발생 빈도 확인 (3) drift_ms 안정 구간 baseline 동등 확인.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` `_recomputeDrift` 18줄 추가. `pubspec.yaml` (0.0.51→0.0.52). 다른 코드 변경 없음.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

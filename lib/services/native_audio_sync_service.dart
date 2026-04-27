@@ -1301,6 +1301,40 @@ class NativeAudioSyncService {
     final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
     final driftMs = dGms - dHms - dynLatDeltaMs; // 양수: 게스트 음향이 앞섬
 
+    // v0.0.52: virtualFrame 기반 절대 frame diff sanity check.
+    // driftMs는 framePos(HAL 단조 카운터) 변화율로만 계산 → 호스트 콘텐츠 seek 자체는
+    // 못 봄. 호스트가 stale obs broadcast했거나 schedule 못 따라간 경우 driftMs는
+    // 작게 보이지만 실제 콘텐츠 위치는 크게 어긋남 (HISTORY (45) frame diff 5~118초).
+    // vfDiff가 크고 driftMs가 작은 케이스는 anchor가 잘못된 obs로 잡혀 어긋난 채
+    // 정렬 유지하는 거짓말 상황 → anchor 강제 reset → 다음 poll에서 fresh obs 기반
+    // _tryEstablishAnchor가 정확히 재정렬.
+    final guestVfMs = ts.virtualFrame / _framesPerMs;
+    final hostVfExpectedMs = obs.virtualFrame / hostFpMs +
+        (hostWallNow - obs.hostTimeMs).toDouble();
+    final vfDiffMs = guestVfMs - hostVfExpectedMs - currentOutLatDelta;
+
+    if (vfDiffMs.abs() > 500 && driftMs.abs() < 50) {
+      debugPrint('[DRIFT] vf sanity fail: vfDiff=${vfDiffMs.toStringAsFixed(0)}ms '
+          'drift_ms=${driftMs.toStringAsFixed(1)}ms — anchor reset');
+      _anchorHostFrame = null;
+      _anchorGuestFrame = null;
+      _offsetAtAnchor = null;
+      _driftSamples.clear();
+      // 다음 obs broadcast(500ms 주기) 도달 + 다음 anchor establish까지 짧은 cooldown.
+      // 0으로 두면 다음 poll에서 같은 stale obs로 또 sanity fail → 무한 loop 위험.
+      _seekCooldownUntilMs = ts.wallMs + 300;
+      // sanity report (분석용 — vfDiffMs를 driftMs 자리에 기록)
+      _sendDriftReport(
+        wallMs: ts.wallMs,
+        driftMs: vfDiffMs,
+        offsetMs: offset,
+        hostVf: obs.virtualFrame,
+        guestVf: ts.virtualFrame,
+        event: 'vf-sanity',
+      );
+      return;
+    }
+
     _latestDriftMs = driftMs;
     _driftSampleCount++;
 
