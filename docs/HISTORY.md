@@ -2485,6 +2485,35 @@ guest:                              engine.start() ← 수십 ms
 
 ---
 
+### 2026-04-27 (45) — v0.0.50 시도 → v0.0.49 revert + v0.0.51 호스트 obs fresh fetch
+
+**v0.0.50 시도 + revert**:
+- (44) v0.0.49 측정에서 idx 86 (+55.7s) drift +48,449ms 단발 outlier 발견. 사용자 청감 인지 못 함.
+- v0.0.50: `_handleSchedulePlay`에서 anchor 무효화 + `_latestObs=null` + 1초 cooldown으로 await yield window 차단 시도.
+- 측정 (S22 host + Tab A7 Lite guest, 71 row, 48s): outlier max 48,449→156ms로 줄였으나 **+11~13ms systemic offset 회귀** + 사용자 청감 보고 "seek 연타 시 5초+ 어긋난 채 재생" 발생. csv에는 안 잡힘 (cooldown이 drift 계산 자체를 보류).
+- v0.0.49 csv 재분석으로 같은 5초+ 어긋남 증상이 **이미 v0.0.49에도 있었음** 확인. drift_ms 공식이 anchor 기준 변화분만 보여 거짓말. 절대 frame diff (host_vf - guest_vf):
+  - idx 53 +37.2s: **+5,036ms**
+  - idx 87 +56.3s: **-55,686ms** (55초)
+  - idx 89 +57.6s: +18,251ms (18초)
+  - idx 111 +69.4s: **+117,963ms** (118초!)
+- 결론: v0.0.50의 새 회귀 아니라 **v0.0.49(이전 모든 버전)부터 있던 본질 race**. v0.0.50의 cooldown이 오히려 fallback 보류로 csv 거짓말 + +13ms systemic offset 만들어 더 나쁨 → v0.0.50 revert.
+
+**진짜 원인**:
+- 호스트 syncPlay/syncSeek/syncPause 끝의 `_broadcastObs()`가 `_engine.latest`(100ms poll 캐시) 사용 → 캐시는 syncSeek 직후 새 vf 반영 안 된 stale 값일 수 있음.
+- 게스트가 그 stale obs로 `_tryEstablishAnchor` 호출 → 게스트를 옛 host_vf 위치로 seek → anchor 베이크인. 이후 호스트 obs 새 vf로 갱신해도 anchor 기준이라 drift_ms는 작게 보임. **실제 음향은 옛/새 위치로 어긋난 채 유지**.
+
+**v0.0.51 fix**: `_broadcastObs`를 `Future<void> async`로 변경, `_engine.latest` 캐시 대신 `await _engine.getTimestamp()`로 매번 native fetch. 호출처 3곳(syncPlay/syncPause/syncSeek 끝) `await _broadcastObs()`로 변경, `_startObsBroadcast` timer callback은 `unawaited(_broadcastObs())`. 매 호출 native 호출이지만 500ms 주기 + sync 이벤트 시 추가 — 부담 무시 수준.
+
+**최소 변경 원칙**: 한 번에 한 가설만 검증. 다른 옵션(게스트 anchor sanity check, 호스트 syncSeek 직렬화)은 보류 — 측정 후 효과 부족하면 추가.
+
+**예상 효과**: seek 연타 시 호스트가 항상 fresh host_vf로 broadcast → 게스트 anchor가 정확한 위치에 잡힘 → 어긋남 자동 회복. csv `host_vf - guest_vf` 절대 차이가 5~118초에서 100ms 이내로 줄어들 것 기대.
+
+**미검증**: 다음 측정에서 seek 연타 패턴으로 frame diff 큰 어긋남 재현 안 됨 확인 필요.
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` `_broadcastObs` async + 4 호출처 변경. `pubspec.yaml` (0.0.49→0.0.51, 0.0.50 skip — revert됨). 다른 코드 변경 없음.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

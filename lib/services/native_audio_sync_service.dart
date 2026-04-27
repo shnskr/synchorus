@@ -461,7 +461,7 @@ class NativeAudioSyncService {
     _playing = true;
     _playingController.add(true);
 
-    _broadcastObs();
+    await _broadcastObs();
     _startObsBroadcast();
   }
 
@@ -503,7 +503,7 @@ class NativeAudioSyncService {
       'data': {'seq': seq},
     });
 
-    _broadcastObs();
+    await _broadcastObs();
     _stopObsBroadcast();
   }
 
@@ -537,7 +537,7 @@ class NativeAudioSyncService {
       });
     }
 
-    _broadcastObs();
+    await _broadcastObs();
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -548,7 +548,7 @@ class NativeAudioSyncService {
     _obsBroadcastTimer?.cancel();
     _obsBroadcastTimer = Timer.periodic(
       Duration(milliseconds: _obsBroadcastIntervalMs.round()),
-      (_) => _broadcastObs(),
+      (_) => unawaited(_broadcastObs()),
     );
   }
 
@@ -557,8 +557,14 @@ class NativeAudioSyncService {
     _obsBroadcastTimer = null;
   }
 
-  void _broadcastObs() {
-    final ts = _engine.latest;
+  /// 호스트 → 게스트들에게 audio-obs broadcast.
+  /// v0.0.51: `_engine.latest`(100ms poll 캐시) 대신 fresh `getTimestamp()` 사용.
+  /// 캐시는 syncPlay/syncSeek 직후 새 vf 반영 안 된 stale 값일 수 있고, 그 stale obs로
+  /// 게스트가 anchor establish하면 게스트가 옛 위치로 reseek → 호스트는 새 위치, 게스트는
+  /// 옛 위치로 어긋나 있는 채 유지 (HISTORY (45): seek 연타 시 5~118초 어긋남 csv 분석).
+  /// 매 호출 native fetch — 500ms 주기 + sync 이벤트 시 추가, 부담 무시 수준.
+  Future<void> _broadcastObs() async {
+    final ts = await _engine.getTimestamp();
     if (ts == null) return;
 
     // ok=false (HAL timestamp 실패)여도 virtualFrame + wallMs는 유효
