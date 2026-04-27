@@ -438,39 +438,9 @@ class NativeAudioSyncService {
 
   // ═══════════════════════════════════════════════════════════
   // 호스트: 재생 제어
-  //
-  // v0.0.59: 사용자 정지/재생/seek 연타 시 Dart Future 동시 진행 race로 native
-  // 상태 일관성 깨지는 문제 (HISTORY (52) 25초 구간 vf-sanity 5회 몰림 직접
-  // 증거). _runOrQueue로 직렬화 — 진행 중이면 새 op는 큐잉만 + 마지막 의도만
-  // 처리 (마지막이 이김). 외부 syncPlay/syncPause/syncSeek은 wrapper, 실제
-  // 본문은 _doSyncPlay/Pause/Seek private. _doSyncPlay 안의 재호출은 직렬화
-  // bypass (이미 큐 안이라 reentrant).
   // ═══════════════════════════════════════════════════════════
 
-  bool _hostOpInProgress = false;
-  Future<void> Function()? _pendingHostOp;
-
-  Future<void> _runOrQueue(Future<void> Function() op) async {
-    _pendingHostOp = op;
-    if (_hostOpInProgress) return; // 진행 중 — 큐잉만, 마지막 op이 이김
-    _hostOpInProgress = true;
-    try {
-      while (_pendingHostOp != null) {
-        final current = _pendingHostOp!;
-        _pendingHostOp = null;
-        await current();
-      }
-    } finally {
-      _hostOpInProgress = false;
-    }
-  }
-
-  Future<void> syncPlay() => _runOrQueue(_doSyncPlay);
-  Future<void> syncPause() => _runOrQueue(_doSyncPause);
-  Future<void> syncSeek(Duration position) =>
-      _runOrQueue(() => _doSyncSeek(position));
-
-  Future<void> _doSyncPlay() async {
+  Future<void> syncPlay() async {
     if (!_audioReady) return;
 
     // 재생 완료 상태에서 play → 처음으로 되돌리기
@@ -478,8 +448,7 @@ class NativeAudioSyncService {
     var vf = await _engine.getVirtualFrame();
     final sr = ts?.sampleRate ?? 0;
     if (ts != null && ts.totalFrames > 0 && vf >= ts.totalFrames) {
-      // 직렬화 안에서 직접 호출 (큐잉 우회 — 이미 progress 중)
-      await _doSyncSeek(Duration.zero);
+      await syncSeek(Duration.zero);
       vf = 0;
     }
 
@@ -531,7 +500,7 @@ class NativeAudioSyncService {
     });
   }
 
-  Future<void> _doSyncPause() async {
+  Future<void> syncPause() async {
     _playing = false;
     _playingController.add(false);
     // v0.0.49: NTP cancel 경로. 호스트 cancelSchedule + schedule-pause broadcast.
@@ -547,7 +516,7 @@ class NativeAudioSyncService {
     _stopObsBroadcast();
   }
 
-  Future<void> _doSyncSeek(Duration position) async {
+  Future<void> syncSeek(Duration position) async {
     if (!_audioReady) return;
     final ts = _engine.latest;
     if (ts == null || ts.sampleRate <= 0) return;
