@@ -89,6 +89,13 @@ class NativeAudioSyncService {
   // anchor의 콘텐츠 정렬 seek에 이 값을 베이크인 → framePos 기준 drift는 0
   // 으로 시작. 이후 _recomputeDrift는 (현재 - 앵커) 변화분만 보정.
   double _anchoredOutLatDeltaMs = 0;
+  // v0.0.60: outputLatency 자동 EMA 보정용 vfDiff window. anchor 베이크인된
+  // outLatDelta가 OS 부정확 보고 (양쪽 내장에서 +290ms 등)로 잘못 잡히면
+  // fd 일관 어긋남 누적. 매 _recomputeDrift마다 vfDiffMs 수집 → 10 sample
+  // 모이면 평균 fd로 _anchoredOutLatDeltaMs 미세 조정 + 게스트 reseek.
+  // 점진 수렴 (gain 0.3) → 5~10초 안에 fd 0에 가깝게 안정.
+  final List<double> _vfDiffWindow = [];
+  int _vfEmaCooldownMs = 0;
   // 최신 drift
   double? _latestDriftMs;
   // ignore: unused_field
@@ -1088,6 +1095,9 @@ class NativeAudioSyncService {
     _latestDriftMs = null;
     _driftSampleCount = 0;
     _driftSamples.clear();
+    // v0.0.60: EMA window도 clear — 새 anchor 베이크인 후 fresh 측정 시작.
+    _vfDiffWindow.clear();
+    _vfEmaCooldownMs = 0;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1433,6 +1443,42 @@ class NativeAudioSyncService {
     _driftSamples.add(driftMs);
     if (_driftSamples.length > _driftMedianWindow) {
       _driftSamples.removeAt(0);
+    }
+
+    // v0.0.60: outputLatency 자동 EMA 보정. vfDiffMs 10 sample(~1초) 모이면
+    // 평균 fd로 _anchoredOutLatDeltaMs 미세 조정 + 게스트 reseek. cap 200ms로
+    // 잘린 baseline outLatDelta가 부정확해도 fd 측정값으로 자동 수렴 (gain 0.3
+    // 점진 → 5~10초 안에 fd 0에 가깝게).
+    if (ts.wallMs >= _vfEmaCooldownMs) {
+      _vfDiffWindow.add(vfDiffMs);
+      if (_vfDiffWindow.length >= 10) {
+        final avgFd =
+            _vfDiffWindow.reduce((a, b) => a + b) / _vfDiffWindow.length;
+        if (avgFd.abs() > 50) {
+          // 평균 fd 50ms 초과 → outLatDelta 부정확. EMA gain 0.3으로 점진 보정.
+          final correctionMs = avgFd * 0.3;
+          final correctionFrames = (correctionMs * _framesPerMs).round();
+          // 게스트 vf를 -correctionMs만큼 조정 (fd 양수면 게스트 앞섬 → 뒤로)
+          final newVf = ts.virtualFrame - correctionFrames;
+          unawaited(_engine.seekToFrame(newVf));
+          _seekCorrectionAccum -= correctionFrames;
+          _anchoredOutLatDeltaMs += correctionMs; // baseline 업데이트
+          debugPrint(
+              '[DRIFT] outLatEMA: avgFd=${avgFd.toStringAsFixed(0)}ms '
+              'correction=${correctionMs.toStringAsFixed(0)}ms '
+              '_anchoredOutLatDeltaMs=${_anchoredOutLatDeltaMs.toStringAsFixed(0)}ms');
+          _sendDriftReport(
+            wallMs: ts.wallMs,
+            driftMs: avgFd,
+            offsetMs: offset,
+            hostVf: obs.virtualFrame,
+            guestVf: ts.virtualFrame,
+            event: 'out-lat-ema',
+          );
+          _vfEmaCooldownMs = ts.wallMs + 1500; // 1.5초 cooldown
+        }
+        _vfDiffWindow.clear();
+      }
     }
 
     // 500ms마다 drift report 전송
