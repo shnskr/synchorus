@@ -3,44 +3,48 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. **현재 main = v0.0.48 (safe baseline)** — 사용자 청감 가장 안정으로 확인. 2026-04-27 세션에 v0.0.49~v0.0.61 NTP 정밀 재시도 13번 fix 사이클 진행했으나 사용자 청감 비교 결과 v0.0.48이 더 나음 → `git reset --hard 1c6da7d`로 main reset, 모든 시도는 `backup-v0.0.61-session` branch에 보존. 상세: `docs/HISTORY.md` (44).
+v3 본 구현 진행 중. **현재 main = v0.0.54** — 알고리즘 v2 그룹 1 구현 + 측정 검증 PASS. 거짓말 패턴 + 누적 발산 + 메시지 race 모두 해소. 상세: `docs/HISTORY.md` (45)/(46).
 
-**v0.0.48 측정값** (S22 host + Tab A7 Lite guest):
-- drift_ms abs 평균 **2.01~2.43ms** (매우 안정)
-- frame diff abs 평균 ~350~400ms (anchor 베이크인 outputLatency 부정확으로 인한 거짓말 패턴 — drift_ms와 fd 불일치)
-- 알려진 한계: (42) Android 게스트 정지/재생/seek 시 fallback drift max -634ms (정상 사용 패턴엔 영향 없음)
+**v0.0.54 측정값** (S22 host + Tab A7 Lite guest):
+- **idle 5분**: drift_ms abs mean **1.86ms** (v0.0.48 baseline 2.43ms 대비 향상), vfDiff abs mean 20.71ms, max 49ms, vfDiff>50ms **0%**
+- **burst 2.7분 (사용자 빠른 연타)**: drift_ms abs mean 1.87ms, **vfDiff max 702ms** (v0.0.50 45269ms 대비 64배 향상), 자가 회복 1~2초
+- **자동 정지**: 5분 곡 끝 도달 시 정상 정지 + 재생 누르면 0:00부터
+- **청감**: idle 어긋남 인지 0, burst seek bar 연타 시 2번 잠깐 틀어짐 (1~2초 회복)
+
+**v0.0.51~v0.0.54 그룹 1 변경 요약**:
+- **A-2 결합 액션**: drift+vfDiff 4단계 분기 (정상/작은 보정/강제 reseek/emergency)
+- **B-1 outputLatency EMA** (α=0.2) + anchor reset 시 보존
+- **F-2 강화**: 게스트 메시지 큐 + await 직렬화 (`_pendingObs/_pendingHostStateSync/_pendingGuestSeekTargetMs` + `_processQueue`)
+- **G-2 host-state-sync** 메시지 (보조 안전망)
+- **호스트 cooldown debouncing**: syncPlay/Pause 200ms / syncSeek 100ms
+- **임계 (v0.0.52 fix)**: vfdiff_normal 80ms, gain 0.2, medianWindow 10
+- **anchor 동기 reset**: 보정 후 _anchorGuestFrame 갱신 (over-correction 차단)
+- **EMA 직접 보정**: 매 poll _anchoredOutLatDeltaMs를 EMA로 점진 수렴
+- **자동 정지 race fix** (v0.0.53/54): idempotent guard + _flushHostState seek 직접 호출
 
 **다음 세션 후보 (우선순위)**:
 
-1. **csv 측정 인프라 강화** (sync 동작 변경 0, 진단 도구만) — 작은 작업.
-   - `host_obs_wall` 컬럼: 호스트 측 broadcast wall — 외삽 정확 + rate 측정용
-   - `vf_diff_ms` 컬럼: 외삽 + outputLatency 보정 후 진짜 어긋남 (drift_ms 거짓말 패턴 직접 감지)
-   - `out_lat_delta` 컬럼: anchor 베이크인된 outLat 진단
-   - 효과: csv만 보면 "drift_ms 안정인데 fd 어긋남" 즉시 감지. 분석 의존 X. 다음 fix 측정 정확도 ↑.
+1. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 5분만, drift_ms <5ms 97.7%이라 누적 가능성 작지만 미검증)
 
-2. **알고리즘 재설계 — drift_ms + vfDiff 둘 다 반영하는 새 sync 공식** (이번 세션 13번 fix 종합 학습).
-   - **현재 한계**: drift_ms는 framePos(HAL) 변화율만 봄 → virtualFrame(콘텐츠 절대 위치) 못 봄 → anchor 잘못 잡혀도 알 수 없음
-   - **방향**: anchor 분리 — (a) rate 측정용 anchor (framePos 기반, 정밀 ms 단위 보정) + (b) 절대 정렬 baseline (virtualFrame 기반, 큰 어긋남 강제 reseek)
-   - **outputLatency 보정 누적 보존**: anchor reset해도 EMA 누적값 유지 (v0.0.60에서 reset 자주로 누적 못 한 한계 회피)
-   - **호스트/게스트 양쪽 FIFO 큐 직렬화**: 마지막-이김 큐 X (v0.0.59 회귀 사례) → 모든 op 순차 처리 + 의도 보존
-   - **race 시나리오 시뮬레이션 우선**: 코드 라인 단위 정밀 분석 후 도입 — trial-and-error 사이클 반복 회피
-   - **측정 환경 분리**: idle 측정 (rate drift 검증) vs 사용자 연타 측정 (race 검증) 분리
+2. **iOS host 환경 검증** — Mac 환경 필요. outputLatency 보고 정밀도 차이, framePos 측정 정확도, iOS 라이프사이클. v2 그룹 1 핵심 fix는 OS 무관이지만 미세 차이 검증 가치 있음.
 
-3. **(42) Android 게스트 fallback drift edge case** — 알고리즘 재설계 (2번)로 자연 해결 가능성 큼. 단독 fix 안 함.
+3. **BT 환경 검증** — BT outputLatency 비대칭 (40~200ms 변동) + EMA 학습 상호작용. iPhone 게스트 BT (HISTORY (32) 첫 40초 잔여 패턴) 재검증.
 
-4. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 자체를 외부에서 측정. 정확도 검증 + 알고리즘 재설계의 ground truth.
+4. **D-1 anchor 분리** (보류 결정) — 그룹 1만으로 사고 시나리오 모두 해결됐으니 효과 작을 것. 30분+ idle / iOS host / BT 측정에서 부족 발견되면 단독 v0.0.55로 추가.
 
-5. **첫 재생 정착 시간** — BT 워밍업 + clock sync 수렴. 옵션 A (BT prebuffer + outputLatency 수렴 게이팅).
+5. **다중 게스트 (1:N)** 검증 — 1대1만 검증, 1대N 미확인. 코드는 게스트별 독립 처리이지만 측정 가치.
 
-6. **v0.0.56 anchor 중복 호출 버그 fix** (line 1222-1228 두 번 호출) — 진짜 버그. v0.0.48에 cherry-pick 검토. backup branch에서 가져올 수 있음.
+6. **첫 재생 정착 시간** ((39)) — idle 0~30s vfDiff +2.32ms로 매우 안정 확인. 우선순위 낮아짐.
 
-7. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung. IntelliJ Run 또는 Xcode IDE 권장.
+7. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 ground truth.
 
-**핵심 학습 (이번 세션 13번 fix 종합)**:
-- drift_ms 공식 자체에 한계 — framePos 변화율만으론 anchor 거짓말 못 잡음. **virtualFrame 절대 위치 같이 봐야 진짜 sync 측정 가능**
-- csv 분석 만으론 부족 — 계산 로직(알고리즘) 자체에 둘 다 반영 필요
-- 단발 fix 사이클 위험 — 한 fix가 다른 race 만들고 그 fix가 또 race 만드는 누적 회귀 (v0.0.50~v0.0.61 사례)
-- 측정 환경 영향 큼 — 짧은 idle vs 긴 사용자 연타 결과 매우 다름. 비교 시 환경 통제 필수
+8. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung (이전 환경). IntelliJ Run 또는 Xcode IDE 권장.
+
+**핵심 학습 (이번 세션, 2026-04-28)**:
+- **그룹 1 효과 검증 PASS** — 거짓말 패턴 (vfDiff 30~50ms 베이크인) → A-2 + B-1 EMA로 baseline 수준 안정. 누적 발산 (45초) → F-2 큐 + await 직렬화로 700ms 1회만, 1~2초 회복. 메시지 race (guest_stop 32회 누락) → 호스트 cooldown + 큐로 5회로 감소.
+- **D-1 보류 결정 정확** — 그룹 1만으로 사고 시나리오 모두 해결. 향후 측정으로 필요성 재검토.
+- **v0.0.51 → v0.0.52 회귀 + fix 사이클** — 초기 임계(vfdiff 30ms, gain 0.5) 너무 빡세서 보정 진동 발생. 측정 검증으로 즉시 잡고 v0.0.52로 단계 fix. trial-and-error 회피 정신 — 디자인 문서 먼저 + 검증 측정 + 단계 fix.
+- **debounce + idempotent guard 패턴** — v0.0.53/54에서 자동 정지 + 끝 도달 후 play의 race 모두 같은 패턴(매 poll 자가 호출 → timer 갱신). idempotent guard로 차단.
 
 ### 다음 세션 작업 흐름 (강제)
 
