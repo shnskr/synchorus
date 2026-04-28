@@ -9,6 +9,7 @@ class SyncMeasurementLogger {
   IOSink? _sink;
   File? _logFile;
   bool _isActive = false;
+  int _nextSeq = 0;
 
   bool get isActive => _isActive;
   String? get logFilePath => _logFile?.path;
@@ -33,15 +34,21 @@ class SyncMeasurementLogger {
         .first;
     _logFile = File('${dir.path}/sync_log_$ts.csv');
     _sink = _logFile!.openWrite();
+    // wall_ms: 호스트가 row 기록한 시각 (host_recv_wall로 통일 — 두 기기 시계
+    // mix 회피, 단조 증가 보장). guest_wall: 게스트 보고의 원본 wallMs (TCP lag
+    // + clock offset 분석용, 호스트 이벤트엔 0). seq: csv 자체 단조 시퀀스 —
+    // 빠른 연타 시 같은 wallMs 이벤트 정렬용.
     _sink!.writeln(
-      'wall_ms,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,event',
     );
+    _nextSeq = 0;
     _isActive = true;
     debugPrint('[MEASURE] started: ${_logFile!.path}');
   }
 
   void log({
     required int wallMs,
+    int guestWall = 0,
     required String guestId,
     required double driftMs,
     required double vfDiffMs,
@@ -53,8 +60,9 @@ class SyncMeasurementLogger {
     String event = 'drift',
   }) {
     if (!_isActive) return;
+    final seq = _nextSeq++;
     _sink?.writeln(
-      '$wallMs,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,$event',
     );
   }
 

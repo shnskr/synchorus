@@ -456,6 +456,8 @@ class NativeAudioSyncService {
 
     _broadcastObs();
     _startObsBroadcast();
+
+    _logHostEvent(event: 'host_play');
   }
 
   Future<void> syncPause() async {
@@ -466,6 +468,8 @@ class NativeAudioSyncService {
 
     _broadcastObs();
     _stopObsBroadcast();
+
+    _logHostEvent(event: 'host_pause');
   }
 
   Future<void> syncSeek(Duration position) async {
@@ -492,6 +496,12 @@ class NativeAudioSyncService {
     });
 
     _broadcastObs();
+
+    _logHostEvent(
+      event: 'host_seek',
+      hostVf: clampedTarget,
+      targetMs: position.inMilliseconds,
+    );
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -583,6 +593,33 @@ class NativeAudioSyncService {
     );
   }
 
+  /// 호스트 자기 이벤트(syncPlay/Pause/Seek)를 logger에 직접 기록.
+  /// guestId는 'host'로 박아 게스트 보고와 구분. drift_ms/vf_diff_ms 등은
+  /// 호스트 이벤트엔 의미 없어 0으로 둠. host_seek 시 hostVf에 target frame,
+  /// guestVf에 targetMs 표기 (게스트 컬럼 재활용).
+  void _logHostEvent({
+    required String event,
+    int hostVf = 0,
+    int targetMs = 0,
+  }) {
+    if (!_isHost) return;
+    final ts = _engine.latest;
+    final wallMs = DateTime.now().millisecondsSinceEpoch;
+    _logger.log(
+      wallMs: wallMs,
+      guestId: 'host',
+      driftMs: 0,
+      vfDiffMs: 0,
+      hostObsWall: ts?.wallMs ?? wallMs,
+      offsetMs: 0,
+      hostVf: hostVf != 0 ? hostVf : (ts?.virtualFrame ?? 0),
+      guestVf: targetMs,
+      seekCount: 0,
+      event: event,
+    );
+    debugPrint('[HOST-EVENT] $event vf=${hostVf != 0 ? hostVf : ts?.virtualFrame} targetMs=$targetMs');
+  }
+
   void _handleDriftReport(Map<String, dynamic> message) {
     final from = message['_from'] as String?;
     final data = message['data'] as Map<String, dynamic>?;
@@ -595,9 +632,13 @@ class NativeAudioSyncService {
     final seekCount = (data['seekCount'] as num?)?.toInt() ?? 0;
     final event = data['event'] as String? ?? 'drift';
 
+    // wall_ms는 호스트 받은 시점으로 통일 (단조 증가 보장).
+    // guest_wall은 게스트가 보낸 원본 wallMs — TCP lag + clock offset 분석용.
+    final hostRecvWall = DateTime.now().millisecondsSinceEpoch;
+    final guestWall = (data['wallMs'] as num?)?.toInt() ?? 0;
     _logger.log(
-      wallMs: (data['wallMs'] as num?)?.toInt() ??
-          DateTime.now().millisecondsSinceEpoch,
+      wallMs: hostRecvWall,
+      guestWall: guestWall,
       guestId: from,
       driftMs: driftMs,
       vfDiffMs: vfDiffMs,
@@ -973,6 +1014,7 @@ class NativeAudioSyncService {
     _anchorHostFrame = null;
     _anchorGuestFrame = null;
     _seekCooldownUntilMs = DateTime.now().millisecondsSinceEpoch + 1000;
+    _logGuestEvent(event: 'anchor_reset_seek_notify');
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -992,6 +1034,7 @@ class NativeAudioSyncService {
     _playing = true;
     _playingController.add(true);
     _resetDriftState();
+    _logGuestEvent(event: 'guest_start');
   }
 
   Future<void> _stopGuestPlayback() async {
@@ -999,6 +1042,25 @@ class NativeAudioSyncService {
     _playing = false;
     _playingController.add(false);
     await _engine.stop();
+    _logGuestEvent(event: 'guest_stop');
+  }
+
+  /// 게스트 측 이벤트(start/stop/anchor_set/anchor_reset)를 호스트로 보내
+  /// csv에 별도 row로 기록. drift_ms/vf_diff_ms는 그 시점 마지막 값(있으면)
+  /// 또는 0. anchor 관련 이벤트엔 _latestObs 신선도 추적 위해 hostObsWall 채움.
+  void _logGuestEvent({required String event}) {
+    if (_isHost) return;
+    final ts = _engine.latest;
+    _sendDriftReport(
+      wallMs: ts?.wallMs ?? DateTime.now().millisecondsSinceEpoch,
+      driftMs: _latestDriftMs ?? 0,
+      vfDiffMs: 0,
+      hostObsWall: _latestObs?.hostTimeMs ?? 0,
+      offsetMs: _sync.filteredOffsetMs,
+      hostVf: _latestObs?.virtualFrame ?? 0,
+      guestVf: ts?.virtualFrame ?? 0,
+      event: event,
+    );
   }
 
   void _resetDriftState() {
@@ -1191,6 +1253,8 @@ class NativeAudioSyncService {
       'delta=${outLatDelta.toStringAsFixed(1)}] '
       'targetGuestVf=$targetGuestVf initialCorrection=$initialCorrection',
     );
+
+    _logGuestEvent(event: 'anchor_set');
   }
 
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).
@@ -1239,6 +1303,7 @@ class NativeAudioSyncService {
       _anchorGuestFrame = null;
       _offsetAtAnchor = null;
       _driftSamples.clear();
+      _logGuestEvent(event: 'anchor_reset_offset_drift');
       return;
     }
 
@@ -1319,6 +1384,7 @@ class NativeAudioSyncService {
       _anchorGuestFrame = null;
       _driftSamples.clear(); // 앵커 리셋 시 노이즈 윈도우도 초기화
       _seekCooldownUntilMs = 0;
+      _logGuestEvent(event: 'anchor_reset_large_drift');
       return;
     }
     if (wallMs < _seekCooldownUntilMs) return;
