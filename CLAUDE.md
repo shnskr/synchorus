@@ -3,41 +3,58 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. **현재 main = v0.0.52 (v0.0.48 알고리즘 + csv 보강 + 진단 컬럼)** — 2026-04-28 세션에 v0.0.51~v0.0.55 그룹 1 + D-1 시도 후 v0.0.55 회귀 → v0.0.50 reset. 그 후 syncSeek debounce 단독 시도 → 사용자 청감 차이 X → 롤백. 마지막으로 v0.0.52 진단 컬럼 4개 추가 (sync 동작 변경 0). 상세: `docs/HISTORY.md` (45)/(46)/(47)/(48)/(49).
+v3 본 구현 진행 중. **현재 main = v0.0.53 (v0.0.48 알고리즘 + csv 보강 + 진단 컬럼 + anchor 중복 호출 버그 fix)** — 2026-04-28 세션에 v0.0.51~v0.0.55 그룹 1 + D-1 시도 후 v0.0.55 회귀 → v0.0.50 reset → syncSeek debounce 시도 후 롤백 → v0.0.52 진단 컬럼 추가 → v0.0.53 anchor 중복 호출 버그 fix. 상세: `docs/HISTORY.md` (45)~(50).
 
-**v0.0.52 = v0.0.48 알고리즘 + 측정 도구 강화** (sync 동작 변경 0):
+**v0.0.53 = v0.0.48 알고리즘 + 측정 도구 강화 + 잠재 root cause 1개 fix** (sync 동작 의도와 일치):
 - v0.0.49: `vf_diff_ms`, `host_obs_wall` 컬럼
 - v0.0.50: `seq`, `guest_wall`, 호스트/게스트 이벤트 로깅 (11종)
-- v0.0.52: `out_lat_host_raw`, `out_lat_guest_raw`, `out_lat_delta_current`, `out_lat_delta_anchored` 컬럼
+- v0.0.52: `out_lat_*` 4개 진단 컬럼
+- **v0.0.53: `_tryEstablishAnchor`의 `seekToFrame` + `_seekCorrectionAccum` 중복 호출 제거** — `_seekCorrectionAccum`이 두 배로 누적되던 버그 fix. anchor baseline이 의도와 일치되어 vfDiff 잔재 잠재 root cause 제거. v0.0.51 그룹 1에서도 같은 fix 했었음 (cherry-pick 동등). 검증 측정은 다음 세션 (HISTORY (50) 표 참고).
 
-**v0.0.52 측정값** (S22 host + Tab A7 Lite guest):
+**v0.0.52 측정값** (v0.0.53 fix 전 baseline, S22 host + Tab A7 Lite guest):
 - **idle 3분 20초**: drift abs mean 5.80ms, **vfDiff signed -3.60ms** (매우 정확)
 - 호스트 outputLatency 8.20ms / 게스트 22.98ms / 차이 14.78ms 정확 베이크인 (베이크인-current 차이 0.06ms)
+- 수식상 vfDiff -0.06ms vs 실제 -3.60ms = 잔재 -3.54ms (anchor 중복 호출 영향 가능성)
 - **사용자 청감**: idle "초반 1~2초 + 잘 맞음", burst "나쁘지 않음" (v0.0.48과 동일)
-- 알려진 잠재 한계 (알고리즘 자체):
-  - 거짓말 패턴 — vfDiff 보정 메커니즘 없음, 환경 따라 -20ms+ 잔재 가능 (단 청감 미인지 영역)
-  - (42) Android 게스트 fallback drift edge case
-  - (47) Tab A7 Lite 호스트 framePos vs vf 비대칭 (정상 사용 패턴엔 영향 작음)
+
+**v0.0.53 검증 측정 미수행 (다음 세션 첫 작업)**:
+- HISTORY (50) "다음 세션 시작 시 측정 가이드" 표 빈칸 채우기
+- v0.0.53 빌드 완료 (`build/app/outputs/flutter-apk/app-debug.apk`), install만 진행하면 됨
+
+**알려진 잠재 한계 (알고리즘 자체)**:
+- 거짓말 패턴 — vfDiff 보정 메커니즘 없음, 환경 따라 잔재 가능 (단 청감 미인지 영역)
+- (42) Android 게스트 fallback drift edge case
+- (47) Tab A7 Lite 호스트 framePos vs vf 비대칭 (정상 사용 패턴엔 영향 작음)
 
 **다음 세션 후보 (우선순위)**:
 
-1. **csv 측정 정확도 개선** (HIGH) — 사용자 활동 중 vfDiff 외삽이 진짜 어긋남보다 부풀려 측정할 가능성 ((48)에서 발견). 외삽 알고리즘 보강 또는 acoustic loopback ground truth 도입. 알고리즘 변경 없이 측정 도구만.
+1. **v0.0.53 fix 효과 검증 측정 (HIGH, 1순위 — 즉시 진행)** — anchor 중복 호출 fix 후 vfDiff 잔재 감소 확인. HISTORY (50) "다음 세션 시작 시 측정 가이드" 표 빈칸 채우기. v0.0.53 빌드 완료, install만 하면 됨:
+   ```bash
+   flutter install --debug --device-id R3CT60D20XE      # S22
+   flutter install --debug --device-id R9PW315GL0L      # Tab A7 Lite
+   # idle 3분 측정 → csv pull → 분석
+   awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf "vfDiff signed=%.2f anchored=%.2f current=%.2f diff=%.2f\n", sumv/n, sla/n, slc/n, (sla-slc)/n}' <csv>
+   ```
+   - vfDiff signed |값| < 3.60ms (v0.0.52 baseline) → fix 효과 있음
+   - 비슷하면 → 다른 root cause 추가 진단
 
-2. **v0.0.51 그룹 1 fix 중 가장 안전한 것만 선택 cherry-pick** — 호스트 cooldown debouncing은 race 차단 효과 + 새 race도 적었음. 단 게스트 큐 + EMA + D-1 등은 위험성 노출됨. 단순 호스트 cooldown만 단계 적용 검토.
+2. **(45) -20.84ms 잔재 자연 재현 시 root cause 분해** — v0.0.53 진단 컬럼 활성 상태로 다양 환경 (BT 게스트, 다른 시간대 등) 측정. 큰 잔재 발생 시 `out_lat_*` 컬럼으로 직접 분해.
 
-3. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (4분만 측정).
+3. **EMA 단독 cherry-pick (B-1) 검토** — backup-v0.0.51-to-v0.0.55-session 에서 EMA 부분만. 1번 결과로 anchor 중복 호출이 부족하면 진행. anchor reset 시 outputLatency EMA 보존 → 점진 수렴.
 
-4. **iOS host 환경 검증** — Mac 환경 필요. v2 그룹 1 핵심 fix는 OS 무관이지만 미세 차이 검증.
+4. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 4분만).
 
-5. **BT 환경 검증** — BT outputLatency 비대칭 + EMA 학습 상호작용.
+5. **iOS host 환경 검증** — Mac 환경 필요.
 
-6. **다중 게스트 (1:N)** 검증 — 1대1만 검증.
+6. **BT 환경 검증** — BT outputLatency 비대칭 + EMA 학습 상호작용.
 
-7. **(47) Tab A7 Lite 호스트 framePos 비대칭** — D-1으로 시도했으나 회귀 발생, 보류. 호스트 측 framePos 정규화 (네이티브) 또는 다른 방향.
+7. **다중 게스트 (1:N)** 검증 — 1대1만 검증.
 
-8. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 ground truth. 정확도 검증 + 알고리즘 재설계의 진짜 척도.
+8. **(47) Tab A7 Lite 호스트 framePos 비대칭** — D-1 시도 회귀 후 보류. 호스트 측 정규화 또는 다른 방향.
 
-9. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung (이전 환경). IntelliJ Run 또는 Xcode IDE 권장.
+9. **acoustic loopback 외부 측정** (선택) — OS outputLatency 부정확 ground truth.
+
+10. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung. IntelliJ Run 또는 Xcode IDE 권장.
 
 **핵심 학습 (2026-04-28 세션 종합)**:
 - **사용자 청감 검증 > csv 수치 검증** — csv는 측정 한계 있음 (사용자 활동 중 외삽 부정확 가능성). 진짜 사용자 경험은 청감.

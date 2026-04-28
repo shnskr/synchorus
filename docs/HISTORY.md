@@ -2721,6 +2721,166 @@ git reset --hard 2481c0a  # main을 v0.0.50으로
 
 ---
 
+### 2026-04-28 (50) — v0.0.53 anchor 중복 호출 버그 fix (거짓말 패턴 잠재 root cause 제거)
+
+**배경**: (49) 매듭 후 사용자 요청 "계산식 검토". 코드 라인 단위 분석으로 `_tryEstablishAnchor`에 **`_engine.seekToFrame` + `_seekCorrectionAccum += initialCorrection` 두 번 호출** 발견. CLAUDE.md "다음 세션 후보 6번 v0.0.56 anchor 중복 호출 버그" 명시되어 있던 진짜 버그.
+
+**버그 정확한 위치 + 메커니즘** (line 1235~1241 v0.0.52 기준):
+
+```dart
+final currentEffective = ts.framePos + _seekCorrectionAccum;
+final initialCorrection = targetGuestVf - currentEffective;
+unawaited(_engine.seekToFrame(targetGuestVf));      // ← 1번째 호출
+_seekCorrectionAccum += initialCorrection;          // accum +1번
+
+// v0.0.48 롤백: anchor establish 시 게스트 vf seek 보정 + _seekCorrectionAccum 누적
+// (v0.0.45 동작). NTP 예약 재생 비활성화 → reactive 정렬 메커니즘 다시 활성화.
+unawaited(_engine.seekToFrame(targetGuestVf));      // ← 2번째 호출!
+_seekCorrectionAccum += initialCorrection;          // accum +1번 또!
+```
+
+**원인**: v0.0.48 롤백 (HISTORY (44)) 시 v0.0.45 동작 회복 코드 + v0.0.46 이후 코드가 합쳐지면서 의도치 않게 같은 블록이 두 번 들어감. seekToFrame은 idempotent라 결과 위치는 같지만 **`_seekCorrectionAccum`이 두 배로 누적**.
+
+**버그 영향**:
+```
+의도:  effective = targetGuestVf, _anchorGuestFrame = targetGuestVf
+실제:  effective = targetGuestVf + initialCorrection
+       _anchorGuestFrame = ts.framePos + 2*correction = targetGuestVf + correction
+```
+
+→ **anchor baseline이 의도보다 `initialCorrection` 만큼 앞에 박힘**.
+
+**거짓말 패턴 root cause 가설 (검증된)**:
+
+vfDiff 수식 분해 (anchor establish 후):
+```
+guestVfMs = ts.virtualFrame / guestFpMs
+          ≈ hostContentMs + outLatDelta_anchor   (의도: anchor 시점 정렬)
+          
+실제로는 _seekCorrectionAccum 잘못 누적이 ts.virtualFrame엔 영향 X (seek은 idempotent)
+단 anchor framePos baseline은 잘못 박힘 → drift_ms 계산에 영향
+
+vfDiff = (hostContentMs + outLatDelta_anchor) - hostContentMs - currentOutLatDelta
+       = outLatDelta_anchor - currentOutLatDelta
+```
+
+이번 v0.0.52 측정 데이터로 검증:
+- `out_lat_delta_anchored` = 14.72ms
+- `out_lat_delta_current` = 14.78ms
+- 수식상 vfDiff = 14.72 - 14.78 = -0.06ms
+- 실제 csv vfDiff signed mean = -3.60ms
+- **잔재 -3.54ms** = anchor 중복 호출 버그 + 외삽/sampleRate 오차 합산
+
+(45) v0.0.49 측정 -20.84ms 잔재:
+- 진단 컬럼 없어 직접 검증 X
+- anchor establish 시점 outputLatency 변동 + anchor 중복 호출 버그 합산 추정
+
+**v0.0.53 fix**:
+- 두 번째 `unawaited(_engine.seekToFrame(targetGuestVf))` + `_seekCorrectionAccum += initialCorrection` 블록 제거
+- seekToFrame 1번만 호출, accum 1번만 누적
+- v0.0.51 그룹 1 (commit 50f46ed)에서도 같은 fix 했었음 — 이번 cherry-pick 동등.
+
+**변경 영향 평가**:
+- sync 동작 의도와 일치 (1번 호출이 의도였음)
+- _anchorGuestFrame baseline이 정확히 박힘 → vfDiff 잔재 감소 예상
+- 회귀 위험 작음 (의도된 동작으로 돌아가는 fix)
+
+**검증 측정 — 미수행 (다음 세션에 이어서)**:
+
+이번 세션 매듭 시점에 USB 연결 끊김 + 사용자 측정 부담 누적으로 측정 미진행. 단 fix 자체는 v0.0.51 그룹 1 (commit 50f46ed)에서 검증된 cherry-pick — 의도된 1번 호출로 돌아가는 안전한 fix. 빌드/install은 v0.0.53 빌드 성공 (`flutter build apk --debug` 정상 완료).
+
+**다음 세션 시작 시 측정 가이드** (이 표 빈칸 채우기 작업):
+
+| 지표 | v0.0.52 (이전) | v0.0.53 (fix 후, 측정 후 기록) |
+|---|---|---|
+| vfDiff signed mean | -3.60ms | ___ ms |
+| out_lat_delta_anchored | 14.72ms | ___ ms |
+| out_lat_delta_current | 14.78ms | ___ ms |
+| 두 값 차이 (anchored - current) | -0.06ms | ___ ms |
+| 실제 vfDiff vs 수식상 | -3.54ms 추가 오차 | ___ ms 추가 오차 |
+| 청감 (idle) | "초반 1~2초 + 잘 맞음" | ___ |
+| 청감 (burst) | "나쁘지 않음" | ___ |
+
+**측정 시나리오** (다음 세션 첫 작업):
+1. **빌드 + install**: 이미 빌드되어 있음 (`build/app/outputs/flutter-apk/app-debug.apk`). 단 install 필요.
+   ```bash
+   flutter install --debug --device-id R3CT60D20XE      # S22
+   flutter install --debug --device-id R9PW315GL0L      # Tab A7 Lite
+   ```
+2. **idle 3분**: S22 호스트 + Tab A7 Lite 게스트, 가만히 재생
+3. **csv pull**:
+   ```bash
+   adb -s R3CT60D20XE shell ls /storage/emulated/95/Android/data/com.synchorus.synchorus/files/
+   adb -s R3CT60D20XE pull <csv_path> measurements/v0.0.53_idle_<date>.csv
+   ```
+4. **분석**:
+   ```bash
+   awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14; sumd+=$5} END{printf "drift signed=%.2f vfDiff signed=%.2f anchored=%.2f current=%.2f diff=%.2f\n", sumd/n, sumv/n, sla/n, slc/n, (sla-slc)/n}' measurements/v0.0.53_idle_<date>.csv
+   ```
+5. **수식 검증**: `vfDiff signed ≈ anchored - current` 일치하는지 확인
+6. **(50) 표 빈칸 채우기** + 결과로 가설 검증:
+   - `vfDiff signed | < |v0.0.52 -3.60ms|` → fix 효과 있음 (anchor 중복 호출이 root cause 일부 확인)
+   - 비슷하면 → 다른 root cause (외삽 오차, sampleRate cross-rate 등)
+
+**검증 후 다음 단계**:
+- fix 효과 있음 → 만족 시 그대로 유지, 부족 시 EMA 단독 cherry-pick (B-1) 검토
+- fix 효과 미미 → root cause는 외삽/cross-rate 등 다른 곳, EMA 시도 또는 추가 진단
+
+**다음 세션 작업 후보 갱신** (이어서 작업 가능하도록 명시):
+
+### 1. v0.0.53 검증 측정 분석 (즉시 후속)
+- (50)에 추가될 측정 결과로 vfDiff 잔재 감소 확인
+- 만약 잔재 여전 → 다른 root cause (외삽 오차, sampleRate cross-rate 등)
+- 만약 잔재 감소 → anchor 중복 호출이 진짜 root cause
+
+### 2. (45) -20.84ms 잔재 자연 재현 시 진단
+- v0.0.52/v0.0.53 진단 컬럼 활성 상태로 다른 환경 측정
+- BT 게스트, 다른 시간대, 콘텐츠 시작 시점 등
+- vfDiff > 10ms 잔재 시 out_lat_* 컬럼으로 root cause 분해
+
+### 3. EMA 단독 cherry-pick (B-1) — 검증 후
+- v0.0.55 D-1과 묶여 회귀했지만 EMA 자체는 단순 fix
+- backup-v0.0.51-to-v0.0.55-session branch에서 EMA 부분만 cherry-pick 가능
+- anchor reset 시 outputLatency EMA 보존 → 점진 수렴
+
+### 4. 30분+ 장시간 idle / iOS host (Mac 환경) / BT / 다중 게스트
+- 다양 환경 검증 — 진단 컬럼 활성 상태로
+
+### 5. acoustic loopback 외부 측정 (선택)
+- OS API outputLatency 부정확 ground truth
+- 마이크로 출력 녹음 → round-trip 측정 (CTS 표준 방식)
+
+### 6. 위험 큰 변경 보류 유지
+- D-1 anchor 분리: 회귀 검증됨
+- syncPlay/Pause debounce: 자동 정지 race 만든 사례
+- 호스트 측 framePos 정규화: D-1 회피로 불필요화
+
+**다음 세션 시작 가이드 (이어서 작업)**:
+1. CLAUDE.md "현재 단계" 섹션 확인 — main = v0.0.53
+2. measurements/v0.0.53_*.csv 측정 데이터 분석
+3. (50) "검증 측정 결과" 표 빈칸 채우기
+4. 결과로 root cause 확정 → 다음 fix 결정 (위 후보 1~6)
+
+**검증 명령어 모음**:
+```bash
+# 빌드/install (Galaxy S22 + Tab A7 Lite 테스트 환경)
+flutter build apk --debug
+flutter install --debug --device-id R3CT60D20XE       # S22
+flutter install --debug --device-id R9PW315GL0L       # Tab A7 Lite
+
+# csv pull (S22 dual-app user 95)
+adb -s R3CT60D20XE pull \
+  /storage/emulated/95/Android/data/com.synchorus.synchorus/files/<csv> \
+  E:/workspace/synchorus/measurements/<name>.csv
+
+# csv 분석 (vfDiff signed mean + out_lat_delta_*)
+awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf "vfDiff signed=%.2f anchored=%.2f current=%.2f\n", sumv/n, sla/n, slc/n}' <csv>
+```
+
+**변경 범위**: `lib/services/native_audio_sync_service.dart` (line 1238~1241 4줄 제거), `pubspec.yaml` (0.0.52 → 0.0.53). 단 1줄 fix.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

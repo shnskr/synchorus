@@ -1232,11 +1232,13 @@ class NativeAudioSyncService {
         (outLatDelta * _framesPerMs).round();
     final currentEffective = ts.framePos + _seekCorrectionAccum;
     final initialCorrection = targetGuestVf - currentEffective;
-    unawaited(_engine.seekToFrame(targetGuestVf));
-    _seekCorrectionAccum += initialCorrection;
-
-    // v0.0.48 롤백: anchor establish 시 게스트 vf seek 보정 + _seekCorrectionAccum 누적
-    // (v0.0.45 동작). NTP 예약 재생 비활성화 → reactive 정렬 메커니즘 다시 활성화.
+    // v0.0.53: anchor 중복 호출 버그 fix.
+    // 이전 코드는 seekToFrame + accum을 두 번 호출 (v0.0.48 롤백 시 v0.0.45와
+    // 합쳐지면서 발생한 잠재 버그, CLAUDE.md "다음 세션 후보 6번" 명시).
+    // 결과: _seekCorrectionAccum이 의도(initialCorrection 한 번)의 두 배로 누적
+    // → anchor baseline (_anchorGuestFrame = ts.framePos + accum)이 의도보다
+    // initialCorrection 만큼 앞에 박힘 → vfDiff -20ms 같은 베이크인 잔재의
+    // 잠재 root cause. seekToFrame 1번만 호출 + accum 1번만 누적으로 fix.
     unawaited(_engine.seekToFrame(targetGuestVf));
     _seekCorrectionAccum += initialCorrection;
 
