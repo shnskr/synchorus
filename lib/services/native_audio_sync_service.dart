@@ -631,6 +631,11 @@ class NativeAudioSyncService {
     final offsetMs = (data['offsetMs'] as num?)?.toDouble() ?? 0;
     final seekCount = (data['seekCount'] as num?)?.toInt() ?? 0;
     final event = data['event'] as String? ?? 'drift';
+    // v0.0.52 진단 컬럼 4개
+    final outLatHostRaw = (data['outLatHostRaw'] as num?)?.toDouble() ?? 0;
+    final outLatGuestRaw = (data['outLatGuestRaw'] as num?)?.toDouble() ?? 0;
+    final outLatDeltaCurrent = (data['outLatDeltaCurrent'] as num?)?.toDouble() ?? 0;
+    final outLatDeltaAnchored = (data['outLatDeltaAnchored'] as num?)?.toDouble() ?? 0;
 
     // wall_ms는 호스트 받은 시점으로 통일 (단조 증가 보장).
     // guest_wall은 게스트가 보낸 원본 wallMs — TCP lag + clock offset 분석용.
@@ -647,6 +652,10 @@ class NativeAudioSyncService {
       hostVf: (data['hostVf'] as num?)?.toInt() ?? 0,
       guestVf: (data['guestVf'] as num?)?.toInt() ?? 0,
       seekCount: seekCount,
+      outLatHostRaw: outLatHostRaw,
+      outLatGuestRaw: outLatGuestRaw,
+      outLatDeltaCurrent: outLatDeltaCurrent,
+      outLatDeltaAnchored: outLatDeltaAnchored,
       event: event,
     );
     // 실시간 관측용 logcat 출력 (v0.0.24+)
@@ -1168,6 +1177,11 @@ class NativeAudioSyncService {
         offsetMs: offset,
         hostVf: obs.virtualFrame,
         guestVf: ts.virtualFrame,
+        // v0.0.52 진단 — fallback 모드도 outLat 측정값 기록 (anchor 잡히기 전 baseline)
+        outLatHostRaw: obs.hostOutputLatencyMs,
+        outLatGuestRaw: ts.safeOutputLatencyMs,
+        outLatDeltaCurrent: outLatDelta,
+        outLatDeltaAnchored: 0, // anchor 없음
         event: 'fallback',
       );
     }
@@ -1260,6 +1274,7 @@ class NativeAudioSyncService {
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).
   /// [vfDiffMs] 외삽 + outputLatency 보정 후 콘텐츠 절대 위치 차이.
   /// [hostObsWall] 이 보고가 사용한 호스트 obs의 측정 시각 (외삽 신선도 추적).
+  /// v0.0.52 진단 컬럼: outLat* 4개 추가 옵셔널.
   void _sendDriftReport({
     required int wallMs,
     required double driftMs,
@@ -1269,6 +1284,10 @@ class NativeAudioSyncService {
     required int hostVf,
     required int guestVf,
     required String event,
+    double outLatHostRaw = 0,
+    double outLatGuestRaw = 0,
+    double outLatDeltaCurrent = 0,
+    double outLatDeltaAnchored = 0,
   }) {
     _p2p.sendToHost({
       'type': 'drift-report',
@@ -1282,6 +1301,10 @@ class NativeAudioSyncService {
         'guestVf': guestVf,
         'seekCount': _seekCount,
         'event': event,
+        'outLatHostRaw': outLatHostRaw,
+        'outLatGuestRaw': outLatGuestRaw,
+        'outLatDeltaCurrent': outLatDeltaCurrent,
+        'outLatDeltaAnchored': outLatDeltaAnchored,
       },
     });
   }
@@ -1358,6 +1381,11 @@ class NativeAudioSyncService {
         offsetMs: offset,
         hostVf: obs.virtualFrame,
         guestVf: ts.virtualFrame,
+        // v0.0.52 진단 컬럼 4개 — vfDiff 잔재 root cause 분해용
+        outLatHostRaw: obs.hostOutputLatencyMs,
+        outLatGuestRaw: ts.safeOutputLatencyMs,
+        outLatDeltaCurrent: currentOutLatDelta,
+        outLatDeltaAnchored: _anchoredOutLatDeltaMs,
         event: 'drift',
       );
     }

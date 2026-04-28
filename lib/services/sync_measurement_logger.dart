@@ -38,8 +38,15 @@ class SyncMeasurementLogger {
     // mix 회피, 단조 증가 보장). guest_wall: 게스트 보고의 원본 wallMs (TCP lag
     // + clock offset 분석용, 호스트 이벤트엔 0). seq: csv 자체 단조 시퀀스 —
     // 빠른 연타 시 같은 wallMs 이벤트 정렬용.
+    // v0.0.52 진단 컬럼: outputLatency 비대칭 분석용.
+    // out_lat_host_raw: 호스트가 broadcast한 obs.hostOutputLatencyMs (호스트 OS 보고)
+    // out_lat_guest_raw: 게스트 ts.safeOutputLatencyMs (게스트 OS 보고)
+    // out_lat_delta_current: guest_raw - host_raw (매 poll 측정 순간차이)
+    // out_lat_delta_anchored: anchor 시점 베이크인된 _anchoredOutLatDeltaMs
+    //                        (보정 기준값 — 매 poll 변화 시 dynLatDelta로만 보정)
+    // 4개 추가하면 vfDiff 잔재가 어디서 왔는지 직접 분해 가능.
     _sink!.writeln(
-      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,event',
     );
     _nextSeq = 0;
     _isActive = true;
@@ -57,12 +64,16 @@ class SyncMeasurementLogger {
     required int hostVf,
     required int guestVf,
     required int seekCount,
+    double outLatHostRaw = 0,
+    double outLatGuestRaw = 0,
+    double outLatDeltaCurrent = 0,
+    double outLatDeltaAnchored = 0,
     String event = 'drift',
   }) {
     if (!_isActive) return;
     final seq = _nextSeq++;
     _sink?.writeln(
-      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},$event',
     );
   }
 
