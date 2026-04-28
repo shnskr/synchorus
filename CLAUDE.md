@@ -3,44 +3,47 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. **현재 main = v0.0.48 (safe baseline)** — 사용자 청감 가장 안정으로 확인. 2026-04-27 세션에 v0.0.49~v0.0.61 NTP 정밀 재시도 13번 fix 사이클 진행했으나 사용자 청감 비교 결과 v0.0.48이 더 나음 → `git reset --hard 1c6da7d`로 main reset, 모든 시도는 `backup-v0.0.61-session` branch에 보존. 상세: `docs/HISTORY.md` (44).
+v3 본 구현 진행 중. **현재 main = v0.0.50 (v0.0.48 알고리즘 + csv 보강)** — 2026-04-28 세션에 v0.0.51~v0.0.55 그룹 1 + D-1 시도했으나 v0.0.55에서 vfDiff 23배 회귀, 사용자 청감 비교 결과 v0.0.48이 가장 안정 → `git reset --hard 2481c0a`로 main을 v0.0.50으로 reset (= v0.0.48 알고리즘 + v0.0.49/v0.0.50 csv 보강). v0.0.51~v0.0.55 commits는 `backup-v0.0.51-to-v0.0.55-session` branch에 보존. 상세: `docs/HISTORY.md` (45)/(46)/(47)/(48).
 
-**v0.0.48 측정값** (S22 host + Tab A7 Lite guest):
-- drift_ms abs 평균 **2.01~2.43ms** (매우 안정)
-- frame diff abs 평균 ~350~400ms (anchor 베이크인 outputLatency 부정확으로 인한 거짓말 패턴 — drift_ms와 fd 불일치)
-- 알려진 한계: (42) Android 게스트 정지/재생/seek 시 fallback drift max -634ms (정상 사용 패턴엔 영향 없음)
+**v0.0.50 = v0.0.48 알고리즘 + csv 보강만** (sync 동작 변경 0):
+- v0.0.49: `vf_diff_ms`, `host_obs_wall` 컬럼
+- v0.0.50: `seq`, `guest_wall`, 호스트/게스트 이벤트 로깅 (`host_play`, `guest_start`, `anchor_set` 등)
+
+**v0.0.50 측정값** (S22 host + Tab A7 Lite guest):
+- **idle 3분**: drift_ms abs mean ~3ms (매우 안정), vfDiff <86ms (청감 미인지 영역)
+- **burst 1분**: drift_ms abs mean 2.66ms 안정, vfDiff max 57505ms (csv 측정 한계 또는 활동 중 측정 부정확)
+- **사용자 청감**: idle "초반 1~2초 + 잘 맞음", burst "나쁘지 않음"
+- 알려진 csv 한계: 사용자 활동 중 vfDiff 외삽 부풀림 가능성 — acoustic loopback 같은 외부 ground truth 필요
+- 알려진 알고리즘 한계: (42) Android 게스트 fallback drift edge case, (47) Tab A7 Lite 호스트 framePos vs vf 비대칭 (정상 사용 패턴엔 영향 작음)
 
 **다음 세션 후보 (우선순위)**:
 
-1. **csv 측정 인프라 강화** (sync 동작 변경 0, 진단 도구만) — 작은 작업.
-   - `host_obs_wall` 컬럼: 호스트 측 broadcast wall — 외삽 정확 + rate 측정용
-   - `vf_diff_ms` 컬럼: 외삽 + outputLatency 보정 후 진짜 어긋남 (drift_ms 거짓말 패턴 직접 감지)
-   - `out_lat_delta` 컬럼: anchor 베이크인된 outLat 진단
-   - 효과: csv만 보면 "drift_ms 안정인데 fd 어긋남" 즉시 감지. 분석 의존 X. 다음 fix 측정 정확도 ↑.
+1. **csv 측정 정확도 개선** (HIGH) — 사용자 활동 중 vfDiff 외삽이 진짜 어긋남보다 부풀려 측정할 가능성 ((48)에서 발견). 외삽 알고리즘 보강 또는 acoustic loopback ground truth 도입. 알고리즘 변경 없이 측정 도구만.
 
-2. **알고리즘 재설계 — drift_ms + vfDiff 둘 다 반영하는 새 sync 공식** (이번 세션 13번 fix 종합 학습).
-   - **현재 한계**: drift_ms는 framePos(HAL) 변화율만 봄 → virtualFrame(콘텐츠 절대 위치) 못 봄 → anchor 잘못 잡혀도 알 수 없음
-   - **방향**: anchor 분리 — (a) rate 측정용 anchor (framePos 기반, 정밀 ms 단위 보정) + (b) 절대 정렬 baseline (virtualFrame 기반, 큰 어긋남 강제 reseek)
-   - **outputLatency 보정 누적 보존**: anchor reset해도 EMA 누적값 유지 (v0.0.60에서 reset 자주로 누적 못 한 한계 회피)
-   - **호스트/게스트 양쪽 FIFO 큐 직렬화**: 마지막-이김 큐 X (v0.0.59 회귀 사례) → 모든 op 순차 처리 + 의도 보존
-   - **race 시나리오 시뮬레이션 우선**: 코드 라인 단위 정밀 분석 후 도입 — trial-and-error 사이클 반복 회피
-   - **측정 환경 분리**: idle 측정 (rate drift 검증) vs 사용자 연타 측정 (race 검증) 분리
+2. **v0.0.51 그룹 1 fix 중 가장 안전한 것만 선택 cherry-pick** — 호스트 cooldown debouncing은 race 차단 효과 + 새 race도 적었음. 단 게스트 큐 + EMA + D-1 등은 위험성 노출됨. 단순 호스트 cooldown만 단계 적용 검토.
 
-3. **(42) Android 게스트 fallback drift edge case** — 알고리즘 재설계 (2번)로 자연 해결 가능성 큼. 단독 fix 안 함.
+3. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (4분만 측정).
 
-4. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 자체를 외부에서 측정. 정확도 검증 + 알고리즘 재설계의 ground truth.
+4. **iOS host 환경 검증** — Mac 환경 필요. v2 그룹 1 핵심 fix는 OS 무관이지만 미세 차이 검증.
 
-5. **첫 재생 정착 시간** — BT 워밍업 + clock sync 수렴. 옵션 A (BT prebuffer + outputLatency 수렴 게이팅).
+5. **BT 환경 검증** — BT outputLatency 비대칭 + EMA 학습 상호작용.
 
-6. **v0.0.56 anchor 중복 호출 버그 fix** (line 1222-1228 두 번 호출) — 진짜 버그. v0.0.48에 cherry-pick 검토. backup branch에서 가져올 수 있음.
+6. **다중 게스트 (1:N)** 검증 — 1대1만 검증.
 
-7. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung. IntelliJ Run 또는 Xcode IDE 권장.
+7. **(47) Tab A7 Lite 호스트 framePos 비대칭** — D-1으로 시도했으나 회귀 발생, 보류. 호스트 측 framePos 정규화 (네이티브) 또는 다른 방향.
 
-**핵심 학습 (이번 세션 13번 fix 종합)**:
-- drift_ms 공식 자체에 한계 — framePos 변화율만으론 anchor 거짓말 못 잡음. **virtualFrame 절대 위치 같이 봐야 진짜 sync 측정 가능**
-- csv 분석 만으론 부족 — 계산 로직(알고리즘) 자체에 둘 다 반영 필요
-- 단발 fix 사이클 위험 — 한 fix가 다른 race 만들고 그 fix가 또 race 만드는 누적 회귀 (v0.0.50~v0.0.61 사례)
-- 측정 환경 영향 큼 — 짧은 idle vs 긴 사용자 연타 결과 매우 다름. 비교 시 환경 통제 필수
+8. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 ground truth. 정확도 검증 + 알고리즘 재설계의 진짜 척도.
+
+9. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung (이전 환경). IntelliJ Run 또는 Xcode IDE 권장.
+
+**핵심 학습 (2026-04-28 세션 종합)**:
+- **사용자 청감 검증 > csv 수치 검증** — csv는 측정 한계 있음 (사용자 활동 중 외삽 부정확 가능성). 진짜 사용자 경험은 청감.
+- **알고리즘 변경의 위험 = 새 race 도입** — v0.0.51 debounce 도입 → 자동 정지 race + 끝 도달 race (v0.0.53/54 fix 필요), v0.0.55 D-1 → vfDiff 23배 회귀. 단순한 알고리즘이 안전.
+- **csv 보강은 안전한 추가** — v0.0.49/v0.0.50처럼 측정 도구만 추가하는 작업은 회귀 위험 0.
+- **단순성의 가치** — 검증 깊은 단순 알고리즘이 복잡한 측정상 우수 알고리즘보다 출시 안전.
+- **권한 시스템 + git Safety Protocol 가치** — destructive 작업에 명시 동의 단계가 사용자 의도 정확히 확인 + 데이터 손실 방지.
+- **사용자 좌절 = 신호** — "퇴보하는 것 같다" 우려 정당. 자존심 X, 정직한 평가 + 안전한 baseline 선택.
+- **이전 (44)와 같은 패턴** — 알고리즘 재설계 → race → 좌절 → 단순 baseline 복귀. (44) v0.0.48 reset과 동일한 결말. **알고리즘 변경 시 청감 검증 깊이가 결정 척도**.
 
 ### 다음 세션 작업 흐름 (강제)
 
