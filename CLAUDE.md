@@ -24,21 +24,27 @@ v3 본 구현 진행 중. **현재 main = v0.0.54** — 알고리즘 v2 그룹 1
 
 **다음 세션 후보 (우선순위)**:
 
-1. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 5분만, drift_ms <5ms 97.7%이라 누적 가능성 작지만 미검증)
+1. **D-1 anchor 분리 + 호스트 framePos 정규화** (HIGH, (47)이 직접 근거)
+   - **(47) Tab A7 Lite 호스트 환경에서 fix 필요성 직접 캡처**: drift_ms abs mean 77.89ms (정상 환경 1.86ms의 40배), corrective_seek 27회 진동, host fpVfDiff 95초까지 누적
+   - **출시 관점**: 어떤 기기든 호스트 가능 → 저가형 호스트 보호 필수
+   - D-1 디자인 빈틈 #1 보강: 두 anchor 상호작용, 첫 establish 시점, reset 매트릭스
+   - rate anchor (framePos 기반, 진행률) + position baseline (vf 기반, 절대 정렬)
+   - 호스트 측 framePos 정규화 (oboe_engine.cpp getTimestamp 또는 Dart obs 송신 정규화) 보조 fix
+   - 단일 commit (v0.0.55) 후 Tab A7 Lite 호스트 환경 + S22 호스트 환경 둘 다 검증
 
-2. **iOS host 환경 검증** — Mac 환경 필요. outputLatency 보고 정밀도 차이, framePos 측정 정확도, iOS 라이프사이클. v2 그룹 1 핵심 fix는 OS 무관이지만 미세 차이 검증 가치 있음.
+2. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 5분만)
 
-3. **BT 환경 검증** — BT outputLatency 비대칭 (40~200ms 변동) + EMA 학습 상호작용. iPhone 게스트 BT (HISTORY (32) 첫 40초 잔여 패턴) 재검증.
+3. **iOS host 환경 검증** — Mac 환경 필요. outputLatency 보고 정밀도, framePos 측정, iOS 라이프사이클.
 
-4. **D-1 anchor 분리** (보류 결정) — 그룹 1만으로 사고 시나리오 모두 해결됐으니 효과 작을 것. 30분+ idle / iOS host / BT 측정에서 부족 발견되면 단독 v0.0.55로 추가.
+4. **BT 환경 검증** — BT outputLatency 비대칭 (40~200ms 변동) + EMA 학습 상호작용.
 
-5. **다중 게스트 (1:N)** 검증 — 1대1만 검증, 1대N 미확인. 코드는 게스트별 독립 처리이지만 측정 가치.
+5. **다중 게스트 (1:N)** 검증.
 
-6. **첫 재생 정착 시간** ((39)) — idle 0~30s vfDiff +2.32ms로 매우 안정 확인. 우선순위 낮아짐.
+6. **첫 재생 정착 시간** ((39)) — idle 0~30s +2.32ms 안정. 우선순위 ↓.
 
-7. **acoustic loopback 외부 측정** (선택, 검증 도구) — OS outputLatency 부정확 ground truth.
+7. **acoustic loopback 외부 측정** (선택, 검증 도구).
 
-8. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung (이전 환경). IntelliJ Run 또는 Xcode IDE 권장.
+8. **환경 이슈** — iOS 26.4.1 + macOS 26.3 Tahoe `flutter run` install hung (이전 환경).
 
 **핵심 학습 (이번 세션, 2026-04-28)**:
 - **그룹 1 효과 검증 PASS** — 거짓말 패턴 (vfDiff 30~50ms 베이크인) → A-2 + B-1 EMA로 baseline 수준 안정. 누적 발산 (45초) → F-2 큐 + await 직렬화로 700ms 1회만, 1~2초 회복. 메시지 race (guest_stop 32회 누락) → 호스트 cooldown + 큐로 5회로 감소.
