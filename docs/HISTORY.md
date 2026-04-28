@@ -2631,6 +2631,96 @@ git reset --hard 2481c0a  # main을 v0.0.50으로
 
 ---
 
+### 2026-04-28 (49) — v0.0.51 syncSeek debounce 시도 후 롤백 + v0.0.52 진단 컬럼 추가
+
+**배경**: (48) v0.0.50 reset 결정 후 추가 검증/진단. 두 가지 시도 — 결과적으로 알고리즘 변경 X, 측정 도구만 강화로 매듭.
+
+**v0.0.51 syncSeek debounce 단독 cherry-pick 시도**:
+
+(48) 진단으로 csv vfDiff transient (max 57.5초) 발견. 추측: 빠른 seek 폭주 시 사용자 활동 중 진짜 vf 차이. v0.0.51 그룹 1 중 가장 안전한 단일 변경 (호스트 syncSeek 100ms debounce)으로 transient 차단 시도.
+
+코드 변경:
+- `_hostSeekDebounce = Duration(milliseconds: 100)` 상수
+- `Timer? _hostSeekDebounceTimer`, `int? _pendingHostSeekTargetMs` 멤버
+- `syncSeek` → debounce 큐 + UI 즉시 반영 + `_flushHostSeek` 헬퍼
+
+**측정 결과 (S22 host + Tab A7 Lite guest, burst 2분)**:
+
+| | v0.0.50 burst (4분) | v0.0.51 debounce (2분) |
+|---|---|---|
+| host_seek (flush 후) | 170 | 177 |
+| **vfDiff abs mean** | **302ms** | **21.17ms** (14배 향상) |
+| **vfDiff max** | **57505ms (57.5초)** | **60.52ms** (950배 향상) |
+| 100ms+ 어긋남 | 1.0% | **0%** |
+| 10초+ transient | 2건 | **0건** |
+
+**측정상 transient 1000배 감소** — debounce 효과 명확.
+
+**사용자 청감**:
+- "정말 빠르게 연타하니까 재생은 계속 되는데 seek은 반영 안 되고 있었던 것 같아"
+- "100ms+ 간격: 호스트+게스트 둘 다 바로 반영. 100ms 미만: 호스트 seek바 여러 번 움직였는데 게스트는 1번만 움직였어"
+- → debounce의 정확히 의도된 동작 (100ms 이내 연타 시 마지막만 적용)
+- "큰 차이는 모르겠어" — v0.0.50 vs v0.0.51 청감 차이 인지 X
+
+**롤백 결정**: 사용자 경험 향상 효과 0 + UI race 잠재 위험 (timer 비대칭 추측, 미검증) → v0.0.50으로 롤백 (`git checkout`).
+
+**핵심 학습**:
+- csv 측정상 향상이 사용자 경험 향상으로 직결되지 않음. 청감 미인지 영역의 csv 정확도 향상은 출시 가치 작음.
+- 단일 변경도 사용자 경험 차이가 없으면 단순성 우선 가치 큼.
+
+---
+
+**v0.0.52 진단 컬럼 추가 (sync 동작 변경 0)**:
+
+(48)/(49) 시도 후 사용자 의도 명확화 — "정확한 수치 보고 알고리즘 재설계". csv 진단 도구 강화로 거짓말 패턴 root cause 직접 측정 가능하도록.
+
+코드 변경 (csv만):
+- `sync_measurement_logger.dart`: 헤더 + log() 시그니처에 4개 컬럼 추가
+  - `out_lat_host_raw`: 호스트 obs.hostOutputLatencyMs (OS 보고)
+  - `out_lat_guest_raw`: 게스트 ts.safeOutputLatencyMs (OS 보고)
+  - `out_lat_delta_current`: 매 poll guest - host 차이
+  - `out_lat_delta_anchored`: anchor 시점 베이크인된 `_anchoredOutLatDeltaMs`
+- `native_audio_sync_service.dart`: `_sendDriftReport` payload + `_handleDriftReport` 파싱 + `_recomputeDrift`/`_fallbackAlignment`에서 4개 값 채워 송신
+- pubspec 0.0.50 → 0.0.52
+
+**v0.0.52 측정 결과 (idle 3분 20초)**:
+
+| 측정값 | 값 | 의미 |
+|---|---|---|
+| drift_ms abs mean | 5.80ms | rate 안정 |
+| **vfDiff signed mean** | **-3.60ms** | 거의 0 (이전 -20.84ms 대비 매우 정확) |
+| out_lat_host_raw mean | 8.20ms | S22 OS 보고 |
+| out_lat_guest_raw mean | 22.98ms | Tab A7 Lite OS 보고 |
+| out_lat_delta_current mean | 14.78ms | 매 poll 측정 차이 |
+| out_lat_delta_anchored mean | 14.72ms | anchor 시점 베이크인 |
+| current vs anchored 차이 | **0.06ms** | **베이크인 매우 정확** |
+
+**진단 결과**:
+- 이번 측정 = **정상 케이스** — 알고리즘이 OS 비대칭 14.72ms 정확 베이크인 → vfDiff -3.60ms로 거의 0 정렬
+- (45) v0.0.49 idle의 -20.84ms 잔재 vs 이번 -3.60ms 차이 = **환경 의존**으로 추정 (단 (45) 측정엔 진단 컬럼 없어 root cause 직접 검증 X)
+- 0-30s 시점 vfDiff -42~-53ms spike 발견 (anchor establish 직후, 외삽 부정확 의심)
+
+**거짓말 패턴 추가 분석 (정직한 평가)**:
+- 알고리즘 자체엔 vfDiff 보정 메커니즘 없음 → **잠재 한계는 명확**
+- 단 청감 미인지 영역 (~25-40ms 한계 안)에서 작동 → 출시 안전성에 영향 작음
+- 정확한 root cause는 (45) 같은 큰 잔재 재현 시점에 진단 컬럼 측정 필요 — 이번 세션 미완
+
+**최종 매듭 (사용자 합의)**:
+- main = v0.0.52 (= v0.0.48 알고리즘 + v0.0.49/50 csv 보강 + v0.0.52 진단 컬럼)
+- **알고리즘 변경 0** — sync 동작은 v0.0.48과 100% 동일
+- **측정 도구 강화**: csv 컬럼 8 → 16개, 이벤트 1종 → 11종
+- 사용자 경험 영향 0, 개발자 진단 가시성 큰 폭 향상
+
+**다음 세션 후보 갱신**:
+- (45)~(49) 진단 데이터 활용 — 거짓말 패턴 자연 재현 시 v0.0.52 진단 컬럼으로 root cause 직접 측정
+- EMA 단독 cherry-pick (B-1) — 가설 기반 fix, root cause 검증 후 진행 권장
+- 30분+ 장시간 idle / iOS host / BT 환경 / 다중 게스트 측정
+- 위험 큰 변경 (D-1 등) 보류 유지
+
+**변경 범위**: `lib/services/sync_measurement_logger.dart` (4개 컬럼), `lib/services/native_audio_sync_service.dart` (4개 값 흐름), `pubspec.yaml` (0.0.50 → 0.0.52). sync 동작 변경 0.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -3,18 +3,21 @@
 여러 핸드폰을 동기화된 스피커로 만드는 Flutter 앱 (P2P).
 
 ## 현재 단계
-v3 본 구현 진행 중. **현재 main = v0.0.50 (v0.0.48 알고리즘 + csv 보강)** — 2026-04-28 세션에 v0.0.51~v0.0.55 그룹 1 + D-1 시도했으나 v0.0.55에서 vfDiff 23배 회귀, 사용자 청감 비교 결과 v0.0.48이 가장 안정 → `git reset --hard 2481c0a`로 main을 v0.0.50으로 reset (= v0.0.48 알고리즘 + v0.0.49/v0.0.50 csv 보강). v0.0.51~v0.0.55 commits는 `backup-v0.0.51-to-v0.0.55-session` branch에 보존. 상세: `docs/HISTORY.md` (45)/(46)/(47)/(48).
+v3 본 구현 진행 중. **현재 main = v0.0.52 (v0.0.48 알고리즘 + csv 보강 + 진단 컬럼)** — 2026-04-28 세션에 v0.0.51~v0.0.55 그룹 1 + D-1 시도 후 v0.0.55 회귀 → v0.0.50 reset. 그 후 syncSeek debounce 단독 시도 → 사용자 청감 차이 X → 롤백. 마지막으로 v0.0.52 진단 컬럼 4개 추가 (sync 동작 변경 0). 상세: `docs/HISTORY.md` (45)/(46)/(47)/(48)/(49).
 
-**v0.0.50 = v0.0.48 알고리즘 + csv 보강만** (sync 동작 변경 0):
+**v0.0.52 = v0.0.48 알고리즘 + 측정 도구 강화** (sync 동작 변경 0):
 - v0.0.49: `vf_diff_ms`, `host_obs_wall` 컬럼
-- v0.0.50: `seq`, `guest_wall`, 호스트/게스트 이벤트 로깅 (`host_play`, `guest_start`, `anchor_set` 등)
+- v0.0.50: `seq`, `guest_wall`, 호스트/게스트 이벤트 로깅 (11종)
+- v0.0.52: `out_lat_host_raw`, `out_lat_guest_raw`, `out_lat_delta_current`, `out_lat_delta_anchored` 컬럼
 
-**v0.0.50 측정값** (S22 host + Tab A7 Lite guest):
-- **idle 3분**: drift_ms abs mean ~3ms (매우 안정), vfDiff <86ms (청감 미인지 영역)
-- **burst 1분**: drift_ms abs mean 2.66ms 안정, vfDiff max 57505ms (csv 측정 한계 또는 활동 중 측정 부정확)
-- **사용자 청감**: idle "초반 1~2초 + 잘 맞음", burst "나쁘지 않음"
-- 알려진 csv 한계: 사용자 활동 중 vfDiff 외삽 부풀림 가능성 — acoustic loopback 같은 외부 ground truth 필요
-- 알려진 알고리즘 한계: (42) Android 게스트 fallback drift edge case, (47) Tab A7 Lite 호스트 framePos vs vf 비대칭 (정상 사용 패턴엔 영향 작음)
+**v0.0.52 측정값** (S22 host + Tab A7 Lite guest):
+- **idle 3분 20초**: drift abs mean 5.80ms, **vfDiff signed -3.60ms** (매우 정확)
+- 호스트 outputLatency 8.20ms / 게스트 22.98ms / 차이 14.78ms 정확 베이크인 (베이크인-current 차이 0.06ms)
+- **사용자 청감**: idle "초반 1~2초 + 잘 맞음", burst "나쁘지 않음" (v0.0.48과 동일)
+- 알려진 잠재 한계 (알고리즘 자체):
+  - 거짓말 패턴 — vfDiff 보정 메커니즘 없음, 환경 따라 -20ms+ 잔재 가능 (단 청감 미인지 영역)
+  - (42) Android 게스트 fallback drift edge case
+  - (47) Tab A7 Lite 호스트 framePos vs vf 비대칭 (정상 사용 패턴엔 영향 작음)
 
 **다음 세션 후보 (우선순위)**:
 
