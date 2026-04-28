@@ -26,13 +26,21 @@ const int _driftMedianWindow = 5;        // ~500ms (poll 100ms 기준)
 // ── v0.0.51 알고리즘 v2 그룹 1 (docs/SYNC_ALGORITHM_V2.md) ────
 // drift_ms + vf_diff_ms 결합 규칙 (A-2) + outputLatency EMA (B-1) +
 // 임계 강화 (E #14 안전 마진) + 청감 글리치 방어 (#13).
+//
+// v0.0.52 회귀 fix: idle에서 corrective_seek 진동 + 누적 발산 발견.
+// 30ms 임계 너무 빡세고 gain 0.5도 over-correction 발생. 4개 fix:
+// (1) 임계 완화 30→80ms, gain 0.5→0.2
+// (2) 보정 후 anchorGuestFrame 동기 갱신 → drift 점프 차단
+// (3) EMA 직접 보정 — _anchoredOutLatDeltaMs를 매 poll EMA로 갱신
+// (4) medianWindow 5→10 (2초 평균 노이즈 완화)
 const double _v2DriftNormalThresholdMs = 10.0;
-const double _v2VfDiffNormalThresholdMs = 30.0;       // (#14 안전 마진, signed_mean -21ms 고려)
+const double _v2VfDiffNormalThresholdMs = 80.0;       // v0.0.52: 30→80ms (idle 베이크인 마진)
 const double _v2VfDiffForceReseekThresholdMs = 500.0;
 const double _v2VfDiffEmergencyThresholdMs = 1000.0;
-const double _v2SmallCorrectionGain = 0.5;            // (#13 글리치 방어, gain 0.8→0.5)
+const double _v2SmallCorrectionGain = 0.2;            // v0.0.52: 0.5→0.2 (over-correction 차단)
 const Duration _v2SmallCorrectionCooldown = Duration(milliseconds: 3000);
 const double _v2OutLatEmaAlpha = 0.2;                 // (B-1: 절반 수렴 ~3 anchor 사이클)
+const int _v2DriftMedianWindow = 10;                  // v0.0.52: 5→10 (~2초 평균)
 // ── v0.0.51 race 차단 (F-2 강화 + 호스트 cooldown debouncing) ──
 const Duration _v2HostStateDebounce = Duration(milliseconds: 200);
 const Duration _v2HostSeekDebounce = Duration(milliseconds: 100);
@@ -524,10 +532,16 @@ class NativeAudioSyncService {
 
   /// v0.0.51: syncPlay/Pause는 debounce 큐. 200ms 안 여러 호출 → 마지막 의도만 적용.
   /// UI 측 _playingController는 즉시 emit (사용자 반응성 유지). 실제 engine + broadcast는 debounce.
+  ///
+  /// v0.0.53 fix: idempotent guard. 같은 의도가 이미 pending이거나 현재 상태와
+  /// 같으면 timer 갱신 안 함. 자동 정지 (재생 완료 감지)가 매 100ms poll마다
+  /// syncPause() 호출하던 race로 timer 영원히 갱신되어 flush 안 되던 버그 fix.
   Future<void> syncPlay() async {
     if (!_audioReady) return;
+    // 이미 재생 중이고 같은 의도 pending이면 skip (timer 갱신 차단)
+    if (_pendingHostPlaying == true) return;
+    if (_playing && _pendingHostPlaying == null) return;
     _pendingHostPlaying = true;
-    // UI 즉시 반영 (debounce flush 전에도)
     if (!_playing) {
       _playingController.add(true);
     }
@@ -535,6 +549,8 @@ class NativeAudioSyncService {
   }
 
   Future<void> syncPause() async {
+    if (_pendingHostPlaying == false) return;
+    if (!_playing && _pendingHostPlaying == null) return;
     _pendingHostPlaying = false;
     if (_playing) {
       _playingController.add(false);
@@ -571,13 +587,24 @@ class NativeAudioSyncService {
     if (target == null) return;
     _pendingHostPlaying = null;
 
-    // 재생 완료 상태에서 play → 처음으로 되돌리기
     if (target == true) {
       final ts = _engine.latest;
-      final vf = await _engine.getVirtualFrame();
+      var vf = await _engine.getVirtualFrame();
       final sr = ts?.sampleRate ?? 0;
+      // v0.0.54 fix: 재생 완료 상태에서 play → 처음으로 되돌리기.
+      // syncSeek (debounce 큐) 대신 직접 seekToFrame + broadcast — start 전에
+      // seek 실제 적용 보장. v0.0.51 debounce 도입 후 race로 마지막 위치에서
+      // 재생 시작되던 버그 fix.
       if (ts != null && ts.totalFrames > 0 && vf >= ts.totalFrames) {
-        await syncSeek(Duration.zero);
+        await _engine.seekToFrame(0);
+        _p2p.broadcastToAll({
+          'type': 'seek-notify',
+          'data': {'targetMs': 0},
+        });
+        // pending seek 큐도 정리 (사용자 seek와 race 차단)
+        _pendingHostSeekTargetMs = null;
+        _hostSeekDebounceTimer?.cancel();
+        vf = 0;
       }
       // play 직전 position 캡처
       if (sr > 0) {
@@ -1291,9 +1318,13 @@ class NativeAudioSyncService {
         );
       }
 
-      // 재생 완료 감지: VF가 totalFrames 이상이면 자동 정지 (호스트만)
+      // 재생 완료 감지: VF가 totalFrames 이상이면 자동 정지 (호스트만).
+      // v0.0.54 fix: debounce 진행 중(_pendingHostPlaying != null)이면 skip —
+      // 큐에 이미 의도가 있으므로 중복 트리거 차단. 매 100ms poll마다 호출되던
+      // race로 timer 갱신 + stale vf 영향 모두 방지.
       if (_isHost && _playing && ts.totalFrames > 0 &&
-          ts.virtualFrame >= ts.totalFrames) {
+          ts.virtualFrame >= ts.totalFrames &&
+          _pendingHostPlaying == null) {
         debugPrint('[HOST] end of file reached (vf=${ts.virtualFrame}, total=${ts.totalFrames})');
         unawaited(syncPause());
       }
@@ -1516,13 +1547,20 @@ class NativeAudioSyncService {
     // 각각의 sampleRate로 ms 변환 후 비교 (cross-rate 안전)
     final dHms = dH / hostFpMs;
     final dGms = dG / _framesPerMs;
-    // v0.0.51 B-1: 매 poll outputLatency raw 측정 → EMA 갱신 (학습).
-    // 보정엔 (현재 - 앵커 베이크인) 변화분만 사용 (기존 로직 유지).
+    // v0.0.51 B-1 + v0.0.52 fix (3): 매 poll EMA 갱신 + EMA 값을 보정에 직접 활용.
+    // _anchoredOutLatDeltaMs를 EMA로 매 poll 갱신 → 베이크인 잔재가 점진 수렴.
+    // 단 anchor establish 시점 대비 변화 너무 크면(>50ms) 갱신 안 함 (outlier 차단).
     final currentOutLatDelta =
         ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
     if (_outLatEmaInited) {
       _outLatEma = _v2OutLatEmaAlpha * currentOutLatDelta +
           (1 - _v2OutLatEmaAlpha) * _outLatEma;
+      // v0.0.52 fix (3): EMA 값을 _anchoredOutLatDeltaMs에 점진 수렴.
+      // anchor 시점 베이크인 값이 fixed라 잔재가 안 풀리던 v0.0.51 한계 해결.
+      if ((_outLatEma - _anchoredOutLatDeltaMs).abs() < 50) {
+        _anchoredOutLatDeltaMs = _v2OutLatEmaAlpha * _outLatEma +
+            (1 - _v2OutLatEmaAlpha) * _anchoredOutLatDeltaMs;
+      }
     }
     final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
     final driftMs = dGms - dHms - dynLatDeltaMs; // 양수: 게스트 음향이 앞섬
@@ -1537,9 +1575,9 @@ class NativeAudioSyncService {
     _latestDriftMs = driftMs;
     _driftSampleCount++;
 
-    // v0.0.24: 최근 N개 샘플 윈도우에 push (중앙값으로 seek 판단)
+    // v0.0.24/v0.0.52: 최근 N개 샘플 윈도우 (중앙값 보정 판단). v0.0.52 N=10.
     _driftSamples.add(driftMs);
-    if (_driftSamples.length > _driftMedianWindow) {
+    if (_driftSamples.length > _v2DriftMedianWindow) {
       _driftSamples.removeAt(0);
     }
 
@@ -1611,8 +1649,8 @@ class NativeAudioSyncService {
     final vfDiffSmallCorrection = absVfDiff >= _v2VfDiffNormalThresholdMs;
     if (!driftSmallCorrection && !vfDiffSmallCorrection) return;
 
-    // medianWindow 충분히 모인 후 보정 (#9 노이즈 완화)
-    if (_driftSamples.length < _driftMedianWindow) return;
+    // medianWindow 충분히 모인 후 보정 (#9 노이즈 완화). v0.0.52: N=10
+    if (_driftSamples.length < _v2DriftMedianWindow) return;
     final medianDrift = _median(_driftSamples);
 
     // 보정 기준값 — vfDiff가 더 크면 vfDiff로, 아니면 medianDrift로 보정 방향 결정
@@ -1648,6 +1686,14 @@ class NativeAudioSyncService {
     _seekCount++;
     _seekCooldownUntilMs = wallMs + _v2SmallCorrectionCooldown.inMilliseconds;
     _seekCorrectionAccum += correctionFrames;
+
+    // v0.0.52 fix (2): anchor 동기 갱신. _seekCorrectionAccum이 dG에 들어가
+    // drift_ms가 보정량만큼 점프하던 v0.0.51 over-correction 모양 차단.
+    // anchor를 보정 후 effectiveGuestFrame에 맞춰 갱신 → drift는 0 근처 유지.
+    if (_anchorGuestFrame != null) {
+      _anchorGuestFrame = _anchorGuestFrame! + correctionFrames;
+    }
+    _driftSamples.clear(); // 보정 후 윈도우 초기화 (이전 값 무효)
 
     // small correction event (진단용)
     _sendDriftReport(
