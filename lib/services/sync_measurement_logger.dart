@@ -34,7 +34,7 @@ class SyncMeasurementLogger {
     _logFile = File('${dir.path}/sync_log_$ts.csv');
     _sink = _logFile!.openWrite();
     _sink!.writeln(
-      'wall_ms,guest_id,drift_ms,offset_ms,host_vf,guest_vf,seek_count,event',
+      'wall_ms,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,event',
     );
     _isActive = true;
     debugPrint('[MEASURE] started: ${_logFile!.path}');
@@ -44,6 +44,8 @@ class SyncMeasurementLogger {
     required int wallMs,
     required String guestId,
     required double driftMs,
+    required double vfDiffMs,
+    required int hostObsWall,
     required double offsetMs,
     required int hostVf,
     required int guestVf,
@@ -52,7 +54,7 @@ class SyncMeasurementLogger {
   }) {
     if (!_isActive) return;
     _sink?.writeln(
-      '$wallMs,$guestId,${driftMs.toStringAsFixed(2)},${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,$event',
+      '$wallMs,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,$event',
     );
   }
 

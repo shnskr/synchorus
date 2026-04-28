@@ -589,6 +589,8 @@ class NativeAudioSyncService {
     if (from == null || data == null) return;
 
     final driftMs = (data['driftMs'] as num?)?.toDouble() ?? 0;
+    final vfDiffMs = (data['vfDiffMs'] as num?)?.toDouble() ?? 0;
+    final hostObsWall = (data['hostObsWall'] as num?)?.toInt() ?? 0;
     final offsetMs = (data['offsetMs'] as num?)?.toDouble() ?? 0;
     final seekCount = (data['seekCount'] as num?)?.toInt() ?? 0;
     final event = data['event'] as String? ?? 'drift';
@@ -598,6 +600,8 @@ class NativeAudioSyncService {
           DateTime.now().millisecondsSinceEpoch,
       guestId: from,
       driftMs: driftMs,
+      vfDiffMs: vfDiffMs,
+      hostObsWall: hostObsWall,
       offsetMs: offsetMs,
       hostVf: (data['hostVf'] as num?)?.toInt() ?? 0,
       guestVf: (data['guestVf'] as num?)?.toInt() ?? 0,
@@ -608,6 +612,7 @@ class NativeAudioSyncService {
     debugPrint(
       '[DRIFT-REPORT] from=$from event=$event '
       'drift=${driftMs.toStringAsFixed(2)}ms '
+      'vfDiff=${vfDiffMs.toStringAsFixed(2)}ms '
       'offset=${offsetMs.toStringAsFixed(1)}ms '
       'seekCount=$seekCount',
     );
@@ -1090,11 +1095,14 @@ class NativeAudioSyncService {
     final driftMs = guestPositionMs - expectedPositionMs - outLatDelta;
 
     // 500ms마다 drift report (fallback mode)
+    // fallback의 driftMs는 이미 vf 기반 (framePos 미사용) → vfDiffMs == driftMs.
     if (ts.wallMs - _lastDriftReportMs >= 500) {
       _lastDriftReportMs = ts.wallMs;
       _sendDriftReport(
         wallMs: ts.wallMs,
         driftMs: driftMs,
+        vfDiffMs: driftMs,
+        hostObsWall: obs.hostTimeMs,
         offsetMs: offset,
         hostVf: obs.virtualFrame,
         guestVf: ts.virtualFrame,
@@ -1186,9 +1194,13 @@ class NativeAudioSyncService {
   }
 
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).
+  /// [vfDiffMs] 외삽 + outputLatency 보정 후 콘텐츠 절대 위치 차이.
+  /// [hostObsWall] 이 보고가 사용한 호스트 obs의 측정 시각 (외삽 신선도 추적).
   void _sendDriftReport({
     required int wallMs,
     required double driftMs,
+    required double vfDiffMs,
+    required int hostObsWall,
     required double offsetMs,
     required int hostVf,
     required int guestVf,
@@ -1199,6 +1211,8 @@ class NativeAudioSyncService {
       'data': {
         'wallMs': wallMs,
         'driftMs': driftMs,
+        'vfDiffMs': vfDiffMs,
+        'hostObsWall': hostObsWall,
         'offsetMs': offsetMs,
         'hostVf': hostVf,
         'guestVf': guestVf,
@@ -1250,6 +1264,15 @@ class NativeAudioSyncService {
     final dynLatDeltaMs = currentOutLatDelta - _anchoredOutLatDeltaMs;
     final driftMs = dGms - dHms - dynLatDeltaMs; // 양수: 게스트 음향이 앞섬
 
+    // vfDiffMs: 콘텐츠 절대 위치 차이 (외삽 + outputLatency 보정 후).
+    // driftMs는 framePos 변화율(rate)만 비교 → anchor 시점의 잘못된 콘텐츠 차이를
+    // 못 잡는 "거짓말 패턴" 발생. vfDiffMs는 매 poll virtualFrame을 직접 비교해
+    // 절대 위치 어긋남을 노출. 두 값이 어긋나면 anchor가 잘못 박혔다는 신호.
+    final expectedHostVfMs =
+        obs.virtualFrame / hostFpMs + (hostWallNow - obs.hostTimeMs);
+    final guestVfMs = ts.virtualFrame / _framesPerMs;
+    final vfDiffMs = guestVfMs - expectedHostVfMs - currentOutLatDelta;
+
     _latestDriftMs = driftMs;
     _driftSampleCount++;
 
@@ -1265,6 +1288,8 @@ class NativeAudioSyncService {
       _sendDriftReport(
         wallMs: ts.wallMs,
         driftMs: driftMs,
+        vfDiffMs: vfDiffMs,
+        hostObsWall: obs.hostTimeMs,
         offsetMs: offset,
         hostVf: obs.virtualFrame,
         guestVf: ts.virtualFrame,
@@ -1327,10 +1352,13 @@ class NativeAudioSyncService {
     _seekCooldownUntilMs = wallMs + _seekCooldown.inMilliseconds;
     _seekCorrectionAccum += correctionFrames;
 
-    // seek 이벤트 report
+    // seek 이벤트 report (seek 직후 vf 재계산 비용 큼 → driftMs 재사용,
+    // hostObsWall만 obs 신선도 추적)
     _sendDriftReport(
       wallMs: wallMs,
       driftMs: driftMs,
+      vfDiffMs: driftMs,
+      hostObsWall: _latestObs?.hostTimeMs ?? 0,
       offsetMs: _sync.filteredOffsetMs,
       hostVf: _latestObs?.virtualFrame ?? 0,
       guestVf: currentVf + correctionFrames,
