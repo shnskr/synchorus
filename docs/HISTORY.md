@@ -2881,6 +2881,57 @@ awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf 
 
 ---
 
+### 2026-04-29 (51) — 게스트 3명 입장 불가 버그 발견 (문서 only, 다음 세션 fix 예정)
+
+**증상** (사용자 보고): 갤럭시 3대로 같은 방 연결 시도 → 호스트 + 게스트 1명까지는 들어가지만 3번째 게스트는 입장 실패 (또는 기존 게스트가 튕겨나가는 핑퐁).
+
+**원인 확정** (코드 추적 100% 확신):
+1. `lib/screens/home_screen.dart:136` (그리고 `:367`) — 모든 게스트가 `name='Guest'` 하드코딩으로 join
+   ```dart
+   await p2p.connectToHost(host.ip, host.port, 'Guest');
+   ```
+2. `lib/services/p2p_service.dart:232` — v0.0.32 (2026-04-24 (25))에서 추가된 **이름 기반 stale peer 정리** 로직이 같은 이름 peer를 강제 destroy
+   ```dart
+   final stalePeers = _peers.where((p) => p.name == peerName).toList();
+   for (final stale in stalePeers) {
+     stale.socket.destroy();   // ← 여기
+     _peers.remove(stale);
+     ...
+   }
+   ```
+
+**시나리오**:
+1. 호스트 + 게스트 A('Guest') 입장 → `_peers=[A]`
+2. 게스트 B('Guest') join → A와 이름 충돌 → A의 socket destroy → `_peers=[B]`
+3. A의 socket이 죽음 → A의 `room_lifecycle_coordinator`가 재연결 시도 → 다시 'Guest'로 join → B destroy
+4. → 무한 핑퐁. 사용자 눈엔 "2명까지만 들어가짐"으로 보임
+
+**근본 원인**: v0.0.32 의도는 "같은 게스트가 재접속 시 stale peer 누적 방지"였는데, **peer name이 디바이스별로 고유하다는 가정**이 있었음. 하지만 게스트 측 join 코드가 이름을 디바이스명이 아닌 하드코딩 'Guest'로 보내고 있어 가정 깨짐.
+
+**수정 옵션** (다음 세션):
+
+A. **게스트 이름 고유화** (가장 간단)
+   - `home_screen.dart`의 `'Guest'` → 디바이스 모델명 + 짧은 랜덤 suffix (예: `'Galaxy-A3F1'`)
+   - 또는 `device_info_plus` 패키지로 실제 디바이스명 가져오기
+   - v0.0.32 의도 (같은 게스트 재접속 정리) 그대로 유지
+
+B. **stale 정리 로직 보강**
+   - 이름 + IP 둘 다 비교: `p.name == peerName && p.socket.remoteAddress.address == socket.remoteAddress.address`
+   - 의미: "같은 디바이스의 재접속"만 정리 (이름이 같아도 IP가 다르면 다른 디바이스로 인식)
+
+C. **A + B 동시 적용 (권장)**
+   - A만: 사용자가 같은 닉네임 입력하면 또 깨짐
+   - B만: 같은 IP 재접속(NAT, 재DHCP) 케이스 의도대로 처리
+   - 둘 다: 이중 안전
+
+**검증 방법**:
+- 갤럭시 3대 (S22 + Tab A7 Lite + 다른 1대) 같은 방 입장 → 호스트 측 peer count 3 유지 확인
+- 한 게스트 비행기 모드 on/off → 재접속 후 peer count 정상 (3 유지) 확인 (v0.0.32 의도 깨지지 않는지 회귀 검증)
+
+**우선순위**: HIGH — 다중 게스트 사용성 직접 영향. v0.0.53 anchor fix 검증 측정과 별개로 진행 가능 (영역 다름: 알고리즘 vs P2P/UI).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -2900,6 +2951,7 @@ awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf 
 - [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **HIGH priority**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **v0.0.46 oboe pause/resume + v0.0.47 NTP 예약 재생 둘 다 시도, v0.0.48에서 롤백 (HISTORY (43))**. 정공법 NTP는 다음 세션 정밀 작업 (sequence number + race 제거 + outputLatency 자동 보정)으로 재도입.
 - [ ] **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (2026-04-26 (43) 신규, mid priority). `flutter run --device-id <iPhone>` USB로 실행 시 "Installing and launching..." 단계에서 1~3분 hung. iPhone 잠금/신뢰 다이얼로그 OK인데도 발생. iOS 26 + Xcode toolchain 호환 이슈 추정. 다음 세션엔 **IntelliJ Run** 또는 **Xcode IDE에서 직접 Run** 권장 (CLI flutter run 대신).
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
+- [ ] **게스트 3명 입장 불가 (이름 충돌 핑퐁)** (2026-04-29 (51) 신규, **HIGH priority**). 모든 게스트가 `name='Guest'` 하드코딩(`home_screen.dart:136`)으로 join하면서 v0.0.32 stale peer 정리 로직(`p2p_service.dart:232`)이 같은 이름 기존 peer를 강제 destroy → 갤럭시 3대 입장 시 호스트+1명만 유지되고 무한 핑퐁. 다음 세션 fix 옵션: A) 디바이스명 기반 고유 이름 (`device_info_plus`) + B) stale 비교를 이름 AND IP로 강화. 권장: A+B 동시. 상세: HISTORY (51).
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
