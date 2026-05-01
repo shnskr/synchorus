@@ -123,7 +123,9 @@ audio_session: ^0.1.x          # 오디오 세션 구성 (music 모드)
 | `audio-request` | ~~HTTP URL 공유로 대체~~ → 다시 활용 (게스트 동기화 완료 후 현재 오디오 요청, 에러 복구 시 재요청) |
 | `state-request/response` | ~~play 메시지의 hostTime+position으로 통합~~ → 다시 활용 (게스트 준비 완료 후 최신 상태 요청, pendingPlay 대체) |
 
-## 핵심 기술 설계 (v3) — 폐루프 리아키텍처 (설계 단계, 코드 미반영)
+## 핵심 기술 설계 (v3) — 폐루프 리아키텍처
+
+> v3는 v0.0.13(2026-04-15 step 1-1)에서 본 앱에 도입되어 v0.0.55까지 누적 보강. v2는 Appendix로 보존(legacy). 이 섹션은 현재 main 동작을 반영.
 
 > **상태**: PoC 완료 (Android + iOS), 본체 앱 통합 step 1-4 완료 (백그라운드 재생). v2 AudioSyncService 삭제됨 → NativeAudioSyncService로 교체. 이 섹션은 PoC와 본 구현의 단일 참조 지점이다 — 같은 토론을 반복하지 않기 위함.
 
@@ -283,58 +285,110 @@ trackPosMs = anchor.trackMs + (framePos - anchor.framePos) * 1000 / sampleRate
 
 **앵커 갱신 규칙**: 평상시 같은 앵커, seek/play 직후 즉시 새 앵커 broadcast (늦게 도착하는 옛 측정값과 혼동 방지).
 
-#### 4-4. 드리프트 계산: 호스트 obs 선형 보간
+#### 4-4. 드리프트 계산: 외삽 + outputLatency 비대칭 베이크인 (v0.0.20+)
 
-호스트 최근 obs 두 개 `(T1, P1)`, `(T2, P2)`, 게스트 관측 순간 `T_g` (`T1 ≤ T_g ≤ T2`):
+본 앱이 실제로 쓰는 공식. PoC §6-1 검증을 통과한 알고리즘이 그대로 이식됨. PoC `lib/main.dart` 헤더 주석(9-31줄)이 1차 출처.
+
+**상수** (`lib/services/native_audio_sync_service.dart:14-20`):
+- `_driftSeekThresholdMs = 20.0` — seek 발동 임계
+- `_seekCorrectionGain = 0.8` — proportional gain (오버슈팅 방지)
+- `_seekCooldown = 1000ms`
+- `_reAnchorThresholdMs = 200.0` — 큰 drift는 점진 보정 못 잡음 → 즉시 anchor reset
+- `_postSeekProbeMs = [100, 300, 500, 1000, 2000]`
+- `_idealFramesPerMs = 48.0` (PoC 검증 기준, 본 앱은 sampleRate 정규화로 cross-rate 처리)
+
+**Anchor 시점에 박는 값** (`_tryEstablishAnchor`, `native_audio_sync_service.dart:1190+`):
+
+clock sync 초기화 + filtered offset 있고 `playing` obs 1건 수신 시 첫 게스트 poll에서 설정:
 
 ```
-expectedP_at_Tg = P1 + (P2 - P1) * (T_g - T1) / (T2 - T1)
-drift = observedP_g - expectedP_at_Tg
+anchorHostWall = guestWallMs + filteredOffsetMs               # offset>0 = 호스트 앞섬
+anchorHostFrame = obs.framePos + (anchorHostWall - obs.hostTimeMs) * framesPerMs
+                                                              # ⚠️ 외삽 — obs는 최대 500ms 오래된 값
+hostContentFrame = obs.virtualFrame + 외삽                    # 콘텐츠 정렬용 (호스트 seek 추적)
+initialCorrection = anchorHostFrame - (framePos + accum)      # 즉시 정렬
+seekToFrame(targetGuestVf)                                    # ★ 1번만 호출 (v0.0.53)
+_seekCorrectionAccum += initialCorrection                     # ★ 1번만 누적 (v0.0.53)
+_anchorGuestFrame = framePos + _seekCorrectionAccum           # → anchorGF == anchorHF
+_anchoredOutLatDeltaMs = guestOutLat - hostOutLat             # ★ v0.0.38 BT 비대칭 베이크인
 ```
 
-재생 속도 일정 시 P는 T에 대해 선형 → 보간이 수학적으로 정확.
+**Anchor 시점에 outputLatency 비대칭을 베이크인하는 이유 (v0.0.38)**: 게스트와 호스트 양쪽 `getTimestamp`/`AVAudioTime`이 자기 측 `outputLatency`를 노출. BT 환경은 ±50ms 변동 → 이를 anchor의 콘텐츠 정렬 seek에 한 번 박아 넣고, 이후 `_recomputeDrift`는 (현재 outLatDelta − 앵커 outLatDelta) 변화분만 보정. 결과: framePos 기준 drift = 0으로 시작, BT 라우트 변화도 자동 흡수.
 
-**왜 "앵커 + 이론 계산"이 아니라 "실측 보간"인가**:
-- 앵커 기반 `expectedP(T) = P_anchor + (T - T_anchor)`는 클락 드리프트를 못 잡음 = **개방 루프 그 자체**
-- 호스트 obs는 실측값이라 그 자체에 호스트 측 모든 지연이 녹아 있음
-- 게스트가 실측값을 기준선으로 자기 실측과 직접 비교 → 진짜 폐루프
+**매 게스트 poll drift 재계산** (`_recomputeDrift`, `:1300+`):
 
-#### 4-5. 보정 실행: 계층적
+```
+hostWallNow = guestWallMs + filteredOffsetMs                  # offset>0 = 호스트 앞섬
+expectedHostFrameNow = obs.framePos                           # framePos 기반 (rate 정확)
+                     + (hostWallNow - obs.hostTimeMs) * framesPerMs
+dH = expectedHostFrameNow - anchorHostFrame                   # host 진행분
+effectiveGuestFrame = guestFramePos + _seekCorrectionAccum    # ★ HAL framePos는 seek 무관 →
+                                                              # 과거 seek correction을 더해 복원
+dG = effectiveGuestFrame - anchorGuestFrame                   # guest 진행분
+driftFrame = dG - dH                                          # 양수 = 게스트 앞섬
+driftMs = driftFrame / framesPerMs
 
-| drift 크기 | 방법 | 비고 |
-|---|---|---|
-| **< 15ms** | 무시 (dead zone) | 측정 노이즈 zone |
-| **15 ~ 50ms** | rate 조정 (1.025~1.05×) | 매끄럽게 수렴 (본 구현 단계) |
-| **> 50ms** | seek | rate로 따라잡기 너무 느림, 갑작스런 점프 대비 |
+dynLatDeltaMs = (현재 outLatDelta) - _anchoredOutLatDeltaMs   # v0.0.38 동적 보정
+```
 
-**노이즈 원천 분해** (왜 임계값이 ms 단위인가):
+**왜 "앵커 + 이론 계산"이 아니라 외삽인가**: 호스트 obs는 500ms 주기 + 네트워크 지터 50~70ms로 게스트 관측 순간보다 항상 과거. 그대로 비교하면 anchor 시점 시간축 어긋남으로 -315ms 같은 오프셋이 베이크됨 (PoC 버그 B). 호스트 측 obs를 게스트 wall now까지 framePos × framesPerMs로 외삽해야 정합.
+
+**왜 framePos인가, virtualFrame인가**:
+- **rate drift 추적**: `framePos` (HAL 하드웨어 클록) — 정확. seek에 무관하게 단조 증가
+- **콘텐츠 정렬**: `virtualFrame` — 매 poll `_checkContentAlignment`로 게스트 vf ≈ 호스트 vf 확인, 임계 초과 시 즉시 보정
+- **호스트 seek 전달**: 별도 `seek-notify` 메시지 (absolute targetMs) + 콘텐츠 정렬 안전망
+
+PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 발견(버그 H) → 역할 분리로 안정.
+
+**왜 seekCorrectionAccum이 필요한가**: `seekToFrame(N)`은 native `mVirtualFrame`만 덮어쓰고 HAL `framePos`는 영향 없음. PoC 1차 실측에서 seek해도 drift가 전혀 안 줄어든 원인(버그 A). `accum`을 누적해서 `effectiveGuestFrame`에 더해 "seek가 없었다면 HAL이 갔을 위치"를 복원.
+
+#### 4-5. 보정 실행: 계층적 (v0.0.20+)
+
+본 앱은 **rate 조정 미구현** — seek 단일 보정. 향후 rate 도입 시 v2 시도(setSpeed 1.05x)에서 에뮬에서 오히려 차이 증가했던 회귀 주의(`DECISIONS.md` v2 결정 표).
+
+```
+|drift| ≥ 200ms (_reAnchorThresholdMs)
+  → anchor reset (즉시) — 점진 gain=0.8로는 타겟 움직임 따라가기 불가
+  → 다음 poll에서 _tryEstablishAnchor가 새 obs로 재정렬
+
+|drift| ≥ 20ms (_driftSeekThresholdMs) && 쿨다운 해제
+  → median window=5 샘플 중앙값으로 판단 (v0.0.24, 단발 노이즈 흡수)
+  → correctionFrames = -driftMs * 0.8 * framesPerMs
+  → seekToFrame(currentVf + correctionFrames)
+  → _seekCorrectionAccum += correctionFrames
+  → seek 후 1초 cooldown + post-seek probe [100, 300, 500, 1000, 2000]ms 기록
+
+|drift| < 20ms
+  → 무시 (dead zone, 측정 노이즈 zone)
+```
+
+**노이즈 원천 분해** (왜 임계값 20ms인가):
 
 | 원천 | 크기 | 네이티브가 해결? |
 |---|---|---|
-| 엔진 타임스탬프 정밀도 | <1ms | ✅ |
-| Wi-Fi clock 동기화 오차 | 5-10ms | ❌ (네트워크 본질) |
-| 네트워크 전송 지연 | 우회 가능 (obs에 발생 시각 박아 보냄) | - |
-| 재생 하드웨어 지연 | ~0 (`getTimestamp`가 빼고 돌려줌) | - |
+| 엔진 타임스탬프 정밀도 | <1ms | ✅ Oboe + AVAudioEngine sub-ms (PoC Q1) |
+| Wi-Fi clock 동기화 오차 | 5~10ms | ❌ (네트워크 본질, EMA로 완화) |
+| 네트워크 전송 지연 | obs에 hostTimeMs 박아 우회 | - |
+| 재생 하드웨어 지연 | `getTimestamp`가 DAC 시점 반환 | - |
+| BT outputLatency 변동 | ±50ms | v0.0.38 anchor 베이크인 |
 
-→ **병목은 Wi-Fi clock 동기화**. 네이티브 가도 이건 안 줄어. 실제 floor는 3-10ms 범위. dead zone 15ms는 보수적 출발값.
+→ **병목은 Wi-Fi clock 동기화**. 실제 floor는 3-5ms 범위. dead zone 20ms는 청각 임계와 정합 (사용자가 "어긋났다" 느끼는 한계).
 
-**임계값은 PoC 실측 후 확정**: 정적 상태에서 noise floor 측정 → dead zone = floor × 2 (oscillation 방지). 15ms가 빡빡/헐거우면 조정.
+**clock sync 알고리즘** (`lib/services/sync_service.dart` + PoC §3):
+- 초기 핸드셰이크: 10회 ping (100ms 간격) → RTT 최소 샘플의 raw offset을 초기값
+- 주기 단계: 1s마다 ping, 최근 5개 sliding window
+  - 창 내 RTT 최소 샘플의 raw offset을 new로
+  - `filtered = old * 0.9 + new * 0.1` (EMA, α=0.1)
+  - v0.0.25 (17)에서 window 5→10 시도(Part A) — 안정 효과 확인된 일부만 적용
 
-**보정 후 쿨다운**: 한 번 보정 후 최소 500ms-1s 대기 (oscillation 방지).
+**호스트 seek 처리**: `seek-notify` 메시지(절대 `targetMs`)로 게스트에 직접 통보. delta는 비동기 중첩 시 누적 오차 → absolute는 멱등(idempotent). drift 계산은 framePos 기반이라 별도 영향 없음 — 콘텐츠 정렬만 변동.
 
-**PoC 단계 (rate 조정 생략)**:
-```
-< 15ms   → 무시
-≥ 15ms   → seek
-```
+**PoC Phase 6 결과** (참조): 31분 stress |drift|<20ms = **99.9%**, seek 17회 (v3 폐루프 클록 차이 자동 보정 동작 확인).
 
-본 구현 단계에서 rate 조정 추가 시 위 3계층 활성화.
-
-**clock sync 개선 기법** (필요 시 PoC 측정 후 적용):
-1. Kalman filter — RTT 시계열 필터링, 튀는 값 자동 배제
-2. ping 주기 ↑ — 30s → 5-10s
-3. 샘플 수 ↑ — 10 → 20-30
-4. 이상치 제거 — RTT 분포 기반 outlier 버림
+**알고리즘 변경 시 주의** (v0.0.46~v0.0.48 + v0.0.49~v0.0.61 13번 시도 후 청감 우선 v0.0.45 baseline 회복 사례):
+- NTP 정공법, anchor establishment 시점 변경, oboe pause/resume 같은 **위험 큰 변경은 즉흥 시도 금지**
+- `docs/SYNC_ALGORITHM_V2.md` 디자인 문서에서 결정 사항 합의 후 단일 commit (sequence number, race 제거, outputLatency 자동 보정 통합)
+- `_tryEstablishAnchor`의 `seekToFrame` + `_seekCorrectionAccum +=` 블록은 **진입점 1개 원칙** (v0.0.53 회귀 사례)
 
 ### 5. Flutter ↔ 네이티브 인터페이스
 
@@ -389,14 +443,48 @@ EventChannel 추가로 native 자발적 push 전환 검토:
 - **에러는 fatal/recoverable 구분**
 
 
-### 8. v3 새 P2P 메시지 (요약)
+### 8. P2P 메시지 카탈로그 (현황)
+
+본 앱이 실제로 주고받는 모든 메시지. JSON line(`\n` 구분) over TCP 41235.
+
+#### 8-1. 연결·라이프사이클 (`p2p_service.dart` + `room_lifecycle_coordinator.dart`)
 
 | 타입 | 방향 | 페이로드 | 용도 |
 |---|---|---|---|
-| `audio-obs` | 호스트→게스트 | `seq`, `hostTimeMs`, `anchor`, `framePos`, `playing` | 호스트 엔진 실측값 broadcast (500ms 주기, 앵커 변경 시 즉시) |
-| `audio-drift-report` | 게스트→호스트 | `seq`, `hostTimeMs`, `observedTrackMs`, `expectedTrackMs`, `driftMs` | 게스트가 임계 초과 drift 감지 시 보고 (이벤트성) |
+| `join` | 게스트→호스트 | `name` (디바이스명, v0.0.54 형식 `<model>#<hex>`) | 방 입장 요청 |
+| `welcome` | 호스트→게스트 | `peers` (현 peer 목록) | join 응답, 절대값 |
+| `peer-joined` | 호스트→all | `peer`, `peerCount` | 새 게스트 입장 통보 (`peerCount` 절대값 동봉, v0.0.32) |
+| `peer-left` | 호스트→all | `name`, `peerCount` | 게스트 퇴장 통보 (모든 퇴장 경로에서 broadcast) |
+| `leave` | 게스트→호스트 | 없음 | 정식 퇴장 |
+| `heartbeat` | 호스트→all | 없음 | 5초 주기 keepalive |
+| `heartbeat-ack` | 게스트→호스트 | 없음 | 호스트 timeout 판정 (15초) 회피 |
+| `host-paused` | 호스트→all | 없음 | `AppLifecycleState.paused` (홈/파일 선택 창) |
+| `host-resumed` | 호스트→all | 없음 | `AppLifecycleState.resumed` (단, paused 중 TCP abort되어 도달 불가 가능 — TCP 재접속 자체가 복귀 신호) |
+| `host-closed` | 호스트→all | 없음 | 정식 `closeRoom` 또는 `detached` (v0.0.26 best-effort, Android foreground service에서만 도달 가능) |
 
-기존 `sync-position`은 v3에서 폐기. `sync-ping`/`sync-pong`은 그대로 유지.
+#### 8-2. 동기화·재생 (`native_audio_sync_service.dart`)
+
+| 타입 | 방향 | 페이로드 | 용도 |
+|---|---|---|---|
+| `audio-url` | 호스트→all | `url`, `playing`, `fileName` | 호스트 파일 로드 후 게스트 다운로드 트리거 (`?v=timestamp`로 캐시 무효화) |
+| `audio-obs` | 호스트→all | `seq`, `hostTimeMs`, `framePos`, `virtualFrame`, `playing`, `outputLatencyMs`, `anchor*` | 호스트 엔진 실측값 (500ms 주기). 게스트 drift 외삽 + 콘텐츠 정렬 입력 |
+| `seek-notify` | 호스트→all | `targetMs` (절대값) | 호스트 seek 직후 즉시 broadcast → 게스트 콘텐츠 정렬. delta 아닌 absolute로 멱등 |
+| `state-request` | 게스트→호스트 | 없음 | 다운로드 완료/재접속 직후 현 상태 동기화 요청 |
+| `state-response` | 호스트→게스트 | 현 url/playing/`audio-obs` payload | state-request 응답 |
+| `download-report` | 게스트→호스트 | `bytes`, `total`, `elapsedMs` | 다운로드 진행률 (호스트 UI 표시) |
+| `drift-report` | 게스트→호스트 | `driftMs`, `vfDiffMs`, 진단 컬럼 | 임계 초과 drift 감지 시 보고 (호스트 UI + logger CSV 입력) |
+
+#### 8-3. clock sync (`sync_service.dart`)
+
+| 타입 | 방향 | 페이로드 | 용도 |
+|---|---|---|---|
+| `sync-ping` | 게스트→호스트 | `seq`, `t1` (게스트 송신 직전 wallMs) | RTT/offset 측정 ping |
+| `sync-pong` | 호스트→게스트 | `seq`, `t1` (echo), `t2` (호스트 수신 직후 wallMs) | offset 계산 핵심: `raw = t2 - (t1+t3)/2` |
+
+#### 8-4. 폐기됨
+
+- `sync-position` (v2) — 시각 축 없어 정확 drift 계산 불가, v3 `audio-obs`로 교체
+- `audio-latency` MethodChannel — v0.0.33 제거 (v3 폐루프에 엔진 latency 내포)
 
 ---
 
@@ -428,13 +516,19 @@ coordinator가 소유하는 주요 state:
 - `_awayReconnecting` (bool) — away loop tick 재진입 가드
 - `_leaving` / `_disposed` — 종단 상태 플래그
 
-#### 9-3. Peer count 관리 (v0.0.32)
+#### 9-3. Peer count 관리 + 1:N 멀티 게스트 (v0.0.32, v0.0.54)
 
 `Peer.id`가 socket 주소(`ip:port`) 기반이라 게스트 재접속 시 **다른 ID로 새 peer 추가**됨. 누적 방지 이중 방어:
-1. 호스트 `_handleNewPeer`에서 같은 `name`의 stale peer들을 `destroy + remove + peer-left broadcast` 후 새 peer 등록
-2. 모든 `peer-joined`/`peer-left` broadcast에 `peerCount` 절대값 포함 → 게스트는 증감이 아닌 **절대값 우선 반영**
+1. 호스트 `_handleNewPeer`에서 stale peer를 `destroy + remove + peer-left broadcast` 후 새 peer 등록
+2. 모든 `peer-joined`/`peer-left` broadcast에 `peerCount` 절대값 포함 → 게스트는 증감이 아닌 **절대값 우선 반영** (메시지 누락 시 drift 누적 방지)
 
-한계: 동일 이름 두 기기 동시 입장은 stale 정리가 legit peer를 자를 수 있음. MVP는 기기명이 기기별 unique라 허용.
+**v0.0.32에서 v0.0.54 보강** — 같은 이름 게스트가 여럿 있을 수 있는 1:N 환경 fix:
+- v0.0.32 `_handleNewPeer`는 같은 `name`이면 무조건 stale로 정리 → `home_screen.dart`가 모든 게스트를 `'Guest'` 하드코딩으로 join하던 상황과 결합 → 두 번째 게스트 입장이 첫 번째를 stale로 오인 → 무한 ping-pong → 호스트+1명만 유지 (게스트 3명 입장 불가 버그)
+- v0.0.54 A안: 게스트 닉네임을 `<device model>#<hex 4자리>`로 발급 (`device_info_plus ^12.4.0`, Android model / iOS name + 충돌 방지 hex)
+- v0.0.54 B안: stale 비교를 `name == peerName && remoteAddress == ip` 동시 매칭으로 강화 — LAN P2P는 NAT 없어 ip가 디바이스 유일 식별자. 사용자가 닉네임을 강제로 같게 만들어도 ip로 분리됨
+- A+B 동시 적용 → 이중 안전 (사용자 닉네임 강제 동일 케이스도 보장)
+
+**p2p 로직 작성 시 1:1 가정 금지** (CLAUDE.md "협업 원칙" 명시). 같은 이름 peer 다수 가능 전제로 설계.
 
 #### 9-4. 게스트 재연결 경로 2중화 + 직렬화 (v0.0.28, v0.0.34, v0.0.35)
 
@@ -463,6 +557,61 @@ connectivity_plus   → none 이벤트 → 1초 재확인 → _waitForWifiAndRec
 | `ENETUNREACH` | 101 | 51 | (위와 동일) |
 
 v0.0.27에서 Linux 값만 하드코딩해 iOS fast giveup 작동 안 하던 버그 → v0.0.30에서 집합으로 수정. 크로스 플랫폼 원칙의 시초.
+
+---
+
+### 10. 디바이스 디스커버리: nsd (v0.0.41+)
+
+호스트가 mDNS 서비스 광고, 게스트가 검색해 호스트 IP 자동 획득. 코드: `lib/services/discovery_service.dart`.
+
+#### 10-1. 라이브러리 결정 (v0.0.41)
+
+| 후보 | 결정 | 이유 |
+|---|---|---|
+| `multicast_dns` | ❌ 폐기 | 양방향 발견(호스트 광고 + 게스트 검색)이 동시 안정적으로 안 됨. iOS↔Android 호환성 문제 관측 |
+| **`nsd`** | ✅ 채택 | iOS NSNetService + Android NsdManager 추상화. 양방향 안정 |
+
+#### 10-2. stale 방 처리 (v0.0.42)
+
+`nsd`의 `discovery` 스트림은 `found` / `lost` 이벤트를 발행. 게스트 UI는 이 이벤트를 **즉시 반영** (호스트 종료 후 캐시된 방 목록이 살아있는 것처럼 보이는 stale 문제 fix). 호스트가 `closeRoom()`하면 nsd `unregister` → 게스트는 `lost` 이벤트로 즉시 목록에서 제거.
+
+#### 10-3. 서비스 정보
+
+- 서비스 타입: `_synchorus._tcp` (mDNS 표준 형식)
+- 광고: 호스트 IP + TCP 포트 41235 (P2P) + HTTP 포트 41236 (파일 서버)
+- 권한: Android `AndroidManifest.xml`에 `INTERNET` + `ACCESS_NETWORK_STATE` + `CHANGE_WIFI_MULTICAST_STATE`. iOS `Info.plist`에 `NSLocalNetworkUsageDescription` + `NSBonjourServices` (`_synchorus._tcp`)
+
+---
+
+### 11. 측정·디버그 인프라 (v0.0.49~v0.0.52)
+
+알고리즘 변경의 근거를 실측에서 잡기 위한 csv 출력 시스템. 코드: `lib/services/sync_measurement_logger.dart`.
+
+#### 11-1. 출력 위치
+
+- Android: `getExternalStorageDirectory()` → `/storage/emulated/0/Android/data/com.synchorus.synchorus/files/` (멀티유저 환경 `/storage/emulated/95/` 가능 — `run-as` 접근 불가하므로 `adb pull` 필요)
+- iOS: `getApplicationDocumentsDirectory()` (`getExternalStorageDirectory()`는 `UnsupportedError`)
+
+#### 11-2. CSV 컬럼 (현재 v0.0.52 진단 컬럼 활성)
+
+매 게스트 poll 1행. 컬럼:
+- 기본: `wallMs`, `framePos`, `virtualFrame`, `playing`, `obsHostFrame`, `obsHostTimeMs`, `expectedHostFrame`, `seekAccum`, `filteredOffsetMs`, `driftMs`, `vfDiffMs`, `kind` (drift/anchor/seek)
+- 진단 (v0.0.52): `out_lat_host_raw`, `out_lat_guest_raw`, `out_lat_delta_current`, `out_lat_delta_anchored`
+  - 용도: HISTORY (45) -20.84ms vfDiff 잔재 같은 outputLatency 비대칭 분해
+  - 정리 후보: HIGH-2 (v0.0.53 fix 효과 검증) 측정 끝나면 4개 컬럼 제거
+
+#### 11-3. 분석 워크플로우
+
+```bash
+adb -s <DEVICE> pull /storage/emulated/0/Android/data/com.synchorus.synchorus/files/sync_*.csv ./
+awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{...}' <csv>
+```
+
+PoC와 달리 본 앱은 **별도 Python 스크립트 없음** — awk + spreadsheet로 충분 (PoC `analysis/*.py`는 알고리즘 검증용 ablation 비교, 본 앱은 회귀 측정만). 큰 분석 필요 시 PoC `phase4_drift_vs_seek.py`를 컬럼 매핑 후 재사용.
+
+#### 11-4. 진단 컬럼 정리 정책
+
+진단 컬럼은 **목적 달성 후 제거**. 영원히 두면 csv 비대화 + 컬럼 의미 잊힘. 추가 시점·제거 시점·결정 근거를 HISTORY에 명시 (v0.0.52는 `(49)`, 제거는 미정).
 
 ---
 

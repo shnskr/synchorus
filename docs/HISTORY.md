@@ -3097,6 +3097,60 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (57) — ARCHITECTURE.md v0.0.30~v0.0.55 누락분 일괄 갱신
+
+**배경**: 사용자 "아키텍처 문서도 갱신해줘 ... 항상 히스토리만 업데이트했었구나". DECISIONS.md(56)와 같은 패턴 — `docs/ARCHITECTURE.md` 마지막 commit이 `26d2461` (2026-04-24, v0.0.29 즈음 라이프사이클 섹션 추가)이고 이후 **v0.0.30~v0.0.55 약 25개 버전 동안 갱신 0건**. CLAUDE.md "작업 완료 후 — 설계/로직 변경 → ARCHITECTURE.md" 규칙이 안 지켜진 거.
+
+**누락 진단** (grep 키워드 매칭):
+- `_anchoredOutLatDeltaMs` (v0.0.38 BT 비대칭 베이크인) — 본문에 0건
+- `nsd` / `multicast_dns` / `discovery_service` — 디스커버리 섹션 자체 없음
+- `sync_measurement_logger` / `out_lat_*` 진단 컬럼 (v0.0.49~v0.0.52) — 측정 인프라 섹션 없음
+- `_seekCorrectionAccum` / anchor establishment 단일 진입 (v0.0.53) — §4-5 본문에 부재
+- `device_info_plus` / "name AND ip" (v0.0.54) — §9-3에 v0.0.32만 명시, v0.0.54 보강 누락
+
+**갱신 내역**:
+
+1. **§4-4 드리프트 계산 본문 전면 교체** — 옛 "선형 보간 expectedP_at_Tg = P1 + (P2 - P1) * (...)" 공식은 **본 앱이 안 쓰는** 버전(이론 모델)이었음. 실제는 `_tryEstablishAnchor` + `_recomputeDrift`의 anchor 외삽 + outputLatency 비대칭 베이크인 + framePos/virtualFrame 역할 분리. 상수 6개 + anchor 시 박는 값 + 매 poll 재계산 공식 + framePos vs virtualFrame 선택 이유 + `_seekCorrectionAccum` 필요성 모두 코드 라인(:1190+, :1300+) 참조와 함께 포함.
+
+2. **§4-5 보정 실행 본문 전면 교체** — 옛 "rate 조정 (1.025~1.05×)" 본문은 **본 앱 미구현**. 실제는 seek 단일 보정 + median window=5 (v0.0.24) + |drift|≥200ms anchor reset + post-seek probe. 노이즈 원천 표에 BT outputLatency 변동 + v0.0.38 anchor 베이크인 추가. clock sync 알고리즘(EMA α=0.1) 명시. 끝에 "알고리즘 변경 시 주의" — v0.0.46~v0.0.61 13번 시도 후 청감 우선 v0.0.45 회복 사례, SYNC_ALGORITHM_V2 단일 commit 원칙, anchor 진입점 1개 원칙(v0.0.53 회귀).
+
+3. **§8 P2P 메시지 카탈로그 전면 재작성** — 옛 본문은 `audio-obs` + `audio-drift-report` 2개만 있었음(설계 단계 작성). 실제 메시지 17종을 4개 카테고리로 정리:
+   - 8-1 연결·라이프사이클 10종 (join, welcome, peer-joined/left, leave, heartbeat/ack, host-paused/resumed/closed)
+   - 8-2 동기화·재생 7종 (audio-url, audio-obs, seek-notify, state-request/response, download-report, drift-report)
+   - 8-3 clock sync 2종 (sync-ping/pong)
+   - 8-4 폐기 2종 (sync-position v2 → audio-obs로 교체, audio-latency MethodChannel v0.0.33 제거)
+
+4. **§9-3 Peer count 관리 + 1:N 멀티 게스트 (v0.0.32, v0.0.54) 보강** — 제목 + 본문에 v0.0.54 추가:
+   - v0.0.32 fix가 모든 게스트 닉네임 'Guest' 하드코딩과 결합해 게스트 3명 입장 불가 회귀 발생한 경위
+   - A안 디바이스 닉네임 `<model>#<hex>` (`device_info_plus ^12.4.0`)
+   - B안 stale 비교 `name AND ip` 동시 매칭 (LAN P2P NAT 없어 ip가 디바이스 유일 식별)
+   - "p2p 로직 작성 시 1:1 가정 금지" 원칙 (CLAUDE.md 협업 원칙 명시)
+
+5. **§10 디바이스 디스커버리: nsd (v0.0.41+) 신설** (3 subsection):
+   - 10-1 라이브러리 결정 — multicast_dns ❌ → nsd ✅. 양방향 발견 안정성, iOS↔Android 호환성
+   - 10-2 stale 방 처리 (v0.0.42) — found/lost 즉시 반영
+   - 10-3 서비스 정보 — `_synchorus._tcp`, TCP 41235 + HTTP 41236, 권한 (Android Manifest + iOS Info.plist `NSBonjourServices`)
+
+6. **§11 측정·디버그 인프라 (v0.0.49~v0.0.52) 신설** (4 subsection):
+   - 11-1 출력 위치 — Android `getExternalStorageDirectory()` (멀티유저 95/ 가능), iOS `getApplicationDocumentsDirectory()` (`getExternalStorageDirectory()` UnsupportedError)
+   - 11-2 CSV 컬럼 — 기본 12개 + v0.0.52 진단 4개 (`out_lat_host_raw` 등)
+   - 11-3 분석 워크플로우 — adb pull + awk + spreadsheet (PoC와 달리 별도 Python 미사용)
+   - 11-4 진단 컬럼 정리 정책 — 목적 달성 후 제거(v0.0.52는 HIGH-2 측정 끝나면)
+
+7. **§3-3 헤더 "코드 미반영" 제거** — 옛: "핵심 기술 설계 (v3) — 폐루프 리아키텍처 (설계 단계, 코드 미반영)". 현재: "핵심 기술 설계 (v3) — 폐루프 리아키텍처" + 부제로 v0.0.13에서 step 1-1 도입 → v0.0.55까지 누적 보강 명시. v3가 이미 main에 있는데 "설계 단계"로 남아 있던 게 가장 오해 유발.
+
+**보존 (안 손댐)**: §1 전략, §2 엔진 선택, §3 audio_service 공존, §4-1~4-3 측정 인프라 설계, §5 Flutter↔네이티브 인터페이스, §9-1/9-2/9-4/9-5. 이미 v0.0.29까지 반영되어 있고 본 앱 동작과 차이 없음.
+
+**작성 형식**: 사용자 지시 "꼼꼼하게 다시 안 봐도 될 정도로". §4-4와 §4-5는 결정 + 도입 시점 + 실측 수치 + 코드 라인 참조 + 향후 작업 시 주의점까지 한 섹션에 응축. PoC `lib/main.dart` 헤더 주석을 1차 출처로 인용해 PoC↔본 앱 알고리즘 1:1 이식 사실 강조.
+
+**version bump 안 함**: 본 앱 코드 변경 0. 문서만.
+
+**검증**: `flutter analyze` 영향 없음. ARCHITECTURE.md 760줄 → 958줄(+198줄). markdown 표 형식 유지.
+
+**프로세스 개선** (DECISIONS와 동일): 작업 완료 시 ARCHITECTURE.md 갱신을 CLAUDE.md "작업 완료 후" 체크리스트로 더 엄격히. 이번 일괄 갱신으로 v0.0.55까지 부채 청산. 다음 알고리즘·로직 변경(예: SYNC_ALGORITHM_V2 작업)부터는 commit 직전 ARCHITECTURE 반영 확인 단계 필수.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
