@@ -3007,6 +3007,57 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (55) — PoC 폴더 정리·문서화 (3개 README 신설 + CLAUDE.md 진입점)
+
+**배경**: 사용자 "전체 코드중 정리할게 있어?" → "테스트는 불가능한데 작업할수있는게 또 뭐가있을까?" 흐름에서 PLAN.md "다음 세션 후보" + 즉흥 제안 4가지 검토. 1번(SYNC_ALGORITHM_V2 채우기)은 핵심이라 시간 필요로 보류. 2번(의존성 업데이트)은 시급도 낮아 PLAN.md MID-11로 메모만 추가. 4번(`room_lifecycle_coordinator` 리팩터)는 의도된 설계라 폐기. **3번 PoC 정리·문서화** 진행 — 사용자 지시 "이게 핵심 로직이니까 꼼꼼하게, 나중에 다시 안봐도될정도로".
+
+**현황 진단**:
+- `poc/native_audio_engine_android/README.md`, `poc/native_audio_engine_ios/README.md` 둘 다 `flutter create` 기본 boilerplate ("A new Flutter project") 17줄.
+- `poc/README.md` 없음 — PoC 두 개의 진입점·관계·격리 원칙 어디에도 명시 안 됨.
+- HISTORY.md 2026-04-08 ~ 2026-04-15에 PoC 진행·실측·이식 흔적이 산재 (Phase 0~6 + iOS Phase 0+1 + 본체 통합 step 1-1~1-4 + b0415-7 seekToFrame 파싱 버그 등).
+- `analysis/data/` 81개 CSV git tracked, `build/` 정상 ignore, `.gitignore` 존재.
+- 본 앱 `lib/services/native_audio_sync_service.dart` 와 PoC `lib/main.dart` 알고리즘 4단계 + 7개 파라미터 상수가 1:1 이식 상태.
+
+**작성 내역**:
+
+1. **`poc/native_audio_engine_android/README.md`** (≈250줄) 새로 작성 — 8개 섹션:
+   - 답한 질문 (PLAN.md §6-1 Q1/Q2/Q3 통과 표)
+   - Phase 0~6 단계별 결과 표 + Phase 4~5에서 발견·수정한 **버그 A~H 8개** 감사 기록 (HISTORY.md 본문에서 추출, 다시 안 봐도 되도록 재구성)
+   - 본 앱(Synchorus)으로의 이식 매핑 — 네이티브/Dart/알고리즘 3개 표
+   - 코드 구조 트리 (oboe_engine.cpp 292줄, NativeAudio.kt 28줄, lib/main.dart 1821줄, analysis/ 4개 스크립트)
+   - 측정 데이터 — CSV 5종 컬럼 스키마 + 주요 세션 인덱스 (Phase 2 60s, Phase 4 1~4차, Phase 5 5~11차, Phase 6 31분)
+   - 빌드·실행 — debug APK 빌드, install, 실측 절차, adb pull, Python 분석 스크립트 사용법
+   - 향후 PoC 사용 시나리오 (알고리즘 v2 격리 검증, 회귀 디버깅, 새 디바이스 baseline)
+   - 주의 사항 — 채널명·JNI 함수명 prefix 차이, version bump 예외
+
+2. **`poc/native_audio_engine_ios/README.md`** (≈140줄) 새로 작성 — Android와 중복 줄이고 **iOS 고유 차이만** 강조:
+   - Q1 Android 동등 정밀도 + 크로스플랫폼 30분 stress 99.6% + 역방향 100%
+   - Native 비교 표 (Oboe vs AVAudioEngine 7개 항목) — `lastRenderTime → DAC 시점` 보정 공식 명시
+   - **b0415-7 seekToFrame 파싱 버그** 별도 강조 (`call.arguments`를 `[String:Any]`로 파싱 → `NSNumber?.int64Value`로 수정. 본 앱 이식 시 동일 패턴 사용)
+   - 본 앱 이식 매핑 — `AVAudioSourceNode`(비프) → `AVAudioPlayerNode`+`AVAudioFile`(파일), 백그라운드 모드 추가
+   - 빌드·실행 — `flutter install` 미지원 → `flutter run` 또는 Xcode IDE 사용 (iOS 26.4.1 hung 이슈 PLAN.md LOW-14)
+   - 주의 — 양쪽 동시 반영, BT outputLatency underreported
+
+3. **`poc/README.md`** 신설 — 두 PoC 진입점 + 격리 원칙 + 본 앱 관계 + 향후 사용 시나리오. CLAUDE.md/PLAN.md/HISTORY.md에서 들어오는 단일 진입점.
+
+4. **`CLAUDE.md` 작업 시작 전 섹션에 한 줄 추가**:
+   ```
+   - PoC (네이티브 엔진 격리 프로젝트): [poc/README.md](poc/README.md) — 격리 사유, 본 앱과 매핑, 재실행 방법
+   ```
+
+5. **`PLAN.md`에 의존성 업데이트 메모 추가** — MID-11. `flutter pub outdated` 결과 정리: A 그룹 즉시(connectivity_plus/path_provider_android 등 patch) + B 그룹 메이저(audio_session 0.1→0.2, just_audio 0.9→0.10, flutter_riverpod 2→3, file_picker 8→11 등 7개) 위험·이득 검토 후 패키지별 단독 commit. 진행은 실기기 회귀 테스트 가능한 세션.
+
+**보존 (정리 안 함)**:
+- `analysis/data/` 81개 CSV — Phase 2~6 모든 측정 결과. 분석 스크립트 입력이고 알고리즘 회귀 검증 시 재실행 가능. 삭제 금지.
+- `analysis/` Python 스크립트 3개 — 오프라인 분석에 필수. (Phase 3 결정 과정 반영: 온디바이스 EMA 단순, 정교한 알고리즘은 Python으로)
+- PoC `lib/main.dart` 1800줄대 — 알고리즘 본체. 본 앱과 파라미터 상수 1:1 매핑이라 정리하면 ablation 비교 불가.
+
+**version bump 안 함**: 본 앱 코드 변경 0 (CLAUDE.md "PoC는 version bump 예외" + lint/포맷 제외 규칙). 문서만 추가됐고 빌드 영향 없음.
+
+**검증**: `flutter analyze` 변경 없음 (애초에 lib/ 변경 없음). PoC 자체 빌드는 사용자 실기기 테스트 불가 환경이라 보류.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

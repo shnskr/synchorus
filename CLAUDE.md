@@ -16,6 +16,7 @@
 - 구현 계획·PoC 플랜·다음 세션 후보: [docs/PLAN.md](docs/PLAN.md)
 - 라이프사이클·용어: [docs/LIFECYCLE.md](docs/LIFECYCLE.md)
 - 알고리즘 v2 디자인 (작업 시): [docs/SYNC_ALGORITHM_V2.md](docs/SYNC_ALGORITHM_V2.md)
+- PoC (네이티브 엔진 격리 프로젝트): [poc/README.md](poc/README.md) — 격리 사유, 본 앱과 매핑, 재실행 방법
 
 ## 작업 완료 후
 - 일자별 작업·버그·PoC 로그 → `HISTORY.md` (날짜 오름차순, 새 항목은 "미해결 이슈" 바로 위에 추가)

@@ -131,6 +131,14 @@
 
 10. **iOS host 환경 검증** — Mac 환경 필요.
 
+11. **의존성 업데이트 검토** (출시 전 필수, 시급도 낮음). `flutter pub outdated` 기준 메이저 업그레이드 7개:
+    - 안전 (즉시): `connectivity_plus` 7.1.0→7.1.1, `path_provider_android` 2.2.23→2.3.1, `vm_service`/`hooks`/`sqflite`/`synchronized` patch — `flutter pub upgrade` 한 번
+    - 메이저 (위험·이득 검토 후 패키지별 단독 commit):
+      - LOW: `device_info_plus` 12→13, `package_info_plus` 9→10
+      - MID: `audio_session` 0.1→0.2, `network_info_plus` 6→8, `file_picker` 8→11
+      - HIGH: `just_audio` 0.9→0.10 (v3 NativeAudioEngine 도입 후 의존도 낮아졌으나 디코딩 경로 잔존 grep 필요), `flutter_riverpod` 2→3 (Notifier/Provider API 변경 큼)
+    - 진행 시점: 실기기 회귀 테스트 가능한 세션. 메이저 업그레이드는 한 번에 하나씩.
+
 ### LOW
 
 11. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — connectivity_plus 즉시 반응으로 우회됨. AP 이동 or 다른 AP 시나리오에서만 캡처 가능. 코드 변경 0, 실기기 2대 + 2개 AP.
