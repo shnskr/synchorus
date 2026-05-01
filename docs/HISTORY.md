@@ -3058,6 +3058,45 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (56) — DECISIONS.md 누락 결정 일괄 추가 (v0.0.24~v0.0.55, 13개)
+
+**배경**: 사용자 "다음 뭐하면돼?" → DECISIONS.md 갱신 추천 → "매번 문서 럽데이트 안됐었나?" 질문에 git log 확인. `docs/DECISIONS.md` 마지막 commit이 `eaa4700` (v0.0.23 즈음 "Isolate 분리 + 파일 전송 대역폭 개선 후보 기록")이고 이후 **v0.0.24~v0.0.55 약 30개 버전 동안 갱신 0건**. CLAUDE.md "작업 완료 후 — 새 설계 결정 → DECISIONS.md (표에 한 줄 추가)" 규칙이 안 지켜진 거로 확인. HISTORY는 매번 추가됐으나 DECISIONS만 누락.
+
+**작성**: HISTORY.md (16)~(55) + LIFECYCLE.md + 코드 주석을 근거로 "결정으로서 의미 있는" 항목만 13개 추출해 v3 표 상단에 누적(시점 역순). 단순 fix·롤백·버그 수정은 HISTORY가 이미 충분하므로 표에 안 넣음.
+
+**추가된 결정 13개** (시점 역순):
+
+| # | 시점 | 결정 |
+|---|---|---|
+| 1 | v0.0.53 | anchor establishment 단일 진입 — `_tryEstablishAnchor`의 seekToFrame + `_seekCorrectionAccum +=` 블록 1번만. 중복 호출 시 `_anchorGuestFrame`이 의도보다 앞에 박혀 vfDiff 잔재 |
+| 2 | v0.0.32 + v0.0.54 | 1:N 멀티 게스트 전제 — name AND ip 동시 매칭, 디바이스 닉네임 `<model>#<hex>`, peer broadcast에 절대 peerCount 동봉 |
+| 3 | v0.0.38 | BT outputLatency 비대칭 anchor 베이크인 (`_anchoredOutLatDeltaMs`) |
+| 4 | v0.0.48 | NTP 정공법 보류, 청감 우선 — 13번 시도 후 v0.0.45 baseline 회복. 재도입은 SYNC_ALGORITHM_V2 디자인 합의 후 단일 commit |
+| 5 | v0.0.41 | 디바이스 발견은 nsd (multicast_dns 폐기) |
+| 6 | v0.0.33 | engineLatency 수치 폐기 — `com.synchorus/audio_latency` MethodChannel 양 플랫폼 제거 |
+| 7 | v0.0.34 + v0.0.35 | 재연결 race 다층 방어 — `identical(_hostSocket, socket)` onDone 가드 + `_reconnectInProgress` flag |
+| 8 | v0.0.31 | StreamController add 전 isClosed 가드 |
+| 9 | v0.0.29 | `RoomLifecycleCoordinator` 클래스 추출 — UI에서 라이프사이클 320줄 분리 |
+| 10 | v0.0.30 | errno 분기는 Linux+Darwin 집합 — `_refusedErrnos={111,61}`, `_networkUnreachableErrnos={113,101,65,51}` |
+| 11 | v0.0.28 | connectivity_plus + errno 이중 안전망 |
+| 12 | v0.0.27 | Socket connect timeout 5→2초 + errno=111 2회 연속 빠른 포기 |
+| 13 | v0.0.26 | 호스트 detached에서 host-closed best-effort broadcast — Android 한정, 재생 중 강제 종료 1.4초 복구 |
+| 14 | v0.0.25 | 호스트 라이프사이클 프로토콜 — host-paused/resumed/closed 메시지, 자리비움 배너, 12회 watchdog |
+
+(표 14줄이지만 #2와 #7은 두 버전 결정을 한 항목으로 묶어 등록 → 실 항목 13개)
+
+**작성 형식**: 각 항목의 "이유" 컬럼은 사용자 지시(이전 PoC 작업) "다시 안 봐도 될 정도로 꼼꼼하게"를 따라 결정 + 도입 배경 + 실측 수치 + 향후 작업 시 주의점까지 한 셀에 넣음. 표 한 셀이 5~10줄까지 길어졌지만 의도적. DECISIONS.md는 자주 안 보는 ADR(Architecture Decision Record)이라 진입 시 모든 컨텍스트가 한 줄에 있어야 가치.
+
+**보존 (안 추가)**: v0.0.36~v0.0.37(streak 진단 로그 추가), v0.0.39(iOS 파일 선택 크래시 fix), v0.0.42(mDNS stale fix — v0.0.41과 한 묶음으로 nsd 결정에 포함), v0.0.43(iPhone 호스트 cooldown 분리), v0.0.44(prewarm) + v0.0.45(롤백), v0.0.46(oboe pause/resume) + v0.0.47(NTP) + v0.0.48(롤백 + 정공법 보류 결정 — #4로 묶음), v0.0.49~v0.0.50(측정 인프라), v0.0.51(syncSeek debounce 시도 후 롤백), v0.0.52(진단 컬럼). 모두 fix/실험/측정이라 ADR 표 의미 적음. HISTORY가 충분.
+
+**프로세스 개선 메모**: 앞으로 작업 완료 시 CLAUDE.md "작업 완료 후" 체크리스트 더 엄격히 — DECISIONS.md 갱신을 commit 전 확인 단계로 들이기. 이번 일괄 추가로 누적 부채는 청산.
+
+**version bump 안 함**: 본 앱 코드 변경 0. 문서만 추가.
+
+**검증**: 표 형식 markdown lint pass. flutter analyze 영향 없음.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

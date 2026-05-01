@@ -4,8 +4,24 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 
 ## v3 설계 결정
 
+신규 결정은 표 상단에 누적. 시점은 결정 컬럼 끝 (vX.X.X)로 표기 — 같은 영역에 후속 결정이 더 들어왔으면 같이 묶음.
+
 | 결정 | 이유 |
 |---|---|
+| anchor establishment 단일 진입 (v0.0.53) | `_tryEstablishAnchor`의 `seekToFrame(targetGuestVf)` + `_seekCorrectionAccum += initialCorrection` 블록은 1번만 호출. v0.0.48 롤백 시 v0.0.45 회복 코드 + v0.0.46 이후 코드가 합쳐지며 중복 발생 → `seekToFrame`은 idempotent라 위치는 같지만 accum이 두 배로 누적 → `_anchorGuestFrame`이 의도(`targetGuestVf`)보다 `+initialCorrection` 앞에 박힘 → vfDiff 베이크인 잔재(-3.6ms 등). 향후 anchor 로직 수정 시 **진입점 1개 원칙** 유지 |
+| 1:N 멀티 게스트 전제 (v0.0.32, v0.0.54) | 같은 이름 peer가 다수 존재 가능. p2p 로직 작성 시 1:1 가정 금지. 호스트 stale peer 정리는 `name AND ip` 동시 매칭(LAN P2P는 NAT 없어 ip가 디바이스 유일 식별), 게스트 닉네임은 `<device model>#<hex 4자리>`(같은 모델 2대 이상 충돌 방지, `device_info_plus`). peer-joined/left broadcast는 절대 peerCount 동봉(메시지 누락 시 증감 drift 누적 방지). v0.0.32 도입 → v0.0.54 다중 게스트 입장 불가 버그 fix로 확장 |
+| BT outputLatency 비대칭 anchor 베이크인 (v0.0.38) | 게스트와 호스트의 `outputLatency` 차이(BT 환경 ±50ms 가능)를 anchor 시 콘텐츠 정렬 seek에 베이크인 → framePos 기준 drift = 0으로 시작. 이후 `_recomputeDrift`는 (현재 outLatDelta − 앵커 outLatDelta) 변화분만 보정. `_anchoredOutLatDeltaMs` 필드. v3 폐루프 BT 안정성 핵심 |
+| NTP 정공법 보류, 청감 우선 (v0.0.48) | v0.0.46(oboe pause/resume) + v0.0.47(NTP 예약 재생) + v0.0.49~v0.0.61 총 13번 시도 모두 청감 v0.0.45 baseline 미달 → main을 v0.0.48로 reset. 정공법 재도입은 `docs/SYNC_ALGORITHM_V2.md` 디자인 문서 합의 후 **단일 commit** 원칙(sequence number + race 제거 + outputLatency 자동 보정 통합). 즉흥 시도 금지 |
+| 디바이스 발견은 nsd 라이브러리 (v0.0.41) | `multicast_dns` 폐기. 양방향 발견(호스트 자기 광고 + 게스트 호스트 발견 동시) 안정성 문제. iOS↔Android 호환성도 nsd 우수. mDNS stale 방 처리는 v0.0.42에서 found/lost 즉시 반영으로 fix |
+| engineLatency 수치 폐기 (v0.0.33) | v3 `NativeAudioSyncService` + framePos 기반 폐루프에서 엔진 latency는 `oboe::getTimestamp()` / `AVAudioTime` 반환값에 이미 내포. 별도 보정값이 코드에 존재하지 않음. v2 잔재 `com.synchorus/audio_latency` MethodChannel을 양 플랫폼에서 제거 (Dart 호출 0건이었음). 새로 도입할 일 있어도 v3 폐루프와 별개 디버그용으로만 |
+| 재연결 race 다층 방어 (v0.0.34 + v0.0.35) | onDisconnected(TCP) + connectivity_plus(WiFi) 두 경로가 거의 동시 발화 가능. v0.0.34 `if (!identical(_hostSocket, socket)) return;` onDone 가드(old socket의 onDone이 새 socket을 destroy하는 무한 loop 차단) + v0.0.35 `_reconnectInProgress` flag(`_handleDisconnected`/`_waitForWifiAndReconnect` 진입부 가드 — race 자체 예방). 두 층 동시 유지 — race 예방 실패해도 loop 차단이 받아줌 |
+| StreamController add 전 isClosed 가드 (v0.0.31) | `dispose()`가 controller close 후 socket.onDone이 비동기로 늦게 도달 → 이미 close된 `_disconnectedController.add(null)` → `Bad state: Cannot add new events after calling close`. 모든 add 호출 위치에 `if (!_xxxController.isClosed) ...` 가드 필수 |
+| `RoomLifecycleCoordinator` 클래스 추출 (v0.0.29) | `room_screen.dart`(830줄)에서 라이프사이클·재접속 watchdog·errno 분기·WiFi 처리·sync 트리거 분리 → `lib/services/room_lifecycle_coordinator.dart`(약 320줄). UI는 `ValueListenableBuilder<bool>(hostAway/hostClosed)` + 콜백 4개(`onLeaveRequested`, `onReconnectSyncRequested`, `onLog`, `onSnackbar`). 향후 라이프사이클 변경 시 한 파일만 수정. 추출 시 `mounted` 대신 `_disposed`/`_leaving` 자체 플래그로 가드 |
+| errno 분기는 Linux+Darwin 집합 (v0.0.30) | POSIX errno 같은 의미라도 OS별 번호 다름. `ECONNREFUSED` Linux=111 Darwin=61, `EHOSTUNREACH` 113/65, `ENETUNREACH` 101/51. **단일값 하드코딩 금지** (v0.0.27이 Linux 111만 박아 iOS에서 fast giveup 동작 안 함 → v0.0.30 fix). 정의 위치: `room_lifecycle_coordinator._refusedErrnos = {111, 61}` / `_networkUnreachableErrnos = {113, 101, 65, 51}` |
+| connectivity_plus + errno 이중 안전망 (v0.0.28) | iOS `connectivity_plus.onConnectivityChanged`가 200ms~수초 지연되거나 (제어센터 WiFi 토글 같은 일시 비활성화에서) 미발화. errno=113/101 잡히면 즉시 `Connectivity().checkConnectivity()` 확인 → WiFi 끊김이면 `_waitForWifiAndReconnect()` 조기 트리거. 기존 connectivity 이벤트 경로는 그대로 유지 (이중 안전망) |
+| Socket connect timeout 5→2초 + errno=111 2회 연속 빠른 포기 (v0.0.27) | LAN 정상 connect는 수십 ms. 5초는 호스트 죽음 판정만 늦춤. 재생 전 호스트 강제 종료 시(detached 미도달) 60s+ watchdog → **~10초**로 단축. 카운터는 다른 errno(110/104/101)에선 reset(호스트 paused/일시 단절 같이 복구 가능 케이스 보호) |
+| 호스트 detached에서 host-closed best-effort broadcast (v0.0.26) | Android foreground service가 detached 이벤트까지 Dart에 전달 → `broadcastHostClosedBestEffort()` (await 없이 broadcast + flush만). 재생 중 강제 종료 시 watchdog 2분 → **1.4초** 복구(실측 S22+A7 Lite). iOS 앱 스위처 종료는 detached 미도달 — 기존 watchdog가 fallback. 재생 전 종료(foreground service 없음)도 도달 확률 낮음 — watchdog 유지 |
+| 호스트 라이프사이클 프로토콜 (v0.0.25) | 무한 재시도가 아닌 **명시적 종료 신호**. 메시지 3종 `host-paused`/`host-resumed`/`host-closed`. 게스트 측 자리비움 배너 + 5초 주기 재접속 watchdog (12회 ~2분 후 leave). 호스트 `AppLifecycleState.paused`가 실제 TCP abort보다 약 5초 먼저 도달 사실에 의존(실측). T1~T4 시나리오 5~10초 복구. 사용자 체감 "잠깐 뒤로 가기만 했는데 방 터짐" 해소 |
 | v2 AudioSyncService 교체 (병행 X) | just_audio에 깊이 결합(780줄), 병행은 P2P/HTTP/파일 로직 중복, PoC 30분 ±20ms 검증으로 fallback 불필요 |
 | SyncService in-place 업그레이드 (교체 X) | clock sync는 v2에서도 별도 서비스, v3 알고리즘은 상위 호환 (EMA 추가) |
 | 게스트 파일 다운로드: dart:io HttpClient | 네이티브 엔진은 로컬 파일 경로 필요, http/dio 패키지 불필요, 새 의존성 없음 |
