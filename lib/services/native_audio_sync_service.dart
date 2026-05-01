@@ -75,8 +75,6 @@ class NativeAudioSyncService {
   double _anchoredOutLatDeltaMs = 0;
   // 최신 drift
   double? _latestDriftMs;
-  // ignore: unused_field
-  int _driftSampleCount = 0;
   // v0.0.24: 최근 drift 샘플 윈도우 (중앙값 기반 seek 판단용)
   final List<double> _driftSamples = [];
   // 누적 seek 보정 (HAL framePos는 seek 영향 없음 → accum으로 복원)
@@ -405,14 +403,7 @@ class NativeAudioSyncService {
     _engine.startPolling();
     _startTimestampWatch();
 
-    // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서
-    if (_currentDuration == null) {
-      final ts = await _engine.getTimestamp();
-      if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
-        _currentDuration = _calcDuration(ts.totalFrames, ts.sampleRate.toDouble());
-        _durationController.add(_currentDuration);
-      }
-    }
+    await _resolveDurationFromTimestampIfNeeded();
     // v0.0.44 prewarm 호출 제거 (v0.0.45 롤백): prewarm으로 호스트·게스트 양쪽
     // framePos가 hardware sample 누적값으로 어긋나 anchor establishment 식이 깨짐
     // → 곡 전체에 걸쳐 ±5~7ms 게스트 앞섬 회귀. v0.0.43 baseline 회복.
@@ -828,13 +819,8 @@ class NativeAudioSyncService {
       _engine.startPolling();
       _startTimestampWatch();
 
-      // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서
-      if (_currentDuration == null && _downloadSessionId == mySession) {
-        final ts = await _engine.getTimestamp();
-        if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
-          _currentDuration = _calcDuration(ts.totalFrames, ts.sampleRate.toDouble());
-          _durationController.add(_currentDuration);
-        }
+      if (_downloadSessionId == mySession) {
+        await _resolveDurationFromTimestampIfNeeded();
       }
 
       // 호스트가 재생 중이면 엔진 시작
@@ -1084,7 +1070,6 @@ class NativeAudioSyncService {
     _anchoredOutLatDeltaMs = 0;
     _fallbackAlignCooldownMs = 0;
     _latestDriftMs = null;
-    _driftSampleCount = 0;
     _driftSamples.clear();
   }
 
@@ -1364,7 +1349,6 @@ class NativeAudioSyncService {
     final vfDiffMs = guestVfMs - expectedHostVfMs - currentOutLatDelta;
 
     _latestDriftMs = driftMs;
-    _driftSampleCount++;
 
     // v0.0.24: 최근 N개 샘플 윈도우에 push (중앙값으로 seek 판단)
     _driftSamples.add(driftMs);
@@ -1534,6 +1518,16 @@ class NativeAudioSyncService {
     final rate = lr.sampleRate;
     if (frames != null && frames > 0 && rate != null && rate > 0) {
       _currentDuration = _calcDuration(frames, rate);
+      _durationController.add(_currentDuration);
+    }
+  }
+
+  // Android fallback: loadFile이 totalFrames를 안 줬으면 getTimestamp에서 복원.
+  Future<void> _resolveDurationFromTimestampIfNeeded() async {
+    if (_currentDuration != null) return;
+    final ts = await _engine.getTimestamp();
+    if (ts != null && ts.sampleRate > 0 && ts.totalFrames > 0) {
+      _currentDuration = _calcDuration(ts.totalFrames, ts.sampleRate.toDouble());
       _durationController.add(_currentDuration);
     }
   }

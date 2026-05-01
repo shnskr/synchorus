@@ -2983,6 +2983,30 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (54) — v0.0.55 안전한 코드 정리 (lint 외 dead code 1개 + 중복 패턴 1개)
+
+**배경**: 사용자 "전체 코드중 코드정리할게 있어?" — flutter analyze는 No issues. lint에 안 잡히는 정리 후보를 Explore agent로 스캔. 의도적 롤백 주석(v0.0.45/47/48)·`unused_element` ignore(`_scheduleFromObs` NTP 재도입 대비)·v0.0.52 진단 컬럼은 모두 보존 대상으로 분류. 회귀 위험 0인 항목만 두 개 처리:
+
+**수정 1 — `_driftSampleCount` 미사용 필드 제거** (`native_audio_sync_service.dart:78,1086,1366`):
+- `// ignore: unused_field` 주석으로 lint 회피하고 있던 dead 필드. 읽는 코드 0건, 쓰기만 3군데(선언/리셋/증가). 진단용으로 도입했으나 더 이상 활용 없음.
+- 필드 선언 + reset 1줄 + 증가 1줄 모두 제거.
+
+**수정 2 — duration fallback 패턴 헬퍼 추출** (`native_audio_sync_service.dart`):
+- 호스트(loadFile after) + 게스트(download+loadFile after) 두 곳에 동일한 6줄 패턴 (`_currentDuration == null` → `_engine.getTimestamp()` → `_calcDuration` → `_durationController.add`).
+- `_resolveDurationFromTimestampIfNeeded()` 헬퍼로 추출. 게스트 측은 `_downloadSessionId == mySession` 가드를 호출 측에 유지(stale 다운로드에서 duration 갱신 차단 의도 보존).
+- 동작 변경 없음. 라인 ~7줄 절감.
+
+**보존 (정리 안 함)**:
+- v0.0.45/47/48 롤백 주석들(`native_audio_sync_service.dart:25-32, 416-417, 491, 1033, 1189` 등) — 이력 추적·재실수 방지. CLAUDE.md "되돌리지 말 것" 규칙.
+- `_scheduleFromObs()` (`unused_element`, ~921줄) — NTP 재도입 시 재활용 명시.
+- v0.0.52 진단 컬럼 (`out_lat_*` 4개, `sync_measurement_logger.dart`) — HIGH-2 (v0.0.53 fix 효과 검증) 측정 끝난 뒤 정리 권장.
+- `sync_measurement_logger.dart:26-28` iOS 비대칭 — `getExternalStorageDirectory()` UnsupportedError 회피, 의도적.
+- `native_audio_sync_service.dart` 1562줄 분할 — SYNC_ALGORITHM_V2 작업 진입 시 host/guest 자연 분리가 더 깔끔.
+
+**검증**: `flutter analyze` No issues. 동작 검증은 다음 세션 HIGH-2 측정과 함께 (idle 3분 csv).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
