@@ -228,10 +228,22 @@ class P2PService {
 
       // 재접속 케이스: peer.id는 "ip:port"라 게스트가 새 socket으로 오면 다른 ID로
       // 보인다. 같은 이름의 stale peer들이 heartbeat timeout(15초) 전까지 남아 카운트
-      // 누적을 일으키는 문제 방지. 이름 기반으로 먼저 정리 후 새 peer 등록.
-      final stalePeers = _peers.where((p) => p.name == peerName).toList();
+      // 누적을 일으키는 문제 방지. 단 v0.0.32에서 이름만 비교했더니 1:N 환경에서
+      // 다른 디바이스(같은 'Guest' 이름)를 stale로 오인해 무한 ping-pong → 호스트+1명만
+      // 유지되는 회귀 발생(HISTORY (51)). LAN P2P는 NAT가 없어 IP가 디바이스를 유일하게
+      // 식별하므로 name + remoteAddress 둘 다 일치할 때만 진짜 같은 디바이스의 재접속으로
+      // 간주. (v0.0.54)
+      final newRemoteIp = socket.remoteAddress.address;
+      final stalePeers = _peers.where((p) {
+        if (p.name != peerName) return false;
+        try {
+          return p.socket.remoteAddress.address == newRemoteIp;
+        } catch (_) {
+          return false;
+        }
+      }).toList();
       for (final stale in stalePeers) {
-        debugPrint('[P2P] stale peer 정리 (name=$peerName): ${stale.id}');
+        debugPrint('[P2P] stale peer 정리 (name=$peerName, ip=$newRemoteIp): ${stale.id}');
         try { stale.socket.destroy(); } catch (_) {}
         _peers.remove(stale);
         _peerLeaveController.add(stale.id);

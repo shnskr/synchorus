@@ -2932,6 +2932,31 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (52) — v0.0.54 게스트 3명 입장 불가 fix (A+B 동시 적용)
+
+(51)의 fix를 권장안인 A+B 동시 적용으로 진행.
+
+**변경 1 — `lib/screens/home_screen.dart` (A안: 디바이스명 발급)**:
+- `device_info_plus: ^12.4.0` 의존성 추가.
+- `_resolveDeviceName()` 헬퍼 도입: Android는 `AndroidDeviceInfo.model` (예 `SM-S908N`), iOS는 `IosDeviceInfo.name` (사용자 설정명, 예 `홍길동의 iPhone`). 24자로 truncate 후 `microsecondsSinceEpoch & 0xFFFF`로 4자리 hex 접미사 추가 → `Galaxy S22#a3f9`, `홍길동의 iPhone#9c12` 형태. 같은 모델 디바이스 2대 이상 환경에서도 충돌 방지.
+- `_joinRoom`의 `'Guest'` 하드코딩 제거 → `await _resolveDeviceName()` 결과로 join.
+
+**변경 2 — `lib/services/p2p_service.dart:232` (B안: stale 비교 강화)**:
+- v0.0.32의 `_peers.where((p) => p.name == peerName)` → `name == peerName && socket.remoteAddress.address == newRemoteIp`로 강화.
+- LAN P2P는 NAT가 없어 IP가 디바이스를 유일 식별 → 같은 이름 + 같은 IP일 때만 진짜 같은 디바이스의 재접속으로 간주, stale 정리 발동.
+- A안과 무관하게 이중 안전: A안이 깨져도 (예: 사용자가 직접 디바이스명 같게 강제) B안이 막음.
+
+**왜 v0.0.32가 깨졌는지 정리**: commit `a8da7a4` (2026-04-24) 본문에 "같은 name의 stale peer 모두 정리"라 적혀 있어 의도는 분명히 1:1 재접속 cleanup이었음. 그런데 이미 그 시점 `home_screen.dart:136`에 `'Guest'` 하드코딩이 있었고 (1:N 멀티 게스트가 모두 같은 이름이라는 사실), 이를 fix 작성 시점에 검토 안 함. CLAUDE.md "Step 2 멀티 게스트: 1:N 동작" 명시도 있었는데도 시야가 1:1 회귀에만 좁혀졌음. 책임 — Claude (commit Co-Authored-By 표기됨).
+
+**검증 (다음 세션 — 갤럭시 3대 이상 또는 같은 모델 2대 환경 필요)**:
+1. 갤럭시 3대(S22 호스트 + 다른 갤럭시 2대 게스트) 같은 방 입장 → 호스트 측 peer count 3 유지
+2. 한 게스트 비행기 모드 on/off → 재접속 후 peer count 정상 (3 유지) — v0.0.32 의도 회귀 없음 확인
+3. `[P2P] stale peer 정리 (name=..., ip=...)` 로그가 비행기 모드 케이스에서만 발동하는지 확인 (정상 join 시 발동하면 B안 깨진 것)
+
+**의존성**: `device_info_plus ^12.4.0` 추가. iOS `Info.plist` / Android `AndroidManifest.xml` 권한 추가 불필요 (model/name 모두 권한 free). 회귀 위험 거의 0.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -2951,7 +2976,7 @@ C. **A + B 동시 적용 (권장)**
 - [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **HIGH priority**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **v0.0.46 oboe pause/resume + v0.0.47 NTP 예약 재생 둘 다 시도, v0.0.48에서 롤백 (HISTORY (43))**. 정공법 NTP는 다음 세션 정밀 작업 (sequence number + race 제거 + outputLatency 자동 보정)으로 재도입.
 - [ ] **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (2026-04-26 (43) 신규, mid priority). `flutter run --device-id <iPhone>` USB로 실행 시 "Installing and launching..." 단계에서 1~3분 hung. iPhone 잠금/신뢰 다이얼로그 OK인데도 발생. iOS 26 + Xcode toolchain 호환 이슈 추정. 다음 세션엔 **IntelliJ Run** 또는 **Xcode IDE에서 직접 Run** 권장 (CLI flutter run 대신).
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
-- [ ] **게스트 3명 입장 불가 (이름 충돌 핑퐁)** (2026-04-29 (51) 신규, **HIGH priority**). 모든 게스트가 `name='Guest'` 하드코딩(`home_screen.dart:136`)으로 join하면서 v0.0.32 stale peer 정리 로직(`p2p_service.dart:232`)이 같은 이름 기존 peer를 강제 destroy → 갤럭시 3대 입장 시 호스트+1명만 유지되고 무한 핑퐁. 다음 세션 fix 옵션: A) 디바이스명 기반 고유 이름 (`device_info_plus`) + B) stale 비교를 이름 AND IP로 강화. 권장: A+B 동시. 상세: HISTORY (51).
+- [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52)에서 A+B 동시 fix 완료** (`device_info_plus`로 디바이스명 발급 + stale 비교를 name AND ip로 강화). 실측 검증은 갤럭시 3대 또는 같은 모델 2대 환경 필요 (현재 보유 디바이스는 모델 다 달라서 A안만으로도 통과해버림 → 진짜 검증은 같은 모델 2대 이상으로).
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

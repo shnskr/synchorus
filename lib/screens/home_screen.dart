@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:io';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
@@ -38,6 +39,29 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     if (mounted) {
       setState(() => _versionLabel = 'v${info.version}');
     }
+  }
+
+  /// 게스트 join 시 사용할 디바이스 이름.
+  /// Android: model (예 "SM-S908N"), iOS: 사용자 설정명 (예 "홍길동의 iPhone").
+  /// 끝에 4자리 hex 접미사를 붙여 같은 모델 2대 이상 충돌까지 방지.
+  Future<String> _resolveDeviceName() async {
+    String base = 'Guest';
+    try {
+      final plugin = DeviceInfoPlugin();
+      if (Platform.isAndroid) {
+        final info = await plugin.androidInfo;
+        base = info.model;
+      } else if (Platform.isIOS) {
+        final info = await plugin.iosInfo;
+        base = info.name;
+      }
+    } catch (_) {}
+    if (base.isEmpty) base = 'Guest';
+    if (base.length > 24) base = base.substring(0, 24);
+    final suffix = (DateTime.now().microsecondsSinceEpoch & 0xFFFF)
+        .toRadixString(16)
+        .padLeft(4, '0');
+    return '$base#$suffix';
   }
 
   @override
@@ -133,7 +157,12 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           .firstWhere((m) => m['type'] == 'welcome')
           .timeout(const Duration(seconds: 5));
 
-      await p2p.connectToHost(host.ip, host.port, 'Guest');
+      // 1:N 멀티 게스트 환경에서 모두 같은 이름으로 join하면 호스트 측 stale
+      // peer 정리(p2p_service.dart `_handleNewPeer`)가 다른 디바이스를 stale로
+      // 오인해 무한 ping-pong을 일으킨다. 디바이스 모델명 + 4자리 hex 접미사로
+      // 같은 모델 충돌까지 방지. (v0.0.54, HISTORY (51))
+      final guestName = await _resolveDeviceName();
+      await p2p.connectToHost(host.ip, host.port, guestName);
 
       int peerCount = 1;
       try {
