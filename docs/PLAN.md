@@ -92,6 +92,59 @@
 | 5 | UI 폴리싱 | |
 
 각 단계 후 회귀 테스트.
+
+## 다음 세션 작업 후보 (우선순위)
+
+매 세션 시작 시 이 리스트로 진입점 결정. 완료된 항목은 체크해서 위로 통과. 새 항목은 우선순위에 끼워 넣기.
+
+세션 마감 시 "지금까지 한 것"은 [HISTORY.md](HISTORY.md)에 기록, 이 리스트는 **앞으로 할 것**만.
+
+### HIGH
+
+1. **v0.0.54 다중 게스트 fix 실측 검증** — 같은 모델 갤럭시 2대 이상 환경에서 peer count 3 유지 + 비행기 모드 on/off 후에도 유지 확인. 현재 보유 디바이스(S22 + iPhone 12 Pro + Tab A7 Lite)는 모델 다 달라 A안만으로도 통과 → 진짜 검증은 같은 모델 2대 이상 필요. 상세: HISTORY (52).
+
+2. **v0.0.53 anchor fix 효과 검증 측정** — `_seekCorrectionAccum` 중복 호출 fix 후 vfDiff 잔재 감소 확인. HISTORY (50) "다음 세션 시작 시 측정 가이드" 표 빈칸 채우기. v0.0.53 빌드 완료, install만 진행:
+   ```bash
+   flutter install --debug --device-id R3CT60D20XE      # S22
+   flutter install --debug --device-id R9PW315GL0L      # Tab A7 Lite
+   # idle 3분 측정 → csv pull → 분석
+   awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf "vfDiff signed=%.2f anchored=%.2f current=%.2f diff=%.2f\n", sumv/n, sla/n, slc/n, (sla-slc)/n}' <csv>
+   ```
+   - vfDiff signed |값| < 3.60ms (v0.0.52 baseline) → fix 효과 있음
+   - 비슷하면 → 다른 root cause 추가 진단
+
+3. **첫 재생 정착 시간 — BT 무관 (HISTORY (39))**. 모든 시나리오에서 첫 재생 직후 ~수 초 어긋남. 원인 — 게스트 `engine.start()` 자체 지연(iOS 100~500ms) + 첫 anchor establish 전 fallback alignment 정밀도 + clock sync 수렴 시간. RTT 자체는 보정됨. 옵션: (1) NTP-style 예약 재생, (2) 게스트 사전 워밍업, (3) 첫 anchor 가속(회귀 위험). 가성비 2번, 효과 1번.
+
+4. **anchor reset 후 fallback 단계 큰 drift edge case (HISTORY (42))**. Android 게스트 한정 stream open latency가 외삽에서 누락 → drift 최대 -634ms. v0.0.46 oboe pause/resume + v0.0.47 NTP 둘 다 시도, v0.0.48에서 롤백. 정공법은 [SYNC_ALGORITHM_V2.md](SYNC_ALGORITHM_V2.md) 디자인 문서 작성 후 단일 commit 구현.
+
+### MID
+
+5. **HISTORY (45) -20.84ms 잔재 자연 재현 시 root cause 분해** — v0.0.53 진단 컬럼 활성 상태로 다양 환경(BT 게스트, 다른 시간대 등) 측정. 큰 잔재 발생 시 `out_lat_*` 컬럼으로 직접 분해.
+
+6. **EMA 단독 cherry-pick (B-1) 검토** — `backup-v0.0.61-session` 에서 EMA 부분만. 항목 2 결과로 anchor 중복 호출 fix가 부족하면 진행. anchor reset 시 outputLatency EMA 보존 → 점진 수렴.
+
+7. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 4분만).
+
+8. **BT 워밍업 잔여 개선 (HISTORY (33-2), (37))**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴. Galaxy+버즈는 ~2초로 양호 (Samsung HAL 정확 보고 추정). iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) 시도.
+
+9. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기** (HISTORY (30) → v0.0.36 → v0.0.37). 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류.
+
+10. **iOS host 환경 검증** — Mac 환경 필요.
+
+### LOW
+
+11. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — connectivity_plus 즉시 반응으로 우회됨. AP 이동 or 다른 AP 시나리오에서만 캡처 가능. 코드 변경 0, 실기기 2대 + 2개 AP.
+
+12. **HISTORY (47) Tab A7 Lite 호스트 framePos 비대칭** — D-1 시도 회귀 후 보류. 호스트 측 정규화 또는 다른 방향.
+
+13. **acoustic loopback 외부 측정** (선택, 항목 8 검증에서 잔여 100ms+ 시 우선순위 ↑) — OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 round-trip 측정. AOSP CTS 표준 방식.
+
+14. **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (HISTORY (43)). `flutter run --device-id <iPhone>` USB 1~3분 hung. IntelliJ Run 또는 Xcode IDE 권장.
+
+15. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관.
+
+16. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 다듬기.
+
 ## 화면 구성
 
 ### 홈 화면 (HomeScreen)
