@@ -158,7 +158,7 @@
 |:---:|------|------|
 | 1 | `p2p.startHost()` | TCP 서버를 41235 포트에 바인딩. 게스트의 연결을 대기 |
 | 2 | `generateRoomCode()` | 4자리 숫자 코드 생성 (1000~9999). 게스트가 방을 식별하는 용도 |
-| 3 | `discovery.startBroadcast()` | UDP 브로드캐스트로 같은 WiFi의 게스트에게 존재를 알림 |
+| 3 | `discovery.startBroadcast()` | mDNS(`_synchorus._tcp`)로 같은 WiFi의 게스트에게 존재를 알림. v0.0.41부터 `nsd` 라이브러리(이전 `multicast_dns` 폐기). 상세: ARCHITECTURE §10 |
 | 4 | RoomScreen 진입 | `sync.startHostHandler()` -- sync-ping 수신 대기 시작 |
 | 5 | | `audio.startListening(isHost: true)` -- 측정 로거 시작 + 메시지 리스너 |
 
@@ -166,10 +166,11 @@
 
 | 순서 | 동작 | 설명 |
 |:---:|------|------|
-| 1 | 호스트 발견 | UDP 검색으로 자동 발견하거나, IP를 직접 입력 |
-| 2 | `p2p.connectToHost()` | 호스트 IP:41235로 TCP 연결 + join 메시지 전송 |
-| 3 | welcome 수신 | 호스트가 보낸 환영 메시지 (방 코드, 참가자 수 포함) |
-| 4 | RoomScreen 진입 | `audio.startListening(isHost: false)` -- 메시지 리스너 시작 |
+| 1 | 호스트 발견 | mDNS 검색으로 자동 발견(`nsd`의 `discovery` 스트림 `found`/`lost` 즉시 반영, v0.0.42 stale 방 fix), 또는 IP 직접 입력 |
+| 2 | 게스트 닉네임 발급 | `device_info_plus`로 `<device model>#<hex 4자리>` (v0.0.54 — 같은 모델 2대 이상 충돌 방지) |
+| 3 | `p2p.connectToHost()` | 호스트 IP:41235로 TCP 연결 + `join` 메시지 전송 (`name` 포함) |
+| 4 | welcome 수신 | 호스트가 보낸 환영 메시지 (방 코드, 참가자 수 포함). 호스트는 같은 `name` AND 같은 `ip` 매칭되는 stale peer를 정리 후 새 peer 등록 (v0.0.54 — 1:N 멀티 게스트 전제) |
+| 5 | RoomScreen 진입 | `audio.startListening(isHost: false)` -- 메시지 리스너 시작 |
 
 ### 2-3. 시간 동기화 (게스트 --> 호스트)
 
@@ -187,8 +188,8 @@
 | 순서 | 동작 | 설명 |
 |:---:|------|------|
 | 1 | 1초마다 ping 1회 | 음수 rid로 초기 핸드셰이크와 구분 |
-| 2 | sliding window | 최근 5개 샘플 유지, 그 중 min-RTT 샘플 선택 |
-| 3 | EMA 필터 | 처음 10샘플: alpha=0.5 (빠른 수렴), 이후: alpha=0.1 (안정 유지) |
+| 2 | sliding window | 최근 10개 샘플 유지(v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소), 그 중 min-RTT 샘플 선택 |
+| 3 | EMA 필터 | 처음 10샘플: alpha=0.5 (빠른 수렴), 이후: alpha=0.1 (안정 유지). 상수: `_emaAlphaFast`/`_emaAlphaSlow`/`_fastPhaseCount` (`sync_service.dart:32-34`) |
 | 4 | 안정 판정 | offset 변화 < 2ms가 5회 연속이면 `isOffsetStable = true` |
 
 ### 2-4. 오디오 파일 공유
@@ -377,9 +378,14 @@ Flutter 공식 state machine (api.flutter.dev):
 | hidden | 무시 | 무시 | 무시 |
 | **paused** | 무시 | `host-paused` broadcast + heartbeat 정지 | (자기 pause는 호스트가 감지) |
 | **resumed** | 무시 | `host-resumed` broadcast + heartbeat 재개 + 모든 peer `lastSeen` 리셋 | TCP 상태 점검, 끊겼으면 재접속 |
-| **detached** | 무시 | `host-closed` broadcast (best-effort) + disconnect | `leave` 메시지 + disconnect |
+| **detached** | 무시 | `host-closed` broadcast (best-effort, v0.0.26) + disconnect | `leave` 메시지 + disconnect |
 
-현재 v0.0.25: host 측 paused/resumed만 구현. detached는 미구현(추후 보완).
+**플랫폼별 detached 도달성** (v0.0.26 실측):
+- **Android 재생 중 강제 종료**: foreground service 덕에 detached까지 Dart 코드 도달 → `host-closed` best-effort broadcast 성공 → 게스트 ~1.4초 복구 (실측 S22+A7 Lite)
+- **Android 재생 전 강제 종료**: foreground service 없음 → detached 도달 확률 낮음 → 3층 watchdog가 받음
+- **iOS 앱 스위처 종료**: detached 미도달 → 3층 watchdog만으로 복구
+
+**구현 위치**: `lib/services/room_lifecycle_coordinator.dart`. host의 paused/resumed/detached 분기는 `WidgetsBindingObserver` 콜백을 coordinator가 흡수.
 
 ---
 
@@ -449,7 +455,9 @@ TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX e
 |---|---|---|---|
 | `host-paused` | 호스트 → 전체 게스트 | 호스트 `AppLifecycleState.paused` | 게스트 자리비움 배너 표시, 재접속 중단 |
 | `host-resumed` | 호스트 → 전체 게스트 | 호스트 `AppLifecycleState.resumed` | 게스트 자리비움 해제, heartbeat 재개 |
-| `host-closed` | 호스트 → 전체 게스트 | 호스트 방 나가기 버튼 / (장래) detached | 게스트 즉시 홈 화면 복귀 |
+| `host-closed` | 호스트 → 전체 게스트 | 정식 `closeRoom()` (방 나가기 버튼) + `AppLifecycleState.detached` (v0.0.26 best-effort, Android foreground service 한정) | 게스트 즉시 홈 화면 복귀 |
+
+호스트 `host-resumed`는 paused 중 TCP가 abort되어 게스트에 도달 못 할 수 있음 — TCP 재접속 자체가 복귀 신호 역할. coordinator는 두 신호 OR로 처리.
 
 ### 2층 — TCP 소켓 이벤트 ("비정상 감지")
 
@@ -459,13 +467,43 @@ TCP 소켓 에러가 발생하면 `SocketException.osError.errorCode`에 POSIX e
 - `Socket.onError` + `SocketException.osError.errorCode`: RST / timeout / unreachable 등
 - errno 기반 판정 트리 (위 "소켓 에러 코드" 섹션)
 
+#### 2층 race 방어 (v0.0.31, v0.0.34, v0.0.35)
+
+게스트의 disconnect 감지 경로가 **두 개로 분리**됨 → 거의 동시 발화 가능 → 각자 reconnect 성공 + 각자 재동기화 호출. 다층 방어:
+
+```
+경로 A: TCP onDone        → _disconnectedController.add → _handleDisconnected
+경로 B: connectivity_plus → none 이벤트 → 1초 재확인 → _waitForWifiAndReconnect
+```
+
+| 시점 | 방어 |
+|---|---|
+| v0.0.31 | StreamController add 전 `if (!_xxxController.isClosed) ...` 가드. `dispose()` 후 socket.onDone이 비동기로 늦게 도달 → 이미 close된 controller에 add → `Bad state: Cannot add new events after calling close` 예외 차단 |
+| v0.0.34 | `if (!identical(_hostSocket, socket)) return;` onDone 가드 (`p2p_service.dart:355~`). old socket의 onDone이 교체된 새 `_hostSocket`까지 destroy하는 무한 loop 차단 (안전망) |
+| v0.0.35 | `_reconnectInProgress` flag (`room_lifecycle_coordinator.dart`). `_handleDisconnected`/`_waitForWifiAndReconnect` 진입부 가드 — race 자체 예방 |
+
+두 층 동시 유지: race 예방(v0.0.35)이 실패해도 loop 차단(v0.0.34)이 받아줌. 한쪽만 두면 future regression에 약함.
+
 ### 3층 — 시간 기반 watchdog ("최종 안전망")
 
 1층·2층 모두 실패해도 앱이 멈추지 않도록 하는 하드 타임아웃.
 
 - 게스트가 `_hostAway=true` 상태 + TCP 끊김 상태에서 `_startAwayReconnectLoop()` 시작
-- 5초 주기로 1회씩 `reconnectToHost(retries: 1)` 시도
-- N회(현재 12회, 약 60~120초) 실패 시 `leaveRoom()` 강제 호출 → 홈 화면으로
+- 5초 주기로 1회씩 `reconnectToHost(retries: 1)` 시도 (`Socket.connect` timeout 2초 — v0.0.27)
+- N회(현재 12회, 실제 약 1분) 실패 시 `leaveRoom()` 강제 호출 → 홈 화면으로
 - 성공 시 재동기화 진행
+- errno=111(Linux ECONNREFUSED) 또는 61(Darwin) 2회 연속 시 → watchdog 12회 안 기다리고 즉시 leave (v0.0.27, v0.0.30)
+
+v0.0.27 이전 timeout 5초 → 12회 = ~2분이었으나 v0.0.27에서 2초로 단축해 ~1분 미만으로 회복.
 
 WiFi 완전 끊김처럼 TCP RST도 오지 않는 극단 케이스에 이 층이 유일한 방어선.
+
+#### iOS WiFi off 재현 조건 (v0.0.34 (27) 실측)
+
+| 조작 | connectivity_plus | 비고 |
+|---|---|---|
+| 제어센터 **WiFi 아이콘** 토글 | `none` 이벤트 안 가거나 약함 | iOS가 "일시 비활성화"로 취급 — race 재현 부적합 |
+| 제어센터 **비행기 모드** 토글 | `none` 즉시 발화 | 앱 포그라운드 유지, race 재현 적합 |
+| 설정 앱 → Wi-Fi 토글 | `none` 발화 | 앱이 background 내려감 — race 조건 달라짐 |
+
+PLAN.md "errno=65/51 분기 캡처" 시나리오(LOW-11)는 위 차이 때문에 connectivity_plus가 우회되는 케이스에서만 잡힘 — AP 이동 또는 다른 AP 시나리오 필요.

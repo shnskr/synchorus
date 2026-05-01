@@ -3151,6 +3151,62 @@ C. **A + B 동시 적용 (권장)**
 
 ---
 
+### 2026-05-01 (58) — LIFECYCLE.md v0.0.31~v0.0.55 누락 갱신 + 작은 부정확 fix
+
+**배경**: 사용자 "라이프사이클도 보자". `docs/LIFECYCLE.md` 마지막 commit이 `fc2a1c9` (v0.0.30 Darwin errno fix)이고 이후 v0.0.31~v0.0.55 갱신 0건. DECISIONS(56) + ARCHITECTURE(57)와 같은 패턴. 추가로 v0.0.41/42/54 변경이 §2-1/2-2의 디스커버리·join 흐름 본문과 충돌하는 작은 부정확까지 fix.
+
+**누락 진단**:
+- 본문 "현재 v0.0.25: detached는 미구현(추후 보완)" — **v0.0.26에서 구현됨에도 미구현으로 남아있음** (잘못된 정보)
+- 1층 메시지 표 `host-closed` 트리거에 "(장래) detached" — 이미 v0.0.26 구현
+- 2층 본문에 v0.0.31 isClosed 가드, v0.0.34 identical 가드, v0.0.35 `_reconnectInProgress` flag 모두 누락 → race 방어 layer가 보이지 않음
+- 3층 watchdog 시간 "약 60~120초"는 v0.0.27 timeout 단축(5→2초) 미반영. 실제 ~1분
+- iOS WiFi off 재현 조건(제어센터 WiFi 토글 vs 비행기 모드 vs 설정 앱) 어디에도 없음 — v0.0.34 (27)에서 발견된 실측 가이드
+- §2-1 "UDP 브로드캐스트" 표현은 mDNS(`_synchorus._tcp`) 기반인 v0.0.41+ 후엔 부정확
+- §2-2 게스트 join 흐름에 v0.0.54 디바이스 닉네임 발급(`device_info_plus`) + stale peer `name AND ip` 매칭 누락
+- §2-3 sliding window "최근 5개" — v0.0.24에서 10으로 확대됨
+
+**갱신 내역**:
+
+1. **§우리 앱의 역할 × 라이프사이클 대응 매트릭스 보강** — 옛 미구현 메모를 **플랫폼별 detached 도달성** 표로 교체 (Android 재생 중 강제 종료 1.4초 복구, Android 재생 전 종료 watchdog fallback, iOS 앱 스위처 종료 watchdog only). 구현 위치 `room_lifecycle_coordinator.dart` 명시.
+
+2. **§3중 안전망 §1층 host-closed 트리거 정확화** — "(장래) detached" 제거, "정식 closeRoom() + AppLifecycleState.detached (v0.0.26 best-effort, Android foreground service 한정)"로 갱신. host-resumed 도달 불가 케이스 + TCP 재접속 자체가 복귀 신호 명시.
+
+3. **§3중 안전망 §2층에 race 방어 sub-section 신설** — 옛 본문 "1층 메시지가 오지 못하는 상황을 OS 수준에서 포착" 그대로 유지하면서 그 아래 "2층 race 방어 (v0.0.31, v0.0.34, v0.0.35)" sub-section 추가:
+   - 두 disconnect 감지 경로(TCP onDone vs connectivity_plus) 다이어그램
+   - v0.0.31 `if (!_xxxController.isClosed) ...` 가드 — `Bad state: Cannot add new events after calling close` 차단
+   - v0.0.34 `if (!identical(_hostSocket, socket)) return;` onDone 가드 — old socket의 onDone이 새 `_hostSocket` destroy하는 무한 loop 차단
+   - v0.0.35 `_reconnectInProgress` flag — 두 경로 직렬화, race 자체 예방
+   - "두 층 동시 유지 — 한쪽만 두면 future regression에 약함" 원칙
+
+4. **§3중 안전망 §3층 시간 갱신** — "12회 약 60~120초" → "12회 실제 약 1분 (v0.0.27 connect timeout 5→2초)". errno=111/61 2회 연속 즉시 leave fast giveup도 반영.
+
+5. **새 sub-section §iOS WiFi off 재현 조건** — v0.0.34 (27) 실측에서 발견:
+   - 제어센터 WiFi 아이콘 토글: `none` 이벤트 안 가거나 약함 (race 재현 부적합)
+   - 제어센터 비행기 모드 토글: 즉시 발화, 앱 포그라운드 유지 (race 재현 적합)
+   - 설정 앱 → Wi-Fi 토글: `none` 발화하지만 앱 background 내려감 (race 조건 달라짐)
+   - PLAN.md LOW-11 errno=65/51 분기 캡처 시나리오 참조
+
+6. **§2-1 호스트 디스커버리 본문 정확화** — "UDP 브로드캐스트" → "mDNS(`_synchorus._tcp`)로 같은 WiFi의 게스트에게 존재를 알림. v0.0.41부터 `nsd` 라이브러리(이전 `multicast_dns` 폐기). 상세: ARCHITECTURE §10".
+
+7. **§2-2 게스트 join 흐름 보강** — 4단계 → 5단계로 확장:
+   - 1단계: 호스트 발견 — `nsd` discovery 스트림 found/lost 즉시 반영(v0.0.42 stale 방 fix)
+   - 2단계 신설: 게스트 닉네임 발급 — `<device model>#<hex 4자리>` (v0.0.54)
+   - 3단계: connectToHost + `join` 메시지 (`name` 포함)
+   - 4단계: welcome 수신 — 호스트는 `name AND ip` 동시 매칭 stale peer 정리 후 새 peer 등록 (v0.0.54)
+   - 5단계: RoomScreen 진입
+
+8. **§2-3 시간 동기화 sliding window 갱신** — "최근 5개" → "최근 10개(v0.0.24: 5→10)". EMA alpha 상수명(`_emaAlphaFast`/`_emaAlphaSlow`/`_fastPhaseCount`)과 코드 라인(`sync_service.dart:32-34`) 추가.
+
+**보존 (안 손댐)**: §1 전체 흐름도, §2-4 오디오 파일 공유 ~ §2-7 방 나가기, §3 용어 사전, §앱 라이프사이클 5상태 정의, §OS가 paused 상태 앱에 하는 일, §플랫폼별 실전 차이, §소켓 에러 코드(errno) 표 본문. 이미 v0.0.30까지 정확.
+
+**version bump 안 함**: 본 앱 코드 변경 0. 문서만.
+
+**검증**: `flutter analyze` 영향 없음. LIFECYCLE.md 471줄 → 약 510줄. 정확성 회복이 주 목적이라 분량 증가 적음.
+
+**프로세스 청산 완료**: `docs/` 5개 문서(CLAUDE.md/HISTORY.md/PLAN.md/ARCHITECTURE.md/DECISIONS.md/LIFECYCLE.md/SYNC_ALGORITHM_V2.md 중 핵심 5개) 모두 v0.0.55까지 부채 청산. 사용자 지시 "항상 히스토리만 업데이트했었구나"가 더 이상 사실이 아님 — 이번 (56)+(57)+(58) 삼중 청산으로 회복.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
