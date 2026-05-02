@@ -3590,6 +3590,73 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **의존성 트랙 종료 진단**: 의존성 업데이트가 일부 가치 있는 fix(crash 제거, 파일 처리 개선)를 가져왔으나 **첫 재생 정착 시간 직접 개선은 없었음**. 이 문제는 알고리즘 트랙(§D-2)으로 해결해야 함이 N=2 측정으로 확정.
 
+### 2026-05-02 (69) — v0.0.62 첫 재생 정착 시간 N=3 — 비결정적 발현 양상 확정
+
+**환경**: (68)과 동일. 3회차 측정 (`measurements/v0.0.62_first_play_run3_2026-05-02.csv`, 361행, 3분+).
+
+**3회차 청감**: "1회차랑 비슷" (1회차 ~1초 정착 후 안정과 유사).
+
+**3회차 csv 분석 — 전혀 다른 패턴**:
+
+| 항목 | 값 | 비교 (1회차/2회차) |
+|---|---|---|
+| 첫 anchor 시점 | NR 23 (재생 **+11초**) | 가장 늦음 (vs +5.3s / +2.5s) |
+| 첫 anchor EMA gap | **-11.7ms** (filtered -777.7 vs winRaw -766.0) | 가장 큼 (vs 0.1ms / 2.0ms) |
+| fallback events | **21개** | 가장 많음 (vs 10 / 3) |
+| anchor_reset 횟수 | 2회 (NR 35, 77) | 1회차와 동일 횟수, 다른 시점 |
+| reset 시 gap | -6.2ms / **-0.2ms** | 2번째는 거의 완벽 재정착 |
+| host_pause 1회 | NR 361 — 측정 마지막 사용자 정지 | 정상 |
+| vfDiff signed mean | -14.62ms | 1/2회차 -10.96/-11.01 대비 살짝 ↑ |
+
+**fallback 시계열 (drift_ms 추이)**:
+- NR 2: -440.87ms (게스트 첫 sample, 큰 외삽 오차)
+- NR 3: +250.16ms (반대로 튐)
+- NR 4 이후: -23~-15ms 범위로 빠르게 안정
+- NR 13~14: -7~-3ms (~6초만에 청감 임계 도달)
+- NR 22: +1.03ms (anchor 직전 거의 0)
+
+→ **fallback 단계에서 이미 청감 안정 도달**. anchor 11s 늦게 박혔어도 청감으론 ~1초~2초에 정착으로 인지됨.
+
+**anchor establish 자기 교정 패턴**:
+- NR 23 anchor (gap 11.7ms, noisy) → NR 35 reset (12초 후, gap 6.2ms) → NR 36 재anchor → NR 77 reset (41초 후, gap 0.2ms) → NR 78 재anchor (거의 완벽)
+- 2회차의 reset 5~9초 간격(NR 57/76/100) 집중과 다르게 12s + 41s 간격이라 청감 임계 이하로 흡수됨.
+
+**N=3 종합 — 청감 분포**:
+
+| 케이스 | 발현 양상 | 청감 |
+|---|---|---|
+| 1회차 | ANCHOR EARLY+TIGHT (gap 0.1ms, fallback 10) | 깔끔 |
+| 2회차 | ANCHOR EARLY+LOOSE (gap 2.0ms, fallback 3) | **30초 흔들림** ❌ |
+| 3회차 | ANCHOR LATE+NOISY+자기교정 (gap 11.7ms, fallback 21) | 깔끔 |
+
+→ 운 나쁜 케이스 ~33% (3회 중 1회 명확한 흔들림). 첫 anchor의 시점·EMA gap·fallback 길이 모두 결정론적이지 않음.
+
+**핵심 통찰 (N=3로 확정)**:
+
+1. **§D-2 결함이 측정마다 다른 양상으로 발현**:
+   - EARLY+TIGHT (운 좋음) — anchor 일찍 + EMA 우연 수렴 → 깔끔
+   - EARLY+LOOSE (운 나쁨) — anchor 일찍 + EMA 미수렴 → 흔들림
+   - LATE+NOISY+자기교정 — anchor 늦게 + noisy → 빠른 자기 교정으로 청감 OK
+   
+2. **fallback 길이가 청감 정착에 직접 기여** — anchor 박히기 전에도 drift가 -3ms 수준까지 줄면 청감으로는 이미 안정. fallback 21개(3회차)도 청감 정착 ~1~2초 만에 도달.
+
+3. **첫 anchor 시점/gap의 변동성이 너무 큼** → 같은 환경·같은 코드에서도 청감 분포가 좋음/흔들림으로 갈림 → 사용자 경험 비일관성.
+
+**§D-2 fix 후보 비교 (N=3 데이터 기준)**:
+
+| 후보 | 효과 예상 (3 케이스 모두) |
+|---|---|
+| **D2-1** (winMinRaw 일치 기준) | 1회차 같은 케이스만 anchor 통과, 2/3회차는 더 미룸 → 모든 케이스에서 anchor "LATE+TIGHT"로 수렴 → **일관성 ⭐** |
+| **D2-2** (AND 조합) | D2-1보다 더 엄격, anchor 더 늦어짐 → trade-off: 첫 anchor 정확↑ vs 첫 reset 후 reanchor 동일 동작 시 부담 |
+| **D2-3** (fast phase 길이/α 조정) | EMA 수렴 빨라짐 → 1/2회차 케이스 개선, 3회차는 영향 작음 |
+
+**가성비**: D2-1 (1줄 변경)이 가장 깔끔. 다만 첫 anchor가 일관되게 늦어지면 첫 재생 정착 시간이 청감으로 길어질 가능성도 있음. fallback alignment 정확도가 충분하면 청감 영향 작을 것.
+
+**다음 작업 후보 갱신** (PLAN HIGH-4):
+- N=3로 §D-2 결함의 비결정적 발현 양상 확정 → fix가 일관성 확보 효과를 명확히 줄 것 기대
+- fix 후 N=3+ 측정으로 청감 분포가 좋음/좋음/좋음으로 수렴하는지 검증 필요
+- SYNC_ALGORITHM_V2.md §A-F 빈칸 + §D-2 fix 채택 → 사용자 합의 → 단일 commit이 다음 알고리즘 트랙 첫 작업 (PLAN HIGH-4 기존 계획 그대로 + 우선순위 ⭐최상)
+
 ---
 
 #### 미해결 이슈
