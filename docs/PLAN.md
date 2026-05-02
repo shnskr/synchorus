@@ -127,13 +127,15 @@
 
 10. **iOS host 환경 검증** — Mac 환경 필요.
 
-11. **의존성 업데이트 검토** (출시 전 필수, 시급도 낮음). `flutter pub outdated` 기준 메이저 업그레이드 7개:
-    - 안전 (즉시): `connectivity_plus` 7.1.0→7.1.1, `path_provider_android` 2.2.23→2.3.1, `vm_service`/`hooks`/`sqflite`/`synchronized` patch — `flutter pub upgrade` 한 번
-    - 메이저 (위험·이득 검토 후 패키지별 단독 commit):
-      - LOW: `device_info_plus` 12→13, `package_info_plus` 9→10
-      - MID: `audio_session` 0.1→0.2, `network_info_plus` 6→8, `file_picker` 8→11
-      - HIGH: `just_audio` 0.9→0.10 (v3 NativeAudioEngine 도입 후 의존도 낮아졌으나 디코딩 경로 잔존 grep 필요), `flutter_riverpod` 2→3 (Notifier/Provider API 변경 큼)
-    - 진행 시점: 실기기 회귀 테스트 가능한 세션. 메이저 업그레이드는 한 번에 하나씩.
+11. ~~**의존성 업데이트 검토**~~ — **2026-05-02 완료 (v0.0.57~v0.0.62)**. 6개 commit:
+    - v0.0.57 안전 묶음 (patch/minor 8개)
+    - v0.0.58 just_audio 죽은 의존성 제거
+    - v0.0.59 audio_session 0.1→0.2
+    - v0.0.60 network_info_plus 죽은 의존성 제거
+    - v0.0.61 file_picker 8→11 (정적 메서드 마이그레이션)
+    - v0.0.62 flutter_riverpod 2→3 (코드 변경 0)
+    - **보류**: `device_info_plus` 12→13 + `package_info_plus` 9→10 (file_picker 11이 win32 ^5에 묶여 충돌. file_picker가 win32 ^6 지원할 때 묶음 commit). API 무변경이라 미루는 부담 작음.
+    - **다음**: 실기기 풀세트 회귀 테스트 (특히 audio_session 0.2 BT 라우팅 + file_picker 11 + riverpod 3 onDispose 사이클).
 
 ### LOW
 
