@@ -3446,6 +3446,47 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 - (보류) `device_info_plus` 12→13 + `package_info_plus` 9→10: file_picker가 win32 ^6 지원 시점에 묶음 commit
 - `flutter_riverpod` 2→3: Notifier/Provider API 변경 큼, 별도 세션 (회귀 위험 최대)
 
+### 2026-05-02 (66) — v0.0.62 flutter_riverpod 2.6.1 → 3.3.1 메이저 업그레이드
+
+**배경**: PLAN.md MID-11 마지막 메이저 트랙. 처음엔 회귀 위험 최대로 별도 세션 분류했으나, 사용자 지적("어차피 단독 commit이면 회귀 시 git revert로 분리 가능") 수용해 진행.
+
+**우리 사용 패턴 분석** (5 파일 / 46 API 호출):
+- `lib/providers/app_providers.dart` — `Provider<T>((ref) => ...)` 5개 (audioHandler, p2p, discovery, sync, nativeAudioSync)
+- `lib/main.dart`, `home_screen.dart`, `room_screen.dart`, `player_screen.dart` — `ConsumerWidget`/`ConsumerStatefulWidget` + `WidgetRef` + `ref.read/watch/listen` + `ref.onDispose` + `ProviderScope`
+- `StateNotifier`/`StateProvider`/`ChangeNotifier` 사용 0 (v3 deprecate 대상에서 안전)
+
+**riverpod v3 migration guide 검증** (riverpod.dev migration/from_state_notifier WebFetch):
+- 우리 사용 API(`Provider<T>`, `ConsumerWidget`, `WidgetRef`, `ref.read/watch/listen`, `ref.onDispose`, `ProviderScope`)는 v3에서 모두 유지
+- v3 breaking은 deprecate된 `StateNotifier`/`StateProvider`/`ChangeNotifier` 라인 → 우리 미사용
+- nice-to-have: 향후 새 stateful 로직은 `Notifier`/`AsyncNotifier`로 작성 권장 (기존 코드는 변경 강제 아님)
+
+**변경 (`v0.0.62`, 코드 변경 0 — pubspec/lock만)**:
+
+`pubspec.yaml`: `flutter_riverpod: ^2.6.1` → `^3.3.1`. `flutter pub get` 25개 의존성 변경 (riverpod + transitive).
+
+**검증**:
+- `flutter analyze` No issues (코드 수정 0)
+- `flutter build apk --debug` ✓ 14.4s
+- 런타임 회귀 — v3 내부 구현 변경(특히 lifecycle/disposal 타이밍) 가능성 있어 실기기 풀세트 회귀 필수: 방 생성/참가, 동기화 재생, dispose 사이클(`onDispose` 호출 5곳)
+
+**version bump**: 0.0.61+1 → 0.0.62+1.
+
+**의존성 트랙 종료**:
+
+| 버전 | 변경 |
+|---|---|
+| v0.0.57 | 안전 묶음 (patch/minor 8개) |
+| v0.0.58 | just_audio 죽은 의존성 제거 |
+| v0.0.59 | audio_session 0.1→0.2 |
+| v0.0.60 | network_info_plus 죽은 의존성 제거 |
+| v0.0.61 | file_picker 8→11 (정적 메서드 마이그레이션) |
+| v0.0.62 | flutter_riverpod 2→3 (코드 변경 0) |
+
+**보류** (다음 의존성 세션):
+- `device_info_plus` 12→13 + `package_info_plus` 9→10: file_picker가 win32 ^6 지원 시점에 묶음 commit. 현재 file_picker 11이 win32 ^5에 머물러 충돌. 두 패키지 API는 무변경이라 미루는 부담 작음.
+
+**다음 작업 후보**: 출시 전 실기기 풀세트 회귀 (S22 + iPhone + A7 Lite, 6개 commit 누적 영향), 또는 PLAN HIGH 트랙 (SYNC_ALGORITHM_V2 단일 commit / 첫 재생 정착 시간 / 다중 게스트 fix 검증).
+
 ---
 
 #### 미해결 이슈
