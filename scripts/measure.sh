@@ -3,7 +3,11 @@
 #
 # 사용:
 #   ./scripts/measure.sh                  # default: 12분 측정, S22 host + A7 Lite guest
-#   ./scripts/measure.sh -d 300           # 5분 측정
+#   ./scripts/measure.sh --quick          # 60s (smoke test)
+#   ./scripts/measure.sh --short          # 3분
+#   ./scripts/measure.sh --mid            # 5분
+#   ./scripts/measure.sh --long           # 12분 (default, 14분 한계 안전 마진)
+#   ./scripts/measure.sh -d 300           # 임의 초
 #   ./scripts/measure.sh -h R3CT60D20XE -g R9PW315GL0L -d 720
 #
 # 동작:
@@ -36,11 +40,15 @@ APK_OUT="build/app/outputs/flutter-apk/app-debug.apk"
 # ─── 인자 파싱 ──────────────────────────────────────────
 while [[ $# -gt 0 ]]; do
     case "$1" in
+        --quick)       DURATION_SEC=60; shift ;;   # smoke test
+        --short)       DURATION_SEC=180; shift ;;  # 3분
+        --mid)         DURATION_SEC=300; shift ;;  # 5분
+        --long)        DURATION_SEC=720; shift ;;  # 12분 (default)
         -d|--duration) DURATION_SEC="$2"; shift 2 ;;
         -h|--host)     HOST_DEVICE="$2"; shift 2 ;;
         -g|--guest)    GUEST_DEVICE="$2"; shift 2 ;;
         --help)
-            sed -n '2,22p' "$0"
+            sed -n '2,25p' "$0"
             exit 0
             ;;
         *) echo "unknown arg: $1"; exit 1 ;;

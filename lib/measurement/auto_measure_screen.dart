@@ -36,7 +36,10 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
   StreamSubscription? _discoverySub;
   Timer? _stopTimer;
   Timer? _exitTimer;
+  Timer? _elapsedTimer;
   bool _started = false;
+  DateTime? _startedAt;
+  Duration _elapsed = Duration.zero;
 
   @override
   void initState() {
@@ -57,7 +60,27 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
     _discoverySub?.cancel();
     _stopTimer?.cancel();
     _exitTimer?.cancel();
+    _elapsedTimer?.cancel();
     super.dispose();
+  }
+
+  /// 재생 시작 시점 기록 + 1초 주기 경과 시간 갱신.
+  void _markStarted() {
+    _started = true;
+    _startedAt = DateTime.now();
+    _elapsedTimer?.cancel();
+    _elapsedTimer = Timer.periodic(const Duration(seconds: 1), (_) {
+      if (!mounted || _startedAt == null) return;
+      setState(() {
+        _elapsed = DateTime.now().difference(_startedAt!);
+      });
+    });
+  }
+
+  String _formatDuration(Duration d) {
+    final m = d.inMinutes;
+    final s = d.inSeconds % 60;
+    return '${m.toString().padLeft(2, '0')}:${s.toString().padLeft(2, '0')}';
   }
 
   void _setStatus(String s) {
@@ -121,7 +144,7 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
       await Future.delayed(const Duration(seconds: 5));
 
       _setStatus('재생 시작. ${widget.durationSec}초 측정 중...');
-      _started = true;
+      _markStarted();
       audio.syncPlay();
 
       _stopTimer = Timer(Duration(seconds: widget.durationSec), () async {
@@ -150,8 +173,20 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
       final audio = ref.read(nativeAudioSyncServiceProvider);
       final handler = ref.read(audioHandlerProvider);
 
-      _setStatus('방 검색 중 (60s timeout)...');
+      // 1) startListening 먼저 — 호스트 메시지 listen 시작.
+      // 일반 모드는 RoomScreen 진입 시 호출되지만, 자동화는 connectToHost 후
+      // 호스트가 먼저 메시지 보내면 listen 안 한 시점이라 race 가능.
+      handler.attachSyncService(audio, isHost: false);
+      audio.startListening(isHost: false);
 
+      // 2) assets 직접 로드 — HTTP 다운로드 race 회피.
+      // 호스트가 syncPlay 시 audio-url broadcast하지만, 게스트가 이미 같은 파일
+      // 로드한 상태라 다운로드 skip. sync 알고리즘 자체 검증에 더 적합.
+      _setStatus('assets 파일 로드 중...');
+      final tempPath = await _copyAssetToTemp();
+      await audio.loadFile(File(tempPath));
+
+      _setStatus('방 검색 중 (60s timeout)...');
       final completer = Completer<DiscoveredHost>();
       _discoverySub = discovery.discoverHosts().listen((host) {
         if (!completer.isCompleted) {
@@ -179,11 +214,8 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
         await welcomeFuture;
       } catch (_) {}
 
-      handler.attachSyncService(audio, isHost: false);
-      audio.startListening(isHost: false);
-
       _setStatus('입장 완료. 호스트 재생 따라가기 (${widget.durationSec + 30}s)...');
-      _started = true;
+      _markStarted();
 
       // 호스트보다 30초 더 기다려 종료 시점 여유. 호스트가 syncPause 보내면
       // 자동 정지하지만 측정 종료 후 호스트 종료 race 방지용.
@@ -218,38 +250,65 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
 
   @override
   Widget build(BuildContext context) {
+    final totalDur = Duration(seconds: widget.durationSec);
+    final remaining = _started ? totalDur - _elapsed : totalDur;
+    final progress = _started
+        ? _elapsed.inSeconds / widget.durationSec.clamp(1, 999999)
+        : 0.0;
+
     return Scaffold(
       backgroundColor: Colors.black,
       body: Center(
-        child: Column(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            Text(
-              'AUTO_MEASURE: ${widget.mode}',
-              style: const TextStyle(color: Colors.white, fontSize: 18),
-            ),
-            const SizedBox(height: 16),
-            Text(
-              _status,
-              textAlign: TextAlign.center,
-              style: const TextStyle(color: Colors.greenAccent, fontSize: 14),
-            ),
-            if (_error != null) ...[
+        child: Padding(
+          padding: const EdgeInsets.all(24),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Text(
+                'AUTO_MEASURE: ${widget.mode}',
+                style: const TextStyle(color: Colors.white, fontSize: 18),
+              ),
               const SizedBox(height: 16),
               Text(
-                _error!,
+                _status,
                 textAlign: TextAlign.center,
-                style: const TextStyle(color: Colors.redAccent, fontSize: 12),
+                style: const TextStyle(color: Colors.greenAccent, fontSize: 14),
               ),
+              if (_error != null) ...[
+                const SizedBox(height: 16),
+                Text(
+                  _error!,
+                  textAlign: TextAlign.center,
+                  style:
+                      const TextStyle(color: Colors.redAccent, fontSize: 12),
+                ),
+              ],
+              if (_started) ...[
+                const SizedBox(height: 32),
+                Text(
+                  _formatDuration(_elapsed),
+                  style: const TextStyle(
+                    color: Colors.white,
+                    fontSize: 48,
+                    fontFeatures: [FontFeature.tabularFigures()],
+                  ),
+                ),
+                Text(
+                  '/ ${_formatDuration(totalDur)}'
+                  '   (남은 시간 ${_formatDuration(remaining.isNegative ? Duration.zero : remaining)})',
+                  style: const TextStyle(color: Colors.white54, fontSize: 12),
+                ),
+                const SizedBox(height: 12),
+                LinearProgressIndicator(
+                  value: progress.clamp(0.0, 1.0),
+                  backgroundColor: Colors.white12,
+                  valueColor: const AlwaysStoppedAnimation<Color>(
+                    Colors.greenAccent,
+                  ),
+                ),
+              ],
             ],
-            if (_started) ...[
-              const SizedBox(height: 16),
-              Text(
-                'duration: ${widget.durationSec}s',
-                style: const TextStyle(color: Colors.white54, fontSize: 12),
-              ),
-            ],
-          ],
+          ),
         ),
       ),
     );

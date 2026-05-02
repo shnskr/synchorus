@@ -3799,6 +3799,50 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 단계**: `./scripts/measure.sh -d 720` 1회 검증 → v0.0.63 N=2 baseline과 비교 → 자동화 의도대로 작동 확인.
 
+### 2026-05-02 (73) — v0.0.65 자동화 측정 모드 fix (게스트 assets 직접 로드 + 경과 시간 UI + 짧은 테스트 preset)
+
+**배경**: v0.0.64 자동화 측정 1회 검증 중 사용자 보고 — 호스트와 게스트 sync 약 500ms 어긋남. csv 분석 결과 `host_play (NR 0)` + `guest_start (NR 1, +18.78s)` 이후 drift 행 0개. v0.0.63 baseline(vfDiff -2.86~-7.33ms)과 100배 차이로 명백한 회귀.
+
+**root cause 추정 — 11.5MB assets HTTP 다운로드 race**:
+- 호스트가 5초 안정 후 `syncPlay` → `audio-url` 메시지 broadcast
+- 게스트가 다운로드 시작 (~5~10s WiFi)
+- 다운로드 완료 후 `loadFile` (~1~2s)
+- 그 사이 호스트는 ~10~15초 진행 → 게스트 sync 시작 시점 큰 fallback drift
+- timestamp watch가 안정 진입 못해 drift_report 발생 X (가능성)
+
+**fix 1 — 게스트도 assets 직접 로드** (사용자 지적 적용):
+`auto_measure_screen.dart` `_runGuest()`:
+- `startListening(isHost: false)` 먼저 호출 (호스트 메시지 listen race 회피)
+- assets/measure_audio.mp3 → temp 복사 → `loadFile()` (HTTP 다운로드 skip)
+- 그 후 discovery → connectToHost
+- 호스트 syncPlay 시 즉시 따라잡기 가능
+
+**Trade-off (의도적)**:
+- 일반 모드 다운로드 흐름 검증 skip → 별도 트랙으로 분리
+- sync 알고리즘 자체 검증에 더 적합 (다운로드 변동성 제거)
+
+**fix 2 — 경과 시간 UI** (사용자 요청):
+- `_markStarted()` 호출 시 `Timer.periodic(1s)`로 경과 시간 갱신
+- UI: `MM:SS / total_MM:SS (남은 시간 MM:SS)` + LinearProgressIndicator
+- monospace digits (FontFeature.tabularFigures)로 깔끔한 표시
+
+**fix 3 — 짧은 테스트 preset** (사용자 요청):
+`scripts/measure.sh`:
+- `--quick` (60s, smoke test)
+- `--short` (180s, 3분)
+- `--mid` (300s, 5분)
+- `--long` (720s, 12분 default)
+- `-d <sec>` 임의 초 옵션 그대로
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug --dart-define=AUTO_MEASURE_MODE=guest` ✓ 13.1s
+- 실제 자동화 측정 검증은 다음 단계 (`./scripts/measure.sh --short` 1회로 빠른 확인)
+
+**version bump**: 0.0.64+1 → 0.0.65+1.
+
+**다음 단계**: `./scripts/measure.sh --short` (3분) 1회 → guest_start 후 drift 행 정상 기록되는지 검증. 정상이면 `--long` 12분으로 본격 측정.
+
 ---
 
 #### 미해결 이슈
