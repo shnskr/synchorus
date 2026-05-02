@@ -119,7 +119,7 @@
 
 6. ~~**EMA 단독 cherry-pick (B-1) 검토**~~ — **우선순위 ↓ (2026-05-02 (59))**. 측정 결과 outputLatency anchored vs current diff = 0.22ms로 사실상 0 → EMA 보존 효과 미미할 것으로 강한 신호. 본 항목은 (A)/(B) root cause fix 진행 후에도 잔재가 있을 때만 재고려.
 
-7. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 4분만).
+7. **30분+ 장시간 idle 측정** — rate drift 누적 검증. **2026-05-02 (77) v0.0.67 자동화 12분 측정에서 vfDiff signed mean -5.25ms로 큰 추세 미관찰**. 30분 측정은 14분 PCM 한계(`oboe_engine.cpp:143` 150MB)로 직접 불가. §C 결정은 PCM streaming 구조 변경 후로 미룸. 또는 측정 mp3를 여러 번 연속 재생(seek 0 반복)으로 우회 가능 — 다만 첫 anchor reset 발생.
 
 8. **BT 워밍업 잔여 개선 (HISTORY (33-2), (37))**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴. Galaxy+버즈는 ~2초로 양호 (Samsung HAL 정확 보고 추정). iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) 시도.
 

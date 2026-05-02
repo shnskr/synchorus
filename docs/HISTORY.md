@@ -3979,6 +3979,78 @@ p2p.sendToHost({'type': 'audio-request', 'data': {}});
 - §C rate drift 결정을 위한 long-term 측정
 - 다른 PLAN 항목 (실기기 풀세트 회귀, 등)
 
+### 2026-05-02 (77) — v0.0.67 자동화 long 측정 (12분) — fix long-term 안정 + 자동화 환경 한계 발견
+
+**측정 1차** (실패): `./scripts/measure.sh --long` 첫 시도. 게스트 측 1분 동안 재생 안 시작 → 측정 종료. 부분 csv `measurements/auto_long_partial_2026-05-02.csv` (101행).
+
+**1차 진단**:
+- 게스트 RTT 156~338ms (정상은 5~10ms) — WiFi 절전 모드 진입
+- offset 변동 폭 ~수십 ms → §D-2 fix의 step 변화량 < 2ms 조건 통과 못함
+- stable 카운트 0 영원 → anchor 박힘 매우 늦음 (~1분 58초 후에 박힘)
+- 사용자 청감 보고 "1분 30~40초쯤 게스트 재생 시작"이 fallback 단계에서 자연 시작 시점과 일치
+
+**1차 결과 통찰** (자동화 모드 fundamental 한계):
+
+자동화 모드 = 사용자 인터랙션 0 → OS가 idle 판단 → WiFi/CPU 절전 → RTT 변동성 ↑.
+이는 알고리즘 결함 아니라 환경 차이:
+- 수동 모드: 사용자 활동으로 WiFi 항상 활성 → §D-2 fix 정상 작동
+- 자동화 모드 idle: WiFi 절전 → §D-2 fix가 너무 엄격하게 발현 → anchor 매우 늦게
+
+§D-2 fix가 큰 RTT 환경에서도 결국 작동 (1분 58초 후 anchor gap 0.7ms로 정상 박힘) — fix는 견고. 단지 시간이 더 걸림.
+
+**측정 2차** (성공): RTT 정상화(ping 3.5~6.8ms) 후 재측정. csv `measurements/auto_2026-05-02_214017.csv` (1319행, 12분).
+
+**2차 결과**:
+
+| 지표 | 값 |
+|---|---|
+| drift 행 | **1195** (12분, 0.5초 주기) |
+| 첫 anchor 시점 | NR 34 (~58초 후) |
+| 첫 anchor EMA gap | **0.2ms** ⭐ |
+| **anchor_reset** | **0회 (12분 동안!)** ⭐⭐⭐ |
+| vfDiff signed mean | -5.25ms |
+| vfDiff RMS | 21.47ms |
+| range | -69.55 ~ +31.54ms |
+
+**누적 baseline 종합**:
+
+| 측정 | 시간 | drift 행 | anchor gap | reset | vfDiff signed mean | RMS |
+|---|---|---|---|---|---|---|
+| v0.0.62 수동 N=3 | 3분 | 333~370 | 0.1~11.7ms | 2~3회 | -10~-14 | 19~22 |
+| v0.0.63 수동 N=2 | 3분+ | 187~328 | 0.3~1.3ms | 0회 | -2.86~-7.33 | 14~18 |
+| v0.0.67 자동 short | 3분 | 307 | 0.2ms | 0회 | +2.36 | 16.05 |
+| **v0.0.67 자동 long** | **12분** | **1195** | **0.2ms** | **0회** | **-5.25** | **21.47** |
+
+**확정 사항**:
+
+1. **§D-2 fix가 long-term(12분)에서도 완벽 안정** — reset 0회. v0.0.62의 reset 2~3회와 압도적 개선.
+2. **자동화 인프라 long-term 검증 완료** — 한 줄 명령으로 12분 측정 자동.
+3. **PLAN MID-7 §C rate drift** — 12분 측정에서 vfDiff signed mean -5.25ms로 큰 누적 추세 미관찰. **§C는 12분 한계 내에선 결정 보류 유지** (30분 측정은 14분 PCM 한계로 불가능, §C 결정은 PCM streaming 구조 변경 후로 미룸).
+
+**자동화 모드 fundamental 한계 — 정직 기록**:
+
+자동화 측정은 **OS idle 환경**의 측정. 사용자 실제 환경(인터랙션 활성)과 다를 수 있음:
+
+| 측정 목적 | 자동화 신뢰도 |
+|---|---|
+| 회귀 검증 (자동화 vs 자동화) | ✅ OK — 같은 환경 비교 |
+| 알고리즘 작동 여부 (anchor establish 등) | ✅ OK |
+| 실 사용자 환경 절대값 추정 | ⚠️ 자동화에서 RTT 변동 큰 경우 부정확 |
+| 청감 평가 | ❌ 사람 귀 필수 |
+
+WiFi RTT가 자동화 환경에서 간헐적으로 비정상 (이번 1차 시도) — 항상 재현 X. 회피 옵션:
+- (B) Dart 레이어 keep-alive ping (1초 주기 dummy packet) — 측정 모드 한정
+- (C) Native WifiLock + WakeLock — Kotlin 코드 추가
+- 별도 트랙으로 보류 (간헐적이라 즉시 fix 우선순위 낮음)
+
+**version bump 안 함**: 측정·문서 only, 코드 변경 0.
+
+**다음 단계 후보**:
+- 출시 전 실기기 풀세트 회귀 (v0.0.57~v0.0.67 누적 영향, 청감 검증 포함)
+- 같은 모델 갤럭시 2대 다중 게스트 fix 검증 (PLAN HIGH-1) — 디바이스 확보 시
+- 14분 PCM 한계 해제 (PCM streaming 구조 변경) — §C rate drift 결정 트리거
+- iPhone BT 워밍업 (PLAN MID-8) — iPhone USB 환경 셋업
+
 ---
 
 #### 미해결 이슈
