@@ -627,6 +627,11 @@ class NativeAudioSyncService {
     final outLatGuestRaw = (data['outLatGuestRaw'] as num?)?.toDouble() ?? 0;
     final outLatDeltaCurrent = (data['outLatDeltaCurrent'] as num?)?.toDouble() ?? 0;
     final outLatDeltaAnchored = (data['outLatDeltaAnchored'] as num?)?.toDouble() ?? 0;
+    // v0.0.56 진단 컬럼 4개 (raw offset / RTT — anchor_reset_offset_drift root cause 분해용)
+    final rawOffsetMs = (data['rawOffsetMs'] as num?)?.toDouble() ?? 0;
+    final winMinRawOffsetMs = (data['winMinRawOffsetMs'] as num?)?.toDouble() ?? 0;
+    final lastRttMs = (data['lastRttMs'] as num?)?.toInt() ?? 0;
+    final winMinRttMs = (data['winMinRttMs'] as num?)?.toInt() ?? 0;
 
     // wall_ms는 호스트 받은 시점으로 통일 (단조 증가 보장).
     // guest_wall은 게스트가 보낸 원본 wallMs — TCP lag + clock offset 분석용.
@@ -647,6 +652,10 @@ class NativeAudioSyncService {
       outLatGuestRaw: outLatGuestRaw,
       outLatDeltaCurrent: outLatDeltaCurrent,
       outLatDeltaAnchored: outLatDeltaAnchored,
+      rawOffsetMs: rawOffsetMs,
+      winMinRawOffsetMs: winMinRawOffsetMs,
+      lastRttMs: lastRttMs,
+      winMinRttMs: winMinRttMs,
       event: event,
     );
     // 실시간 관측용 logcat 출력 (v0.0.24+)
@@ -1276,6 +1285,8 @@ class NativeAudioSyncService {
     double outLatDeltaCurrent = 0,
     double outLatDeltaAnchored = 0,
   }) {
+    // v0.0.56 진단: raw offset/RTT 매번 sync_service에서 가져와 첨부.
+    // 호출부마다 따로 추가하지 않고 여기서 일괄 — _sync는 게스트만 의미 있는 값.
     _p2p.sendToHost({
       'type': 'drift-report',
       'data': {
@@ -1292,6 +1303,10 @@ class NativeAudioSyncService {
         'outLatGuestRaw': outLatGuestRaw,
         'outLatDeltaCurrent': outLatDeltaCurrent,
         'outLatDeltaAnchored': outLatDeltaAnchored,
+        'rawOffsetMs': _sync.lastRawOffsetMs,
+        'winMinRawOffsetMs': _sync.winMinRawOffsetMs,
+        'lastRttMs': _sync.lastRttMs,
+        'winMinRttMs': _sync.winMinRttMs,
       },
     });
   }

@@ -95,6 +95,55 @@ iOS/Android 양쪽의 `outputLatency`가 BT 환경에서 비대칭(특히 iPhone
 
 ---
 
+## D-2. clock sync 안정 판정 — `isOffsetStable` 결함 (2026-05-02 (60) 신규)
+
+v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win_min_rtt_ms`) 추가 후 측정으로 발견. anchor가 EMA 수렴 전 박혀 부정확한 offset이 베이크인되는 root cause.
+
+**현행 동작 (v0.0.48~v0.0.56 동일)**: `SyncService.isOffsetStable`은 "step별 filtered 변화량 < 2ms 5회 연속"으로 판정 (`sync_service.dart:267-272`). slow phase α=0.1에서 매 step 변화 = (raw - filtered)×0.1이라 큰 gap이 누적된 상태에서도 step별로 작아 false positive 가능.
+
+**증거 (v0.0.56 idle 3분, S22 host + Tab A7 Lite guest, `measurements/v0.0.56_idle_2026-05-02.csv`)**:
+
+| 컬럼 | mean | range | span |
+|---|---|---|---|
+| **win_min_raw_offset** | -752.76 | -754 ~ -752 | **2ms** (진짜 안정 offset) |
+| filtered_offset | -752.02 | -753.60 ~ -740.60 | **13ms** (EMA lag) |
+| raw_offset (단일) | -753.71 | -940 ~ -624 | 316ms (RTT outlier) |
+| last_rtt | 30 mean | 6 ~ 465 | (outlier 빈번) |
+| win_min_rtt | 8.47 mean | - | (window min 매우 안정) |
+
+**Anchor 시퀀스 (결정타)**:
+
+| NR | event | filtered | win_min_raw | gap |
+|---|---|---|---|---|
+| 39 | anchor_set | -740.6 | -752.0 | **11.4ms!** (EMA 미수렴인데 stable로 판정) |
+| 52 | reset (6초 후) | -745.9 | -752.0 | 5.3ms 따라잡음 → 임계 5ms 초과 |
+| 53 | anchor_set | -745.9 | -752.0 | 6.1ms 차이 |
+| 85 | reset (17초 후) | -751.0 | -752.0 | 5.1ms 따라잡음 |
+| 86 | anchor_set | -751.0 | -752.0 | 1ms (드디어 수렴) |
+
+→ **clock skew 아님**. **EMA convergence lag**. 이전 (59) 가설("clock skew") 폐기.
+
+**선택지**:
+
+- **(D2-1) winMinRaw 일치 기준** — `(filteredOffsetMs - winMinRawOffsetMs).abs() < _stableThresholdMs`로 stable 판정. 1줄 변경. v0.0.56 데이터로 winMinRaw가 ±1ms 안정 확인 → 신뢰 가능 기준값. 단점: winMinRaw도 일시 outlier 시 흔들림 가능 (window=10이라 영향 작음).
+- **(D2-2) AND 조합** — 기존 변화량 < 2ms AND winMinRaw 일치 둘 다. 보수적. 안정 판정 5~15초 늦어질 수 있음.
+- **(D2-3) fast phase 길이 + α 조정만** — `_fastPhaseCount` 10→20 또는 α=0.5→0.3. 알고리즘 구조 변화 없음. 단 저변동 raw 환경에서 더 느림.
+
+**예상 trade-off**: anchor establish가 5~15초 늦어짐 → 첫 재생 정착 시간 (PLAN HIGH 3) 더 길어질 수 있음. 그 동안 fallback alignment(거친 정렬)만 작동. 청감 비교 필수.
+
+**race 시나리오**: stable 판정 늦어지는 동안 사용자 seek/play/pause 연타 시 — fallback alignment 단계에서 어떻게 동작? 현재도 anchor 없으면 fallback이라 동등하지만 시간이 길어질 뿐. (검증 필요)
+
+**검증 방법**:
+- v0.0.56 csv 컬럼 `raw_offset_ms` / `win_min_raw_offset_ms` 차이 시계열 → stable 판정 시점에 gap < 2ms 충족하는지
+- anchor_set 이벤트 시점의 (filtered - winMinRaw) gap이 임계 미만인지
+- reset 빈도 (idle 3분 4회 → ?회)
+- vfDiff 잔재 변화 (v0.0.55 -16ms → ?)
+- 청감 (idle 시작 후 첫 ~20초) — 더 거칠지 vs 견딜만한지
+
+**합의된 결정**: _(미정 — D2-1/D2-2/D2-3 + (D, E) 다른 결정과 묶어서 단일 commit)_
+
+---
+
 ## E. 임계 정확 값
 
 각 보정 액션이 발동하는 임계값. 값 자체보다 **왜 그 값인지**가 핵심 (사용자 청감 미인지 한계 + 측정 noise floor 균형).

@@ -45,8 +45,12 @@ class SyncMeasurementLogger {
     // out_lat_delta_anchored: anchor 시점 베이크인된 _anchoredOutLatDeltaMs
     //                        (보정 기준값 — 매 poll 변화 시 dynLatDelta로만 보정)
     // 4개 추가하면 vfDiff 잔재가 어디서 왔는지 직접 분해 가능.
+    // v0.0.56 진단 컬럼: anchor_reset_offset_drift root cause 분해용.
+    // raw_offset_ms: 가장 최근 ping/pong sample의 raw offset (EMA 적용 전)
+    // win_min_raw_offset_ms: window 내 min-RTT sample raw offset (실제 EMA 입력)
+    // last_rtt_ms / win_min_rtt_ms: 최근/window-min RTT — RTT outlier 추적
     _sink!.writeln(
-      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,event',
     );
     _nextSeq = 0;
     _isActive = true;
@@ -68,12 +72,16 @@ class SyncMeasurementLogger {
     double outLatGuestRaw = 0,
     double outLatDeltaCurrent = 0,
     double outLatDeltaAnchored = 0,
+    double rawOffsetMs = 0,
+    double winMinRawOffsetMs = 0,
+    int lastRttMs = 0,
+    int winMinRttMs = 0,
     String event = 'drift',
   }) {
     if (!_isActive) return;
     final seq = _nextSeq++;
     _sink?.writeln(
-      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$event',
     );
   }
 

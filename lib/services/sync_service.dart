@@ -47,6 +47,13 @@ class SyncService {
   /// EMA 필터링된 offset (double 정밀도, v3 drift 계산용)
   double _filteredOffsetMs = 0.0;
 
+  /// v0.0.56 진단: 가장 최근 sample의 raw offset (EMA 적용 전, single ping/pong)
+  double _lastRawOffsetMs = 0.0;
+  /// v0.0.56 진단: window 내 min-RTT sample의 raw offset (EMA 입력값)
+  double _winMinRawOffsetMs = 0.0;
+  int _lastRttMs = 0;
+  int _winMinRttMs = 0;
+
   /// 호출별 고유 sync request id: periodic/manual 동시 호출 시 pong 매칭
   int _syncRequestSeq = 0;
 
@@ -56,6 +63,13 @@ class SyncService {
 
   /// EMA 필터링된 offset (double). drift 계산에서 이 값을 사용.
   double get filteredOffsetMs => _filteredOffsetMs;
+
+  /// v0.0.56 진단 getter — anchor_reset_offset_drift root cause 분해용.
+  /// raw_offset_ms 단일 sample 변동성과 EMA lag 직접 추적.
+  double get lastRawOffsetMs => _lastRawOffsetMs;
+  double get winMinRawOffsetMs => _winMinRawOffsetMs;
+  int get lastRttMs => _lastRttMs;
+  int get winMinRttMs => _winMinRttMs;
 
   StreamSubscription? _messageSub;
   Timer? _periodicSyncTimer;
@@ -88,6 +102,10 @@ class SyncService {
   void reset() {
     _offsetMs = 0;
     _filteredOffsetMs = 0.0;
+    _lastRawOffsetMs = 0.0;
+    _winMinRawOffsetMs = 0.0;
+    _lastRttMs = 0;
+    _winMinRttMs = 0;
     _bestRtt = 999999;
     _synced = false;
     _messageSub?.cancel();
@@ -228,6 +246,12 @@ class SyncService {
       // window 내 min-RTT 샘플의 offset을 EMA로 혼합
       final minSample =
           _recentWindow.reduce((a, b) => a.rttMs < b.rttMs ? a : b);
+
+      // v0.0.56 진단: raw 값 노출 (EMA lag/outlier 분해용)
+      _lastRawOffsetMs = sample.rawOffsetMs.toDouble();
+      _winMinRawOffsetMs = minSample.rawOffsetMs.toDouble();
+      _lastRttMs = sample.rttMs;
+      _winMinRttMs = minSample.rttMs;
 
       // 초기 10샘플은 alpha=0.3 (빠른 수렴), 이후 0.1 (안정 유지)
       _periodicSampleCount++;

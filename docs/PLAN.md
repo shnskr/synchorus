@@ -103,25 +103,21 @@
 
 1. **v0.0.54 다중 게스트 fix 실측 검증** — 같은 모델 갤럭시 2대 이상 환경에서 peer count 3 유지 + 비행기 모드 on/off 후에도 유지 확인. 현재 보유 디바이스(S22 + iPhone 12 Pro + Tab A7 Lite)는 모델 다 달라 A안만으로도 통과 → 진짜 검증은 같은 모델 2대 이상 필요. 상세: HISTORY (52).
 
-2. **v0.0.53 anchor fix 효과 검증 측정** — `_seekCorrectionAccum` 중복 호출 fix 후 vfDiff 잔재 감소 확인. HISTORY (50) "다음 세션 시작 시 측정 가이드" 표 빈칸 채우기. v0.0.53 빌드 완료, install만 진행:
-   ```bash
-   flutter install --debug --device-id R3CT60D20XE      # S22
-   flutter install --debug --device-id R9PW315GL0L      # Tab A7 Lite
-   # idle 3분 측정 → csv pull → 분석
-   awk -F, 'NR==1{next} $16=="drift"{n++; sumv+=$6; sla+=$15; slc+=$14} END{printf "vfDiff signed=%.2f anchored=%.2f current=%.2f diff=%.2f\n", sumv/n, sla/n, slc/n, (sla-slc)/n}' <csv>
-   ```
-   - vfDiff signed |값| < 3.60ms (v0.0.52 baseline) → fix 효과 있음
-   - 비슷하면 → 다른 root cause 추가 진단
+2. ~~**v0.0.53 anchor fix 효과 검증 측정**~~ — **완료 (2026-05-02 (59))**. 결과: vfDiff signed -15.94ms (v0.0.52 -3.60ms 대비 4배↑), anchored vs current diff 0.22ms (EMA 효과 없음 확정). anchor 중복 호출 제거가 root cause 아니었음. 후속 작업은 신규 HIGH 항목 2-A/2-B로 분기.
+
+2-A. ~~**anchor establish robustness**~~ — **SYNC_ALGORITHM_V2 §D-2로 흡수 (2026-05-02 (60))**. (60) raw 진단으로 root cause가 EMA convergence lag로 좁혀짐. 단독 fix 대신 디자인 단일 commit으로 묶음 (HIGH 4 참조).
+
+2-B. ~~**anchor_reset_offset_drift 빈도 root cause**~~ — **(60)에서 진단 완료**. idle 3분 reset 4회는 잘못된 stable 판정으로 박힌 anchor가 EMA가 진짜 값에 따라잡는 동안 5ms 임계 자연 초과한 결과. clock skew 아니라 EMA convergence lag (`SyncService.isOffsetStable` 판정 결함). 단독 fix 대신 SYNC_ALGORITHM_V2 §D-2로 명세 후 단일 commit (HIGH 4 참조).
 
 3. **첫 재생 정착 시간 — BT 무관 (HISTORY (39))**. 모든 시나리오에서 첫 재생 직후 ~수 초 어긋남. 원인 — 게스트 `engine.start()` 자체 지연(iOS 100~500ms) + 첫 anchor establish 전 fallback alignment 정밀도 + clock sync 수렴 시간. RTT 자체는 보정됨. 옵션: (1) NTP-style 예약 재생, (2) 게스트 사전 워밍업, (3) 첫 anchor 가속(회귀 위험). 가성비 2번, 효과 1번.
 
-4. **anchor reset 후 fallback 단계 큰 drift edge case (HISTORY (42))**. Android 게스트 한정 stream open latency가 외삽에서 누락 → drift 최대 -634ms. v0.0.46 oboe pause/resume + v0.0.47 NTP 둘 다 시도, v0.0.48에서 롤백. 정공법은 [SYNC_ALGORITHM_V2.md](SYNC_ALGORITHM_V2.md) 디자인 문서 작성 후 단일 commit 구현.
+4. **SYNC_ALGORITHM_V2 디자인 단일 commit** (anchor reset 후 fallback 큰 drift HISTORY (42) + EMA stable 판정 결함 (60) + 다른 결정사항 묶음). [SYNC_ALGORITHM_V2.md](SYNC_ALGORITHM_V2.md) §A-F 빈칸 채우기 → 사용자 합의 → 단일 commit. **신설 §D-2 (EMA stable 판정 결함)** — (60)에서 root cause + fix 후보 D2-1/D2-2/D2-3 명시됨. 다른 §과 묶어 한 번에 결정 권장. (44) 13번 사이클 회피.
 
 ### MID
 
 5. **HISTORY (45) -20.84ms 잔재 자연 재현 시 root cause 분해** — v0.0.53 진단 컬럼 활성 상태로 다양 환경(BT 게스트, 다른 시간대 등) 측정. 큰 잔재 발생 시 `out_lat_*` 컬럼으로 직접 분해.
 
-6. **EMA 단독 cherry-pick (B-1) 검토** — `backup-v0.0.61-session` 에서 EMA 부분만. 항목 2 결과로 anchor 중복 호출 fix가 부족하면 진행. anchor reset 시 outputLatency EMA 보존 → 점진 수렴.
+6. ~~**EMA 단독 cherry-pick (B-1) 검토**~~ — **우선순위 ↓ (2026-05-02 (59))**. 측정 결과 outputLatency anchored vs current diff = 0.22ms로 사실상 0 → EMA 보존 효과 미미할 것으로 강한 신호. 본 항목은 (A)/(B) root cause fix 진행 후에도 잔재가 있을 때만 재고려.
 
 7. **30분+ 장시간 idle 측정** — rate drift 누적 검증 (현재 4분만).
 

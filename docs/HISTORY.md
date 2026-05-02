@@ -2791,15 +2791,17 @@ vfDiff = (hostContentMs + outLatDelta_anchor) - hostContentMs - currentOutLatDel
 
 **다음 세션 시작 시 측정 가이드** (이 표 빈칸 채우기 작업):
 
-| 지표 | v0.0.52 (이전) | v0.0.53 (fix 후, 측정 후 기록) |
-|---|---|---|
-| vfDiff signed mean | -3.60ms | ___ ms |
-| out_lat_delta_anchored | 14.72ms | ___ ms |
-| out_lat_delta_current | 14.78ms | ___ ms |
-| 두 값 차이 (anchored - current) | -0.06ms | ___ ms |
-| 실제 vfDiff vs 수식상 | -3.54ms 추가 오차 | ___ ms 추가 오차 |
-| 청감 (idle) | "초반 1~2초 + 잘 맞음" | ___ |
-| 청감 (burst) | "나쁘지 않음" | ___ |
+| 지표 | v0.0.52 | v0.0.55 (2026-05-02) | v0.0.56 (2026-05-02, raw 진단 추가) |
+|---|---|---|---|
+| vfDiff signed mean | -3.60ms | -15.94ms | -10.55ms |
+| out_lat_delta_anchored | 14.72 | 14.74 | (생략) |
+| out_lat_delta_current | 14.78 | 14.52 | (생략) |
+| 두 값 차이 (anchored - current) | -0.06 | +0.22 (사실상 0, EMA 효과 없음) | (생략) |
+| anchor_reset_offset_drift | - | 4회/3분 | 2회/3분 (NR 52, 85) |
+| **win_min_raw_offset span** | 미측정 | 미측정 | **2ms (-754~-752, 진짜 안정)** |
+| **filtered vs win_min_raw gap (anchor 시점)** | 미측정 | 미측정 | **NR 39: 11.4ms → root cause 확정** |
+
+→ 결론: anchor 중복 호출은 root cause 아님 ((59)). 진짜 root cause는 EMA convergence lag + isOffsetStable 판정 결함 ((60)).
 
 **측정 시나리오** (다음 세션 첫 작업):
 1. **빌드 + install**: 이미 빌드되어 있음 (`build/app/outputs/flutter-apk/app-debug.apk`). 단 install 필요.
@@ -3204,6 +3206,115 @@ C. **A + B 동시 적용 (권장)**
 **검증**: `flutter analyze` 영향 없음. LIFECYCLE.md 471줄 → 약 510줄. 정확성 회복이 주 목적이라 분량 증가 적음.
 
 **프로세스 청산 완료**: `docs/` 5개 문서(CLAUDE.md/HISTORY.md/PLAN.md/ARCHITECTURE.md/DECISIONS.md/LIFECYCLE.md/SYNC_ALGORITHM_V2.md 중 핵심 5개) 모두 v0.0.55까지 부채 청산. 사용자 지시 "항상 히스토리만 업데이트했었구나"가 더 이상 사실이 아님 — 이번 (56)+(57)+(58) 삼중 청산으로 회복.
+
+### 2026-05-02 (59) — v0.0.53 anchor fix 효과 검증 측정 — fix 효과 없음 / 다른 root cause 확정
+
+**환경**: S22 호스트 + Tab A7 Lite 게스트, 같은 WiFi, idle 3분 (사용자 측정). v0.0.55 빌드(=v0.0.53 fix 포함) 양 기기 install 후 측정. csv는 호스트(S22)가 기록(`native_audio_sync_service.dart:140-141`, drift 로깅도 596번 줄에서 `!_isHost return`).
+
+**측정 데이터**: `measurements/v0.0.55_idle_2026-05-02.csv` (drift 행 353개, anchor_reset_offset_drift 4회, 약 3분).
+
+**전체 통계**:
+
+| 구간 | n | vfDiff signed | \|mean\| | RMS | range |
+|---|---|---|---|---|---|
+| 전체 | 353 | **-15.94ms** | 18.76 | 22.91 | -63 ~ +21 |
+| 중간 안정 75초 (NR 52-191, no reset) | 140 | **-22.86ms** | 22.91 | 26.83 | -47 ~ +1 |
+| 마지막 reset 후 (NR ≥ 230) | 146 | **-9.06ms** | 14.62 | 17.38 | -36 ~ +18 |
+| **v0.0.52 baseline** | - | **-3.60ms** | - | - | - |
+
+**핵심 관찰**:
+1. **fix 후 잔재 오히려 4배 커짐** (-3.60 → -15.94ms) — anchor 중복 호출 제거가 root cause가 아니었음. (50) 빌드 직후 가설("의도된 1번 호출로 회복")은 측정으로 기각.
+2. **idle 3분에 anchor_reset_offset_drift 4회** — NR 14, 28, 50, 192, 228. 처음 25초 동안 3회 발생 후 75초 안정 후 또 1회. offset 변동성 자체가 큼.
+3. **outputLatency anchored vs current diff = +0.22ms** — 사실상 0. EMA 단독 cherry-pick (PLAN MID-6, B-1)가 효과 없을 거란 강한 신호. PLAN B-1 우선순위 ↓.
+4. **안정 구간끼리도 -22ms vs -9ms로 다름** — 같은 코드/세션 내 75초 무리셋 구간과 마지막 리셋 후 구간의 베이크인 잔재가 ~14ms 차이. anchor establish 순간의 noise(framePos 외삽 부정확 + clock sync 수렴 불충분)가 anchor에 영구 베이크인되는 구조 확정.
+
+**정정 사실**: 분석 도중 "S22 게스트였던 듯" 잠시 오해 → 코드 확인 후 호스트 맞음. csv는 호스트만 로깅(`startListening` 호스트 분기에서만 `_logger.start()`). drift_ms / vf_diff_ms 모두 호스트 시점.
+
+**root cause 후보 — 다음 진단 우선순위**:
+- **(A) anchor establish 시점 단일 샘플 noise 베이크인** ← 가장 유력 (당시 가설). 다음 (60) raw 진단으로 부분 확인 — anchor 시점 EMA 미수렴이 진짜 원인. 외삽 오차 자체는 추가 분리 안 됨.
+- **(B) anchor_reset_offset_drift 빈도 자체** — idle 3분에 4회는 비정상. **이 세션 내 (60)에서 진단 — root cause는 EMA convergence lag, clock skew 아님 (이 (59)의 "monotone drift = 진짜 clock skew" 가설은 폐기)**. 상세 (60) 참고.
+- **(C) 외삽 오차 분해** — `out_lat_*` 진단 컬럼은 anchored vs current diff만 0.22ms로 단정 가능. framePos 외삽 정확도는 별도 진단 필요(현 csv 컬럼으로는 분리 불가). 새 진단 컬럼 추가 검토.
+
+**가설 폐기 메모 (자기 정정)**: 이 (59) 작성 시점에 "offset이 monotone drift → 두 디바이스 wall clock skew (~380ppm)" 가설 제시했으나, 사용자 "다시 검토해봐" 지시로 재검증. csv polling rate 가정 오류(100ms로 가정했는데 실제 ~500ms) + reset 후 drift 지속 여부 미검증 등 결함 확인. (60) raw_offset_ms 진단 컬럼 측정으로 진짜 메커니즘은 EMA convergence lag임이 확정 — clock skew 아니라 EMA가 진짜 offset에 천천히 수렴하는 transient.
+
+**보존**: v0.0.52 진단 컬럼 4개(`out_lat_*`)는 (54)에서 "HIGH-2 측정 끝나면 정리" 명시했으나 본 측정으로 EMA 효과 없음 확인 → 정리해도 무관. 다만 (B) 진단 시 `out_lat_*` 변동성 추적에 재활용 가능 → **유지** 권장. 정리는 (A) 또는 (B) fix 완성 후로 미룸.
+
+**version bump 안 함**: 측정·문서 only. 코드 변경 0.
+
+**다음 세션 작업 후보 갱신** (PLAN.md HIGH-2 → "측정 완료, 다른 root cause 진단" 단계):
+- **HIGH 신규 1**: anchor establish robustness (단일 샘플 → N샘플 중앙값) — root cause (A) fix. 회귀 위험 검토 + SYNC_ALGORITHM_V2 디자인에 흡수 가능성 검토.
+- **HIGH 신규 2**: anchor_reset_offset_drift 빈도 root cause — clock sync EMA 시정수 / reset 임계 분석.
+- **MID-6 (EMA cherry-pick)**: 본 측정으로 우선순위 ↓ (anchored - current diff 0.22ms로 효과 미미 확정).
+- **HIGH 4 (SYNC_ALGORITHM_V2)**: 위 (A)/(B)와 동일 root cause 추적이라 디자인에 흡수 가능 — 묶어서 진행 권장.
+
+### 2026-05-02 (60) — v0.0.56 raw_offset 진단 컬럼 추가 + EMA convergence lag root cause 확정
+
+**배경**: (59)에서 "offset monotone drift = wall clock skew ~380ppm" 가설로 잠정 결론. 사용자 "다시 검토해봐" 지시로 재검증. csv polling rate 가정 오류(100ms 가정 → 실제 ~500ms) + reset 후 drift 지속 여부 미관찰 등으로 가설 결함 확인. clock skew vs EMA transient 구분하려면 raw offset 자체 추적 필요 → 진단 컬럼 추가.
+
+**변경 (`v0.0.56`, 알고리즘 0 변경 — 진단/측정만)**:
+
+`lib/services/sync_service.dart`:
+- 필드 4개 추가: `_lastRawOffsetMs`, `_winMinRawOffsetMs`, `_lastRttMs`, `_winMinRttMs`
+- pong 처리부에서 매 sample마다 업데이트 (EMA 입력 전에)
+- public getter 4개 추가
+- `reset()`에서 4개 0으로 초기화
+
+`lib/services/sync_measurement_logger.dart`:
+- csv 헤더에 `raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms` 4개 추가 (event 컬럼 직전)
+- `log()` 시그니처 옵셔널 매개변수 4개 추가
+
+`lib/services/native_audio_sync_service.dart`:
+- `_sendDriftReport`에서 sync_service getter로 4개 값 가져와 메시지 첨부 (호출부 4군데 수정 안 함 — `_sendDriftReport` 내부에서 일괄)
+- 호스트 `_handleDriftReport`에서 받아 `_logger.log()`에 전달
+
+`pubspec.yaml`: 0.0.55 → 0.0.56.
+
+**측정 (S22 host + Tab A7 Lite guest, idle ~3분, `measurements/v0.0.56_idle_2026-05-02.csv`)**:
+
+| 컬럼 | mean | range | span | 의미 |
+|---|---|---|---|---|
+| **win_min_raw_offset** | -752.76 | -754 ~ -752 | **2ms** | 진짜 안정적인 offset (window=10 min-RTT sample) |
+| filtered_offset | -752.02 | -753.60 ~ -740.60 | **13ms** | EMA 결과, lag 영향 |
+| raw_offset (단일) | -753.71 | **-940 ~ -624** | 316ms | 단일 sample, RTT outlier 큼 |
+| last_rtt | 30 mean | **6 ~ 465** | 459 | outlier 빈번 |
+| win_min_rtt | 8.47 mean | - | - | window min 매우 안정 |
+| vfDiff signed | -10.55 | - | - | (참고: v0.0.55 -15.94, v0.0.52 -3.60) |
+
+**Anchor 시퀀스 (결정타)**:
+
+| NR | event | filtered | win_min_raw | gap |
+|---|---|---|---|---|
+| 39 | anchor_set | -740.6 | -752.0 | **11.4ms!** (EMA 미수렴인데 stable로 판정됨) |
+| 52 | reset (6초 후) | -745.9 | -752.0 | 5.3ms 따라잡음 → 임계 5ms 초과 |
+| 53 | anchor_set | -745.9 | -752.0 | 6.1ms 차이 |
+| 85 | reset (17초 후) | -751.0 | -752.0 | 5.1ms 따라잡음 |
+| 86 | anchor_set | -751.0 | -752.0 | 1ms (드디어 수렴) |
+
+**핵심 결론 (v0.0.48 이래 잠재되어 있던 결함)**:
+1. **clock skew 아님** (win_min_raw span 2ms, 두 디바이스 시계 사실상 동기). (59) 가설 폐기.
+2. **EMA convergence lag가 진짜 메커니즘** — anchor가 EMA 수렴 전에 박혀 부정확한 offset이 베이크인됨.
+3. **`SyncService.isOffsetStable` 판정 결함** — "step별 변화량 < 2ms 5회"로 판정하는데, slow phase α=0.1에서 누적 gap이 큰 상태에서도 step별로는 작아 false stable. NR 39에서 EMA(-740.6) vs 진짜 값(-752) 11.4ms gap인데 stable=true 통과한 게 증거.
+4. **`anchor_reset_offset_drift` 빈도(idle 3분 4회)는 정상 반응** — 잘못된 stable 판정으로 박힌 anchor가 EMA가 진짜 값으로 따라잡는 동안 5ms 임계 자연 초과. fix 자체보다 anchor establish 게이팅이 root cause.
+
+**fix 후보 (이번 세션 미적용 — 알고리즘 변경이라 (44) 13번 사이클 교훈 따라 SYNC_ALGORITHM_V2 단일 commit으로 미룸)**:
+- **(D2-1) winMinRaw 일치 기준** — `(filteredOffsetMs - winMinRawOffsetMs).abs() < _stableThresholdMs`로 stable 판정. 1줄 변경.
+- **(D2-2) AND 조합** — 기존 변화량 + winMinRaw 일치 둘 다.
+- **(D2-3) fast phase 길이 / α 조정만** — 알고리즘 구조 변화 없음.
+
+→ `docs/SYNC_ALGORITHM_V2.md`에 신설 §D-2로 명세. 다른 결정사항(D anchor 분리, E 임계, F race 차단 등)과 묶어서 단일 commit 후보.
+
+**왜 이번에 fix 적용 안 함**:
+- 사용자 본인이 v0.0.48 청감 "매우 안정"으로 판정한 baseline (HISTORY:2580). 이 baseline이 "EMA 미수렴 anchor"라는 잠재 결함 위에서도 청감상 안정이라는 뜻 → 측정 잔재 -16ms는 청감 미인지 영역일 가능성.
+- (44) 13번 사이클 교훈: 측정 개선 보고 알고리즘 손대다 청감 회귀. 이번 fix도 trade-off (첫 anchor 5~15초 늦어짐 → 첫 재생 정착 영향)가 있어 **사용자 청감 비교 + 다른 결정과 묶어서 단일 commit**이 안전.
+
+**version bump**: 0.0.55 → 0.0.56 (코드 변경 — 진단 컬럼).
+
+**검증**: `flutter analyze` No issues. 빌드 + 두 기기 install 완료. 측정 csv 정상 생성·schema 일치.
+
+**다음 세션 작업 후보 갱신**:
+- **PLAN HIGH 2-A/2-B는 SYNC_ALGORITHM_V2 §D-2로 흡수** — 단독 fix 대신 디자인 단일 commit으로 묶음.
+- **PLAN HIGH 4 (SYNC_ALGORITHM_V2 디자인)**: §D-2 추가됨, §A-F 빈칸 채우기 + 사용자 합의 + 단일 commit 진행이 다음 알고리즘 트랙 첫 작업.
+- 다른 영역(같은 모델 갤럭시 2대 환경에서 v0.0.54 다중 게스트 fix 검증, 의존성 업데이트 등)은 알고리즘과 독립이라 병행 가능.
 
 ---
 
