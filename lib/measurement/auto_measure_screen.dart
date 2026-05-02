@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
@@ -44,6 +45,10 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
   @override
   void initState() {
     super.initState();
+    // wakelock 활성 — OS idle 판단 방지로 WiFi 절전 회피.
+    // (77) 첫 long 측정에서 RTT 156~338ms로 §D-2 fix 통과 못한 root cause.
+    // 자동 측정 모드 한정이라 일반 앱 모드 영향 0.
+    WakelockPlus.enable();
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (widget.mode == 'host') {
         _runHost();
@@ -61,6 +66,7 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
     _stopTimer?.cancel();
     _exitTimer?.cancel();
     _elapsedTimer?.cancel();
+    WakelockPlus.disable();
     super.dispose();
   }
 

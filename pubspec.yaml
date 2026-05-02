@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.67+1
+version: 0.0.68+1
 
 environment:
   sdk: ^3.11.4
@@ -42,6 +42,9 @@ dependencies:
   # raw UDP broadcast의 iOS multicast entitlement 필요성 우회.
   nsd: ^5.0.1
   device_info_plus: ^12.4.0
+  # 자동 측정 모드 한정 — OS idle 판단 방지 (WiFi 절전 회피).
+  # 일반 모드는 entry에서 호출 안 하므로 영향 0.
+  wakelock_plus: ^1.5.2
 
 dev_dependencies:
   flutter_test:

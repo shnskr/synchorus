@@ -4051,6 +4051,35 @@ WiFi RTT가 자동화 환경에서 간헐적으로 비정상 (이번 1차 시도
 - 14분 PCM 한계 해제 (PCM streaming 구조 변경) — §C rate drift 결정 트리거
 - iPhone BT 워밍업 (PLAN MID-8) — iPhone USB 환경 셋업
 
+### 2026-05-02 (78) — v0.0.68 자동화 측정 wakelock 추가 (WiFi keep-alive)
+
+**배경**: (77) 첫 long 측정 RTT 156~338ms 회귀의 root cause는 **자동 측정 모드 = 사용자 인터랙션 0 = OS idle 판단 = WiFi 절전**. 알고리즘 결함 아닌 환경 차이지만 자동화 측정 신뢰도 위해 회피 fix.
+
+**fix**:
+
+`pubspec.yaml`: `wakelock_plus: ^1.5.2` 추가 (1.6.0은 package_info_plus 10 요구하나 우리는 9.0.1 보류 중이라 1.5.2로).
+
+`auto_measure_screen.dart`:
+- `initState()` 시 `WakelockPlus.enable()` — OS idle 판단 방지
+- `dispose()` 시 `WakelockPlus.disable()`
+
+효과:
+- 자동 측정 모드 entry에서 화면 항상 켠 채 + CPU/WiFi 절전 방지
+- 일반 앱 모드는 entry 미참조라 영향 0
+- Cross-platform 자동 (Android/iOS 둘 다)
+
+**Trade-off (작음)**:
+- 측정 시간 동안 배터리 소모 ↑ (자동 측정 모드만)
+- 측정 끝나면 dispose에서 자동 해제
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug --dart-define=AUTO_MEASURE_MODE=host` ✓ 12.1s
+
+**version bump**: 0.0.67+1 → 0.0.68+1.
+
+**다음 단계**: `./scripts/measure.sh --short` 또는 `--long`로 RTT 정상 유지되는지 검증.
+
 ---
 
 #### 미해결 이슈
