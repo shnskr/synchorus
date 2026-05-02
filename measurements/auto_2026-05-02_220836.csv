@@ -1,0 +1,3 @@
+seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,event
+0,1777727056959,0,host,0.00,0.00,1777727056635,0.0,0,0,0,0.00,0.00,0.00,0.00,0.0,0.0,0,0,host_play
+1,1777727236676,0,host,0.00,0.00,1777727236633,0.0,8625120,0,0,0.00,0.00,0.00,0.00,0.0,0.0,0,0,host_pause

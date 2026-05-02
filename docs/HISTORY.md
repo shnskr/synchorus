@@ -4130,6 +4130,74 @@ stable=1, 2, 3, 4, 5, ..., 20 (정상 증가)
 - `--long` 12분 측정 N=2~3 추가 (long-term 안정성 변동성 검증)
 - 다른 PLAN 항목
 
+### 2026-05-02 (80) — v0.0.68 자동화 short N=3 — 일시 WiFi glitch 발견 + 실패 run 처리 규칙
+
+**측정**: `./scripts/measure.sh --short × 3회 sequential` (~18분).
+
+**결과 분포**:
+
+| Run | csv | drift 행 | anchor gap | vfDiff signed | RMS | 상태 |
+|---|---|---|---|---|---|---|
+| 1 | `auto_2026-05-02_220836.csv` (3행) | 0 | - | - | - | ❌ 실패 |
+| 2 | `auto_2026-05-02_221407.csv` (327행) | 192 | 0.4ms | +8.46 | 17.57 | ✅ |
+| 3 | `auto_2026-05-02_221937.csv` (163행) | 56 | 1.5ms | -18.94 | 25.65 | ✅ |
+
+**Run 1 실패 진단**:
+
+게스트 logcat:
+```
+22:04:18 sync OK (RTT=9ms) — 정상 시작
+22:04:36 Periodic sync RTT=5777ms ← 갑자기 5초 폭증
+22:04:38 SocketException: Connection reset by peer (errno=104) — 호스트가 TCP 끊음
+22:07:48 측정 시간 종료 (게스트 reconnect 시도 X)
+```
+
+**Root cause**: WiFi 일시 glitch → RTT 폭증 → 호스트 heartbeat timeout → TCP close → 게스트 reconnect 부재 (자동화 모드는 RoomLifecycleCoordinator 미적용).
+
+**wakelock 한계 인정**:
+
+wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 **WiFi power save 자체와 일시적 네트워크 glitch는 별개**:
+- ✅ OS idle 판단 방지 (CPU governor, 화면 off 회피)
+- ⚠️ WiFi router/AP 측 일시 변동, 다른 디바이스 활동, 채널 혼잡 등은 회피 불가
+
+자동화 측정의 **inherent 변동성** — 1/3 (~33%) 일시 실패 발생 가능.
+
+**옵션 C 채택 — 분석 시 실패 run 제외 규칙** (코드 변경 0):
+
+자동화 측정 N개 진행 후 분석:
+1. **실패 run 식별 기준**: csv `event` 컬럼에 `drift` 행이 측정 시간(durationSec) × 0.5 (0.5초 주기) × 0.5 (안전 마진) 이하면 실패 간주.
+   - 예: --short(180s) → 정상은 ~150~360 drift 행. 실패는 < 50 정도.
+   - --long(720s) → 정상은 ~700~1500 drift 행. 실패는 < 200.
+2. **분석은 정상 run만**: 실패 run은 총계에서 제외, 별도 "실패 횟수" 표시.
+3. **N=3+ 측정 권장**: 실패 1회 발생 시 정상 N=2 확보. N=4+면 더 견고.
+
+**대안 (보류)**:
+- (A) 자동화 게스트 reconnect 로직 추가 — 알고리즘 영역, 회귀 위험
+- (B) measure.sh 실패 자동 재시도 — csv 빈 행 감지 시 재실행. 실용적이지만 별도 작업
+
+이번 세션은 (C)로 마감. 향후 (B) 자동 재시도가 가성비 좋으면 추가 가능.
+
+**확정 정리 — 자동화 측정 신뢰도 가이드라인**:
+
+| 측정 목적 | 자동화 N개 권장 | 신뢰도 |
+|---|---|---|
+| 회귀 검증 (regression detection) | N=3 | 1/3 실패 허용, 정상 2/3로 충분 |
+| 변동성 분포 (distribution sampling) | N=5+ | 실패 1~2회 제외 후 분포 분석 |
+| 알고리즘 작동 여부 (binary check) | N=2 | 1번이라도 정상이면 작동 확인 |
+| 절대 수치 추정 (수동 baseline 비교) | N=3+ + 수동 N=3 | 자동화 절대값은 wide variance |
+
+**Run 2/3 (정상 N=2) 정리**:
+- anchor gap 모두 < 2ms (0.4 / 1.5)
+- anchor_reset 둘 다 0회
+- vfDiff signed +8.46 / -18.94 (수동 baseline -2.86~-7.33보다 wide variance)
+
+→ §D-2 fix 자체는 정상 작동, 자동화 환경에서 wide variance 정상.
+
+**다음 단계 후보**:
+- 출시 전 실기기 풀세트 회귀 — 수동 청감 검증 (자동화는 이미 충분)
+- `measure.sh` 실패 자동 재시도 추가 (옵션 B, 별도 트랙)
+- 다른 PLAN 항목
+
 ---
 
 #### 미해결 이슈
