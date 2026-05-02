@@ -3,9 +3,16 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
+import 'measurement/auto_measure_screen.dart';
 import 'providers/app_providers.dart';
 import 'screens/home_screen.dart';
 import 'services/audio_handler.dart';
+
+// 측정 자동화 모드 — `--dart-define=AUTO_MEASURE_MODE=host|guest` 빌드 시 활성화.
+// default('') = 통상 앱 실행. 출시 빌드는 dart-define 없이 빌드되므로 영향 0.
+const String _autoMeasureMode = String.fromEnvironment('AUTO_MEASURE_MODE');
+const int _autoMeasureDurationSec =
+    int.fromEnvironment('AUTO_MEASURE_DURATION_SEC', defaultValue: 720);
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -43,7 +50,12 @@ class SynchorusApp extends StatelessWidget {
         ),
         useMaterial3: true,
       ),
-      home: const HomeScreen(),
+      home: _autoMeasureMode.isNotEmpty
+          ? AutoMeasureScreen(
+              mode: _autoMeasureMode,
+              durationSec: _autoMeasureDurationSec,
+            )
+          : const HomeScreen(),
     );
   }
 }

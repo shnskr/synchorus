@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.63+1
+version: 0.0.64+1
 
 environment:
   sdk: ^3.11.4
@@ -64,6 +64,11 @@ flutter:
   # included with your application, so that you can use the icons in
   # the material Icons class.
   uses-material-design: true
+
+  # 측정 자동화용 비프음 (1초 주기, 100ms 1000Hz sine + 900ms 무음, 12분).
+  # AUTO_MEASURE_MODE 빌드 시에만 사용. 출시 빌드에 포함되나 entry에서 미참조라 죽은 데이터.
+  assets:
+    - assets/measure_audio.mp3
 
   # To add assets to your application, add an assets section, like this:
   # assets:

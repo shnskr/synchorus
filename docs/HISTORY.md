@@ -3752,6 +3752,53 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 - iPhone 게스트 BT 워밍업 케이스 (PLAN MID-8)
 - 같은 모델 갤럭시 2대 환경에서 v0.0.54 다중 게스트 fix 검증 (PLAN HIGH-1)
 
+### 2026-05-02 (72) — v0.0.64 측정 자동화 인프라 (--dart-define 측정 모드)
+
+**배경**: v0.0.62 N=3 + v0.0.63 N=2 측정에서 매번 사용자가 양쪽 기기 종료/실행/방생성/입장/파일선택/재생을 수동 진행. 자동화 가치 명확. 14분 PCM 한계(`oboe_engine.cpp:143` 150MB)도 발견 — 12분 이내 측정 권장.
+
+**디자인 — 옵션 4 (`--dart-define=AUTO_MEASURE_MODE`)**:
+- 출시 영향 0 (flag 없으면 entry 미참조)
+- 측정 모드: 호스트 자동 방생성+자동재생, 게스트 자동입장
+- 한 줄 명령으로 빌드/install/launch/대기/csv pull/통계 출력
+- 양쪽 기기 같은 빌드 mode일 수 없으므로 호스트/게스트 각각 빌드 후 install
+
+**변경 (`v0.0.64`)**:
+
+1. **`assets/measure_audio.mp3`** (11.5MB) — ffmpeg 생성. 1초 주기 1000Hz sine 100ms beep + 5ms fade in/out + 900ms 무음 패턴, 12분 (720회 반복), 128kbps mp3.
+   - `pubspec.yaml` assets 등록.
+
+2. **`lib/measurement/auto_measure_screen.dart`** (신규):
+   - `AutoMeasureScreen(mode, durationSec)` ConsumerStatefulWidget
+   - HOST 모드: P2PService.startHost → DiscoveryService.startBroadcast → 게스트 입장 대기(60s) → assets mp3 → temp 복사 → loadFile → 5s 안정 → syncPlay → durationSec 후 syncPause → 5s 후 SystemNavigator.pop()
+   - GUEST 모드: discoverHosts → 첫 발견 자동 connectToHost → startListening(isHost: false) → durationSec+30s 후 종료
+   - minimal UI: 진행 status + error 표시
+
+3. **`lib/main.dart`** (분기 추가):
+   - `String.fromEnvironment('AUTO_MEASURE_MODE')` 체크
+   - 'host' / 'guest' → `AutoMeasureScreen`, 그 외 → `HomeScreen` (기존)
+   - `AUTO_MEASURE_DURATION_SEC` (default 720)
+
+4. **`scripts/measure.sh`** (신규):
+   - 1) host용 빌드 + 호스트 install / 2) guest용 빌드 + 게스트 install / 3) 양쪽 강제 종료 + launch / 4) (durationSec + 100s) 대기 / 5) csv pull / 6) 통계 출력
+   - default: S22(R3CT60D20XE) host + A7 Lite(R9PW315GL0L) guest, 12분
+   - 옵션: `-d 300` (5분), `-h <id>` (호스트 변경), `-g <id>` (게스트 변경)
+
+**자동화 범위 한계 (정직)**:
+- ✅ Android 양쪽 idle 측정 자동화 — 한 줄 명령
+- ⚠️ 청감 평가는 본질적으로 사람 필요 (csv `drift_ms < 5ms` proxy 가능하지만 청감과 1:1 매핑 아님)
+- ❌ iPhone 시나리오 (USB hung 이슈 + BT)
+- ❌ 사용자 연타 race 시나리오 (UI tap 자동화 필요)
+- ❌ BT 라우팅 검증 (페어링 + 라우팅 OS 인터랙션)
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug --dart-define=AUTO_MEASURE_MODE=host` ✓ 13.6s
+- 실제 자동화 측정 검증은 다음 commit (1회 검증 후 baseline 비교)
+
+**version bump**: 0.0.63+1 → 0.0.64+1.
+
+**다음 단계**: `./scripts/measure.sh -d 720` 1회 검증 → v0.0.63 N=2 baseline과 비교 → 자동화 의도대로 작동 확인.
+
 ---
 
 #### 미해결 이슈
