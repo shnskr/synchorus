@@ -3389,6 +3389,26 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 단계**: 비오디오 메이저 업그레이드 — `network_info_plus` 6→8, `file_picker` 8→11, `device_info_plus` 12→13, `package_info_plus` 9→10. 각각 단독 commit. 마지막 `flutter_riverpod` 2→3은 회귀 위험 최대라 별도 세션.
 
+### 2026-05-02 (64) — v0.0.60 network_info_plus 죽은 의존성 제거
+
+**배경**: (63) 다음 단계로 `network_info_plus` 6→8 메이저 업그레이드 진입. 사용처 grep 결과 — `lib`/`poc`/`ios`/`android` 어디에도 import·`NetworkInfo` 사용 0. transitive 의존도 없음 (direct only). `nsd`(mDNS/Bonjour wrap)와 `connectivity_plus`로 IP/네트워크 정보 충분히 다루는 상태라 죽은 의존성이었던 것으로 추정. just_audio(62)와 동일 패턴.
+
+**변경 (`v0.0.60`, 코드 변경 0 — pubspec/lock만)**:
+
+`pubspec.yaml`: `network_info_plus: ^6.1.1` 라인 제거.
+
+`flutter pub get` 결과 — 2개 패키지 정리:
+- `network_info_plus` 6.1.4 제거
+- `network_info_plus_platform_interface` 2.0.2 제거
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug` ✓ 13.5s
+
+**version bump**: 0.0.59+1 → 0.0.60+1.
+
+**다음 단계**: `device_info_plus` 12→13 (API 무변경, dep 요구치만 ↑) → `package_info_plus` 9→10 (iOS 13.0 최소 검토) → `file_picker` 8→11 (정적 메서드 마이그레이션 필요).
+
 ---
 
 #### 미해결 이슈
