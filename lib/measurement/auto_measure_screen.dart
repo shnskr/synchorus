@@ -214,6 +214,24 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
         await welcomeFuture;
       } catch (_) {}
 
+      // 3) clock sync 초기 + 주기 동기화 시작 — 일반 모드 _startSync()와 동일.
+      // 빠뜨리면 EMA 갱신 X → isOffsetStable 영원히 false → anchor 박힘 X →
+      // drift_report 안 보내짐 → csv drift 행 0개. v0.0.64 회귀 root cause.
+      _setStatus('clock sync 중 (10회 ping/pong)...');
+      final sync = ref.read(syncServiceProvider);
+      try {
+        final result = await sync.syncWithHost();
+        debugPrint('[AUTO_MEASURE] sync OK: offset=${result.offsetMs}ms RTT=${result.rttMs}ms');
+      } catch (e) {
+        _setError('clock sync 실패: $e');
+        return;
+      }
+      sync.startPeriodicSync();
+
+      // 호스트가 이미 syncPlay 했을 수도 있으니 audio-request로 현재 상태 요청.
+      // 일반 모드 _startSync()와 동일.
+      p2p.sendToHost({'type': 'audio-request', 'data': <String, dynamic>{}});
+
       _setStatus('입장 완료. 호스트 재생 따라가기 (${widget.durationSec + 30}s)...');
       _markStarted();
 

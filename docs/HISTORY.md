@@ -3843,6 +3843,45 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 단계**: `./scripts/measure.sh --short` (3분) 1회 → guest_start 후 drift 행 정상 기록되는지 검증. 정상이면 `--long` 12분으로 본격 측정.
 
+### 2026-05-02 (74) — v0.0.66 자동화 게스트 fix — clock sync 누락 (진짜 root cause)
+
+**배경**: v0.0.65 fix(게스트 assets 직접 로드) 검증 진입 직전 사용자 질문 "파일 로드 외 다른 건 다 똑같은가?" → 일반 모드 `RoomScreen._startSync()` 코드 점검 결과 **자동화 게스트가 clock sync 자체를 안 함**을 발견. v0.0.64 csv drift 행 0개의 진짜 root cause는 다운로드 race가 아님.
+
+**root cause 정정 — clock sync 누락**:
+
+일반 모드 `RoomScreen._startSync()` (`room_screen.dart:208-239`):
+1. `sync.syncWithHost()` — 초기 clock sync 10회 ping/pong
+2. `sync.startPeriodicSync()` — **1초 주기 ping/pong 시작** (EMA 누적 source)
+3. `sendToHost({'type': 'audio-request'})` — 호스트 현재 상태 요청
+
+자동화 모드 `_runGuest()` (v0.0.65까지) — **위 1/2/3 모두 빠짐**.
+
+→ 결과:
+- `_filteredOffsetMs` / `_winMinRawOffsetMs` 갱신 X
+- `isOffsetStable` 영원히 false → anchor 박힘 X
+- 게스트가 호스트로 drift_report 안 보냄
+- 호스트 csv에 drift 행 0개 (v0.0.64 측정 정확히 일치)
+
+**v0.0.65 fix 한계**: assets 직접 로드는 다운로드 race 회피하지만 clock sync 부재가 진짜 문제라 효과 없음. v0.0.65로도 동일 회귀 발현 예정이었음.
+
+**fix (`v0.0.66`)**:
+
+`auto_measure_screen.dart` `_runGuest()` — connectToHost 후 추가:
+```dart
+final sync = ref.read(syncServiceProvider);
+final result = await sync.syncWithHost();           // 초기 10회
+sync.startPeriodicSync();                           // 1초 주기
+p2p.sendToHost({'type': 'audio-request', 'data': {}});
+```
+
+**검증**:
+- `flutter analyze` No issues
+- 빌드/install/측정은 다음 단계
+
+**version bump**: 0.0.65+1 → 0.0.66+1.
+
+**다음 단계**: `./scripts/measure.sh --short` (3분) 재측정. drift 행이 정상 기록되는지 확인 (v0.0.64 0개 → 정상이면 ~360개 / 3분).
+
 ---
 
 #### 미해결 이슈
