@@ -204,15 +204,41 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
 
       _setStatus('방 발견: ${host.roomCode} (${host.ip}:${host.port}). 입장 중...');
 
+      // WiFi 절전 wakeup buffer + connect 재시도 (자동화 모드 한정).
+      // root cause: 사용자 인터랙션 없는 자동화 환경에서 게스트 WiFi가 절전
+      // 모드 진입 → ping RTT 8.5ms~974ms 변동 → connectToHost 2초 timeout 초과 가능.
+      // 수동 모드는 사용자 tap으로 WiFi 항상 깨어 있어 무관.
+      // 일반 모드 코드(p2p_service.dart) 영향 0, 자동화에만 robustness 추가.
+      _setStatus('WiFi 깨우기 (500ms)...');
+      await Future.delayed(const Duration(milliseconds: 500));
+
       final guestName =
           'AutoMeasureGuest#${DateTime.now().microsecondsSinceEpoch & 0xFFFF}';
-      final welcomeFuture = p2p.onMessage
-          .firstWhere((m) => m['type'] == 'welcome')
-          .timeout(const Duration(seconds: 10));
-      await p2p.connectToHost(host.ip, host.port, guestName);
-      try {
-        await welcomeFuture;
-      } catch (_) {}
+      Object? lastError;
+      for (int attempt = 1; attempt <= 3; attempt++) {
+        try {
+          final welcomeFuture = p2p.onMessage
+              .firstWhere((m) => m['type'] == 'welcome')
+              .timeout(const Duration(seconds: 10));
+          await p2p.connectToHost(host.ip, host.port, guestName);
+          try {
+            await welcomeFuture;
+          } catch (_) {}
+          lastError = null;
+          break;
+        } catch (e) {
+          lastError = e;
+          debugPrint('[AUTO_MEASURE] connect 시도 $attempt/3 실패: $e');
+          if (attempt < 3) {
+            _setStatus('connect 재시도 $attempt/3 (WiFi 절전 wakeup 대기)...');
+            await Future.delayed(const Duration(seconds: 2));
+          }
+        }
+      }
+      if (lastError != null) {
+        _setError('connect 3회 모두 실패 (WiFi 절전?): $lastError');
+        return;
+      }
 
       // 3) clock sync 초기 + 주기 동기화 시작 — 일반 모드 _startSync()와 동일.
       // 빠뜨리면 EMA 갱신 X → isOffsetStable 영원히 false → anchor 박힘 X →

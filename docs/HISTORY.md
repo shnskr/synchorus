@@ -3882,6 +3882,47 @@ p2p.sendToHost({'type': 'audio-request', 'data': {}});
 
 **다음 단계**: `./scripts/measure.sh --short` (3분) 재측정. drift 행이 정상 기록되는지 확인 (v0.0.64 0개 → 정상이면 ~360개 / 3분).
 
+### 2026-05-02 (75) — v0.0.67 자동화 게스트 connect WiFi 절전 wakeup fix
+
+**배경**: v0.0.66 측정 2회 연속 connect timeout 발생 (`SocketException: Connection timed out, errno=110`). 사용자 의구심 — "수동에서는 잘 됐는데 자동화에서만 안 됨". 진단 후 진짜 root cause 발견.
+
+**진단 절차**:
+1. 호스트 IP 확인 (192.168.35.96/24) + 게스트 IP (192.168.35.43/24) — 같은 subnet ✓
+2. Mac → 호스트 ping 정상 (157~431ms 변동)
+3. Mac → 호스트 41235 TCP = "Connection refused" — 라우터 차단 X, 호스트 listen 안 함 (측정 종료 후라 정상)
+4. **게스트 → 호스트 ping**: 처음엔 100% loss → WiFi 토글 후 응답 오는데 RTT 8.5ms / 974ms / 178ms 극단 변동
+
+**root cause — WiFi power save 모드**:
+
+자동화 모드는 사용자 인터랙션 없는 환경 → 게스트 WiFi 절전 모드 진입. 절전 wakeup 지연이 `p2p_service.dart:168` `Socket.connect` 2초 timeout보다 크면 timeout 발생.
+
+| 모드 | 사용자 인터랙션 | WiFi 상태 | 결과 |
+|---|---|---|---|
+| 수동 (v0.0.62/v0.0.63) | 화면 tap, 메뉴 탐색 | 깨어 있음 | 즉시 connect ✅ |
+| 자동화 (v0.0.64~v0.0.66) | launch 후 즉시 자동 진행 | 절전 진입 | TCP 2초 timeout ❌ |
+
+**fix (`v0.0.67`)**:
+
+`auto_measure_screen.dart` `_runGuest()` — discovery 후 connect 부분에 robustness 추가:
+1. discovery 직후 500ms 대기 (WiFi 깨우기)
+2. connectToHost 3회 재시도 (시도 사이 2s sleep)
+3. 첫 시도 실패해도 두 번째 시도엔 WiFi 깨어 있어 정상 connect 기대
+
+**일반 모드 코드 영향 0** — `p2p_service.dart` 변경 없음. 자동화 모드 entry에만 robustness.
+
+**검증**:
+- `flutter analyze` No issues
+- 빌드/install/측정은 다음 단계 (`./scripts/measure.sh --short`)
+
+**version bump**: 0.0.66+1 → 0.0.67+1.
+
+**왜 이게 정답일 가능성 높은지**:
+- 사용자 진단 단서 "수동은 잘 됐는데" — 알고리즘 동일, 환경 동일, 차이는 사용자 인터랙션 유무
+- ping RTT 8.5~974ms 변동 = WiFi 절전 wakeup 정확한 패턴
+- TCP connect 2초 timeout과 wakeup ~1초 충돌 가능성
+
+**다음 단계**: `./scripts/measure.sh --short` 재측정. 첫 시도 실패해도 재시도로 connect 성공 + drift 행 정상 기록 기대.
+
 ---
 
 #### 미해결 이슈
