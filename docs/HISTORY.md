@@ -3409,6 +3409,43 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 단계**: `device_info_plus` 12→13 (API 무변경, dep 요구치만 ↑) → `package_info_plus` 9→10 (iOS 13.0 최소 검토) → `file_picker` 8→11 (정적 메서드 마이그레이션 필요).
 
+### 2026-05-02 (65) — v0.0.61 file_picker 8.3.7 → 11.0.2 메이저 업그레이드 + win32 충돌 분석
+
+**배경**: (64) 다음 단계로 `device_info_plus` 12→13 진입. 의존성 해석 실패. 원인 분석:
+
+| 패키지 | 최신 | win32 의존 |
+|---|---|---|
+| `file_picker` 11.0.2 | latest | **^5.9.0** ❌ |
+| `device_info_plus` 13.1.0 | latest | ^6.0.1 |
+| `package_info_plus` 10.1.0 | latest | ^6.0.1 |
+
+→ `file_picker`가 win32 ^5에 묶여있어 다른 둘을 메이저로 올리면 win32 메이저 충돌. Synchorus는 mobile only라 실제 win32 미사용 transitive지만 pub resolver는 모든 플랫폼 합산해 봄.
+
+**결정**: file_picker 11만 단독 진행. device_info_plus(12.4) + package_info_plus(9.0)는 file_picker가 win32 ^6 지원할 때 함께 메이저 업그레이드. 회귀 추적 측면에서도 file_picker는 코드 마이그레이션 동반(가장 영향 큰 작업)이라 단독이 합리적.
+
+**변경 (`v0.0.61`)**:
+
+`pubspec.yaml`: `file_picker: ^8.1.7` → `^11.0.2`.
+
+코드 마이그레이션 — v11.0.0 breaking change ("FilePicker 클래스 인스턴스 → 정적 메서드"):
+- `lib/screens/native_test_screen.dart:34` — `FilePicker.platform.pickFiles(...)` → `FilePicker.pickFiles(...)`
+- `lib/screens/player_screen.dart:37` — 동일
+
+**기타 v9.0.0/v10.0.0 breaking은 영향 없음**:
+- v9.0.0: web blob 변경 → web 빌드 미사용
+- v10.0.0: `compressionQuality` default 0, `allowCompression` deprecated → 우리 코드에서 둘 다 미사용
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug` ✓ 60.7s (전체 재빌드 시간, 코드 변경 동반이라 ↑)
+- 실기기 회귀 — Android `pickFiles` audio 파일 선택, iOS `UIDocumentPickerViewController` 호출은 다음 세션 (S22 + iPhone 12 Pro)
+
+**version bump**: 0.0.60+1 → 0.0.61+1.
+
+**다음 단계**:
+- (보류) `device_info_plus` 12→13 + `package_info_plus` 9→10: file_picker가 win32 ^6 지원 시점에 묶음 commit
+- `flutter_riverpod` 2→3: Notifier/Provider API 변경 큼, 별도 세션 (회귀 위험 최대)
+
 ---
 
 #### 미해결 이슈
