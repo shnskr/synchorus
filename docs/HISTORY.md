@@ -3487,6 +3487,57 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 작업 후보**: 출시 전 실기기 풀세트 회귀 (S22 + iPhone + A7 Lite, 6개 commit 누적 영향), 또는 PLAN HIGH 트랙 (SYNC_ALGORITHM_V2 단일 commit / 첫 재생 정착 시간 / 다중 게스트 fix 검증).
 
+### 2026-05-02 (67) — 의존성 업데이트 가치 분석 (v0.0.57~v0.0.62 누적 영향)
+
+**배경**: 사용자 질문 "우리 앱에 도움될만한 업데이트는 없었어?"로 단순 버전 업이 아닌 실제 가치 있는 변경 식별. 각 패키지 changelog 정독 후 Synchorus 코드베이스와 매핑.
+
+**의미 있는 fix 7건 (가치 큰 순)**:
+
+| ★ | 패키지·버전 | 변경 | 우리 영향 |
+|---|---|---|---|
+| ⭐⭐ | `connectivity_plus` 7.1.0 | iOS NWPathMonitor serial queue → race condition crash 제거 | `RoomLifecycleCoordinator`가 connectivity 이벤트 적극 사용. iOS race crash 원인 1개 직접 제거. |
+| ⭐⭐ | `connectivity_plus` 7.1.0 | Android broadcast receiver flag 정정 → 네트워크 변경 감지 신뢰성 ↑ | v0.0.28 errno 113/101 분기와 직접 연동. Android 게스트 WiFi off/on 감지 신뢰성 ↑. |
+| ⭐ | `audio_session` 0.2.2 | iOS `setCategory` 스레드 분리 → jank 제거 | **PLAN HIGH-3 (첫 재생 정착 시간) 잠재 개선**. `main.dart:13` `configure(music())`가 main 스레드 점유하던 게 해소 → 게스트 engine.start() 100~500ms 지연 일부 흡수 가능. |
+| ⭐ | `audio_session` 0.2.3 | Android `audioAttributes` 무시 fix | `AudioSessionConfiguration.music()`이 Android에서 미디어 볼륨 라우팅 정확히 적용. |
+| ⭐ | `flutter_riverpod` 3.0 | Ref operations throw after disposal | 5개 Provider(`p2p`/`discovery`/`sync`/`nativeAudioSync`/`audioHandler`) dispose 사이클에서 stale ref 사용 시 silent fail → 명시적 throw. 디버깅 용이성 ↑. |
+| ⭐ | `file_picker` 10.3.5 | 2GB+ 큰 파일 로딩 에러 fix | 무손실 wav / 라이브 녹음 등 큰 오디오 파일 사용 가능. |
+| ⭐ | `file_picker` 10.3.7 | Android 파일 타입 필터링 정확도 fix | `allowedExtensions: ['mp3','m4a','wav','aac','flac','ogg']`이 Android에서 관련 없는 파일까지 노출하던 버그 fix. |
+
+**기타 부수적 효과**:
+- `audio_session` 0.2.3: AVAudioSession null arguments crash fix
+- `audio_session` 0.2.1: Android null pointer (device encoding) fix
+- `file_picker` 9.0.2: 파일 스트림 누수 fix
+- `flutter_riverpod` 3.2.0: TickerMode로 hidden widget rebuild 회피 (UI 성능 미세 ↑)
+
+**가장 주목할 가치 — 첫 재생 정착 시간 (PLAN HIGH-3) 잠재 개선**:
+
+`audio_session` 0.2.2 변경이 직접 영향 줄 수 있는 코드 경로:
+- `lib/main.dart:13` — 앱 시작 직후 `await session.configure(AudioSessionConfiguration.music())` 호출
+- 0.2.x 이전엔 iOS `setCategory`가 메인 스레드에서 동기 실행 → 첫 화면 진입까지 jank 발생
+- 0.2.2 이후 별도 스레드 → main 진입이 빨라짐 → 게스트가 호스트보다 더 빨리 ready 상태 도달 가능
+
+**측정 가설**:
+- v0.0.55/v0.0.56 baseline (audio_session 0.1.25) 대비 v0.0.62 (audio_session 0.2.3)에서 첫 재생 직후 ~수 초 어긋남 구간이 줄어들어야 함.
+- HISTORY (39) "첫 재생 정착 시간 — BT 무관" 이슈와 연결: 원인 중 "게스트 engine.start() 자체 지연"의 일부가 해소될 수 있음 (단, 가장 큰 원인인 첫 anchor establish 정밀도는 별개).
+
+**다음 측정 액션** (사용자 요청):
+1. 환경: (60)과 동일 — S22 호스트 + Tab A7 Lite 게스트, 같은 WiFi
+2. 빌드: v0.0.62 (현 main HEAD), 양 기기 install
+3. 시나리오: 호스트 파일 로드 → 첫 재생 → 첫 ~30초 drift_ms 시계열 + **청감 정착 시점**(예: 5초 후 안정) 기록
+4. 측정 출력: `measurements/v0.0.62_first_play_2026-05-02.csv` (호스트 자동 로깅)
+5. baseline 비교: v0.0.55 csv, v0.0.56 csv 첫 30초 구간과 head-to-head 비교
+6. 추가 idle 측정도 함께(약 3분) — 의존성 회귀(특히 `flutter_riverpod` 3 onDispose 사이클) 검증 겸
+
+**기대 결과**:
+- 정착 시간 단축 → 가설 확정, PLAN HIGH-3 일부 자연 해결
+- 변화 없음 → audio_session jank가 첫 재생 어긋남의 주 원인 아니었음 → engine.start 자체 지연 + anchor 정밀도가 진짜 원인. PLAN HIGH-3 옵션 (1)/(2) 진행 필요.
+
+**추가 검증 항목** (의존성 회귀 — 측정 csv 정상이면 자동 OK):
+- 방 생성/참가 사이클 (riverpod 3 ProviderScope/onDispose)
+- 파일 선택 (file_picker 11 정적 메서드)
+- 게스트 WiFi off/on (connectivity_plus 7.1.0 race fix)
+- iOS 게스트 BT 라우팅 (audio_session 0.2.x Kotlin migration 영향 없는지)
+
 ---
 
 #### 미해결 이슈
