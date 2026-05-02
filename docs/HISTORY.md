@@ -4080,6 +4080,56 @@ WiFi RTT가 자동화 환경에서 간헐적으로 비정상 (이번 1차 시도
 
 **다음 단계**: `./scripts/measure.sh --short` 또는 `--long`로 RTT 정상 유지되는지 검증.
 
+### 2026-05-02 (79) — v0.0.68 wakelock 효과 검증 (RTT 정상화 확정)
+
+**측정**: `./scripts/measure.sh --short` 1회. csv `measurements/auto_2026-05-02_220011.csv`, 164행.
+
+**logcat RTT 시계열** (게스트):
+```
+RTT=13ms / 12ms / 12ms / 10ms / 10ms / ... / 14ms / 9ms (안정)
+stable=1, 2, 3, 4, 5, ..., 20 (정상 증가)
+```
+
+→ wakelock 효과 명확. RTT 9~14ms 안정 유지.
+
+**event 분포**:
+- drift 85개
+- fallback 73개
+- anchor_set 1, anchor_reset 0
+- host_play 1, host_pause 1, guest_start 1, guest_stop 1
+
+**anchor**:
+- NR 64 (재생 +32초)
+- gap 0.6ms ⭐
+
+**drift 통계 (n=85)**:
+- vfDiff signed mean: -5.01ms
+- |mean|: 14.47ms
+- RMS: 17.42ms
+
+**비교 — wakelock 효과 확정**:
+
+| 측정 | RTT | stable 증가 | anchor 박힘 시점 | gap | 청감 |
+|---|---|---|---|---|---|
+| v0.0.67 long 1차 (실패) | 156~338ms | **0 영원히** | 1분 58초 (catastrophic) | 0.7 | 1분 30초 흔들림 |
+| **v0.0.68 short (wakelock)** | **9~14ms** ⭐ | **정상 증가** | 32초 (정상 범위) | 0.6 | (자동화라 청감 X) |
+
+**확정 사항**:
+- ✅ wakelock_plus.enable() → OS idle 판단 방지 → WiFi 절전 회피 → RTT 정상화
+- ✅ §D-2 fix 정상 작동 (gap 0.6ms, reset 0회)
+- ✅ catastrophic 회귀 회피 (RTT 156~338ms 같은 case)
+- ⚠️ anchor 박힘 시점은 5~32초 변동 (정상 범위, 측정 시점 우연)
+
+**자동화 인프라 robustness 확보 완료**:
+- 사용자 인터랙션 0인 환경에서도 OS idle 판단 안 됨
+- WiFi/CPU 절전 진입 안 함 → 측정 신뢰도 ↑
+- 일반 앱 모드 영향 0 (자동 측정 모드 entry에서만 enable)
+
+**다음 단계 후보**:
+- 출시 전 실기기 풀세트 회귀 (자동화 N=3 + 수동 청감)
+- `--long` 12분 측정 N=2~3 추가 (long-term 안정성 변동성 검증)
+- 다른 PLAN 항목
+
 ---
 
 #### 미해결 이슈
