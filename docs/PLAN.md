@@ -109,13 +109,9 @@
 
 2-B. ~~**anchor_reset_offset_drift 빈도 root cause**~~ — **(60)에서 진단 완료**. idle 3분 reset 4회는 잘못된 stable 판정으로 박힌 anchor가 EMA가 진짜 값에 따라잡는 동안 5ms 임계 자연 초과한 결과. clock skew 아니라 EMA convergence lag (`SyncService.isOffsetStable` 판정 결함). 단독 fix 대신 SYNC_ALGORITHM_V2 §D-2로 명세 후 단일 commit (HIGH 4 참조).
 
-3. **첫 재생 정착 시간 — BT 무관 (HISTORY (39))**. 모든 시나리오에서 첫 재생 직후 ~수 초 어긋남. **2026-05-02 (68) N=2 측정으로 root cause 재진단 — `engine.start()` 지연/clock sync 수렴/RTT 보정 모두 부차적이고, 진짜 메커니즘은 첫 anchor 시점 EMA 수렴도 (§D-2 결함)** — fallback 길이가 짧으면 EMA 미수렴 anchor가 박혀 ~30초 흔들림. 즉 HIGH-4 fix(§D-2)와 직결되어 **HIGH-4 해결 시 자동 해소될 가능성 큼**. 단독 옵션 (1)/(2)/(3) 진행 보류 권장.
+3. ~~**첫 재생 정착 시간 — BT 무관 (HISTORY (39))**~~ — **2026-05-02 (71) v0.0.63 §D-2 fix N=2 검증으로 자연 해소**. 청감 분포 좋음/좋음 일관, fallback alignment가 사용자 청감 임계 안에서 동작 확인. (44) 13번 사이클 회피 — fix 한 줄(§D-2)로 HIGH-3/4 둘 다 해결.
 
-4. **SYNC_ALGORITHM_V2 디자인 단일 commit** ⭐ **우선순위 최상** (anchor reset 후 fallback 큰 drift HISTORY (42) + EMA stable 판정 결함 (60) + 다른 결정사항 묶음). [SYNC_ALGORITHM_V2.md](SYNC_ALGORITHM_V2.md) §A-F 빈칸 채우기 → 사용자 합의 → 단일 commit. **신설 §D-2 (EMA stable 판정 결함)** — (60)에서 root cause 진단 + (68) N=2 측정으로 첫 재생 정착 시간(HIGH-3)과의 직접 인과 확정. fix 후보:
-   - **D2-1**: `(filteredOffsetMs - winMinRawOffsetMs).abs() < _stableThresholdMs` 일치 기준 (1줄 변경)
-   - **D2-2**: 기존 변화량 + winMinRaw 일치 AND 조합
-   - **D2-3**: fast phase 길이 / α 조정만 (구조 변화 X)
-   다른 §과 묶어 한 번에 결정 권장. (44) 13번 사이클 회피.
+4. ~~**SYNC_ALGORITHM_V2 디자인 단일 commit**~~ — **2026-05-02 (70)/(71) 완료**. v0.0.63 §D-2 fix(D2-2 AND 조합) 적용 + N=2 검증 통과. anchor EMA gap 모든 케이스 < 2ms, anchor_reset 빈도 4회→0회. §A/B/D/E/F는 현행 유지 명세화, §C는 30분+ 장시간 측정 후 결정 보류.
 
 ### MID
 

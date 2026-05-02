@@ -3704,6 +3704,54 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 - ⚠️ 첫 anchor가 너무 늦어져 청감 정착 시간이 길어짐 → fallback alignment 정확도 별도 개선 필요
 - ❌ 청감 분포 변화 없음 → §D-2 fix가 청감과 비상관, 다른 §(A/B/D) 재검토 필요. 이때는 (44) 13번 사이클 회피 위해 fix 롤백 후 재명세
 
+### 2026-05-02 (71) — v0.0.63 §D-2 fix 검증 N=2 — fix 성공 확정
+
+**환경**: (68)/(69)와 동일. S22 호스트 + Tab A7 Lite 게스트, 같은 WiFi.
+
+**1회차** (`measurements/v0.0.63_first_play_run1_2026-05-02.csv`, 350행, 3분+):
+- 청감: 사용자 "그냥 좋았어" + "오차시간 자체가 사람한테 체감되는 정도는 아니다"
+- 첫 anchor: NR 93 (재생 **+46초**) — fix 의도대로 EMA 수렴 후 박힘
+- 첫 anchor EMA gap: **1.3ms** (filtered -773.7 vs winRaw -775.0) ⭐
+- fallback events: 159개 (~80초)
+- **anchor_reset: 0회** ⭐⭐⭐
+- vfDiff signed mean: **-2.86ms** (v0.0.62 -10~-14ms 대비 4배 개선)
+- vfDiff RMS: 14.98ms (25% 감소)
+
+**2회차** (`measurements/v0.0.63_first_play_run2_2026-05-02.csv`, 467행, 3분+):
+- 청감: 사용자 "그냥 좋았어"
+- 첫 anchor: NR 3 (재생 **+1초** — 매우 빠름) 
+- 첫 anchor EMA gap: **0.3ms** ⭐ (운 좋게 첫 sample에서 winMinRaw 즉시 안정)
+- fallback events: 137개
+- **anchor_reset: 0회** ⭐⭐
+- vfDiff signed mean: -7.33ms
+- vfDiff RMS: 18.08ms
+
+**핵심 검증 결과**:
+
+| 항목 | v0.0.62 (N=3 평균) | v0.0.63 (N=2 평균) | 변화 |
+|---|---|---|---|
+| 청감 분포 | 좋음/흔들림/좋음 (33% 흔들림) | 좋음/좋음 (0% 흔들림) | ⭐ 일관성 확보 |
+| 첫 anchor EMA gap | 0.1~11.7ms (변동 큼) | 0.3, 1.3ms (모두 < 2ms) | ⭐ 정확도 확보 |
+| anchor_reset 횟수 | 2~3회 | 0, 0회 | ⭐⭐⭐ root cause 제거 |
+| vfDiff signed mean | -10.96~-14.62ms | -2.86, -7.33ms | ⬇️ 50%+ 개선 |
+
+**N=2 결론 — fix 검증 완료**:
+
+1. **EMA 미수렴 anchor 차단 작동 확정** — 모든 anchor가 winMinRaw gap < 2ms 만족 상태에서만 박힘 (1회차 1.3ms / 2회차 0.3ms)
+2. **anchor_reset 사이클 자체가 사라짐** — v0.0.62의 reset 빈도 (idle 3분 4회→0회). reset이 없으니 v0.0.62 2회차 같은 30초 흔들림 패턴 발현 불가능.
+3. **첫 anchor 시점은 비결정적이지만 무관함** — 2회차에서 NR 3(빠름) / 1회차 NR 93(느림). fix 목적이 "EMA 수렴 차단"이지 "anchor 늦추기"가 아니므로 둘 다 정상 통과. 운 좋게 EMA 즉시 수렴한 케이스는 빨리 박혀도 정확.
+4. **trade-off 미발현** — 1회차 첫 anchor +46초로 늦어졌지만 청감 영향 0 (사용자 보고). fallback alignment가 사용자 청감 임계 안에서 동작 확인.
+
+**해소된 PLAN 항목**:
+- **PLAN HIGH-3 (첫 재생 정착 시간)** — N=2 청감 좋음 일관으로 자연 해소. (44) 13번 사이클 회피 — fix 한 줄(§D-2)이 HIGH-3/4 둘 다 해결.
+- **PLAN HIGH-4 (SYNC_ALGORITHM_V2 단일 commit)** — §A-F 명세 + §D-2 fix + N=2 검증 완료.
+
+**다음 단계 후보**:
+- 출시 전 실기기 풀세트 회귀 (v0.0.57~v0.0.63 누적 영향, 특히 audio_session 0.2 BT 라우팅 + riverpod 3 onDispose + file_picker 11)
+- 30분+ 장시간 idle 측정 (PLAN MID-7) — §C rate drift 결정 보류 해제 트리거
+- iPhone 게스트 BT 워밍업 케이스 (PLAN MID-8)
+- 같은 모델 갤럭시 2대 환경에서 v0.0.54 다중 게스트 fix 검증 (PLAN HIGH-1)
+
 ---
 
 #### 미해결 이슈
