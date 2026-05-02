@@ -4198,6 +4198,52 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - `measure.sh` 실패 자동 재시도 추가 (옵션 B, 별도 트랙)
 - 다른 PLAN 항목
 
+### 2026-05-03 (81) — PLAN 정리: NTP 정공법 + MID-5 -20.84ms 잔재 작업목록 제외
+
+**배경**: 출시 전 작업 우선순위 재평가. 두 항목 모두 §D-2(v0.0.63) 후 자연 해소 정황 + 측정 데이터로 가설 약화 → 작업목록에서 정리.
+
+**(A) NTP 정공법 — 작업목록 제외**:
+
+원래 HISTORY 미해결 이슈 "Anchor reset 후 fallback 단계 큰 drift (HIGH priority)"의 fix 방향. 보류 결정 근거:
+
+1. **2회 시도 모두 실패**:
+   - v0.0.46~v0.0.48 (HISTORY (43)): oboe pause/resume + NTP 예약 재생 → drift 63초 회귀 → 롤백
+   - v0.0.49~v0.0.61 (HISTORY (44)): 13번 fix 사이클 (seq number + race 제거 + 호스트 schedule 등) → 사용자 청감 v0.0.48이 더 나음 → main reset, 사용자 좌절 보고 ("점점 좋아지는 게 아니라 퇴보")
+2. **§D-2(v0.0.63) 자연 해소 정황**: v0.0.67 자동화 12분 측정에서 anchor_reset 0회, vfDiff RMS 21ms. 원래 잡으려던 (42) edge case의 대부분이 한 줄 fix로 흡수된 것으로 보임
+3. **본격 재도입 트리거 부재**: §C rate drift 결정은 30분+ 측정 후. PCM streaming 구조 변경 선결 → 진짜 누적 drift 측정되면 그때 NTP 재도입 검토
+4. backup branch 보존: `backup-v0.0.61-session`, `backup-v0.0.51-to-v0.0.55-session`
+
+**(B) PLAN MID-5 -20.84ms 잔재 root cause 분해 — 취소선 처리**:
+
+(45) v0.0.49 idle 4분 측정 vfDiff signed mean -20.84ms 베이크인 잔재 추적 항목. 정리 근거:
+
+1. **outputLatency baked-in 가설 부정**: (59) 측정에서 anchored vs current diff = 0.22ms로 사실상 0. EMA 보존 효과 미미 신호
+2. **§D-2 후 잔재 4~7배 감소**:
+
+| 측정 | vfDiff signed mean |
+|---|---|
+| v0.0.49 idle 4분 (45) | **-20.84ms** ← 원래 추적 대상 |
+| v0.0.62 수동 N=3 | -10~-14ms |
+| v0.0.63 수동 N=2 | -2.86~-7.33ms |
+| v0.0.67 자동 long 12분 | -5.25ms |
+| v0.0.68 자동 short | -5.01ms |
+
+3. **자연 재현 부재**: 자동화 N=3까지 진행, -20ms 영역 미진입. 작은 잔재라 진단 정확도도 떨어짐
+4. **진단 인프라 활성 유지**: `out_lat_*` + `vf_diff_ms` 컬럼은 그대로. 큰 잔재 자연 재발 시 자동 캡처 → HISTORY 미해결 이슈에 신규 항목으로 다시 띄움
+
+**작업 후 살아있는 항목** (PLAN.md):
+- HIGH: 다중 게스트 fix 같은 모델 갤럭시 2대 검증 (디바이스 한계)
+- MID: 7(30분+ 측정, PCM 한계로 보류) / 8(BT 워밍업) / 9(getTimestamp 간헐 실패 자연 재발 대기) / 10(iOS host 환경)
+- LOW: errno=65/51 / Tab A7 Lite framePos / acoustic loopback / iOS install hung / 디버그 스터터 / UI 폴리싱
+
+**출시 전 권고 (PLAN 미등재)**:
+- 출시 전 실기기 풀세트 청감 회귀 (v0.0.57~v0.0.68 누적)
+- measure.sh 실패 자동 재시도 (옵션 B)
+- BT outputLatency 동적 보정 (HISTORY 미해결 이슈)
+- iOS 라이프사이클 T1~T4 재검증
+
+**변경 범위**: `docs/PLAN.md` MID-5 취소선 처리, `docs/HISTORY.md` 미해결 이슈 NTP 항목 보류 표시. 코드 변경 0.
+
 ---
 
 #### 미해결 이슈
@@ -4216,7 +4262,7 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - [ ] **Bluetooth outputLatency 동적 보정** — BT 이어폰·스피커는 연결 중에도 `outputLatency`가 ±50ms 변동(ARCHITECTURE.md:177~178). 현재 고정값 기반 → BT 환경에서 drift 누적 가능. 주기 재측정 + EMA 반영(자동 보정) 방향. (2026-04-24 (29) 신규 항목). **외부 문서 검증 결과 주의**: Apple `AVAudioSession.outputLatency`가 BT 실제 지연을 과소보고하는 것으로 보고됨 (developer.apple.com/forums/thread/126277) → iOS에서 이미 측정 중인 값을 Dart `_recomputeDrift`에 반영해도 효과 제한적일 수 있음. BT route 변경 감지는 `AVAudioSession.routeChangeNotification` 공식. Android는 `AAudioStream_getTimestamp`가 DAC까지만 커버, BT transmission 지연 포함 여부 불확실(google/oboe#357 관찰).
 - [ ] **호스트 `oboe::getTimestamp` 간헐적 실패 — 체감 싱크 깨짐 원인** (2026-04-24 (30) 신규). S22 3분 재생 중 재생 시작 직후 26회, 정지 직전 15회 연속 실패 관측. 100ms 폴링 기준 **1.5~2.6초 동안 호스트가 재생 위치를 못 읽음** → 게스트는 외삽 계속이라 drift-report는 안정(0~3ms)해 보이나 실제 재생은 최대 1.5초치 어긋남. 원인 가설: stream xrun / HAL 일시 실패 / 라이프사이클 전환 부근 상관. `oboe_engine.cpp:278` 근처에서 실패 시 `AAudio_convertResultToText(result)` 로그 추가 → 원인 분류 필요. 완화 방향: 실패 중에도 최근 성공한 framePos + 경과 시간으로 보간해 obs 계속 전송.
 - [ ] **Logger csv 경로 접근성** (2026-04-24 (30) 신규, low priority). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/`처럼 multi-user 공간에 떨어지면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. Android 한정 `/sdcard/Android/data/.../files/`로 저장 옵션 추가 검토.
-- [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **HIGH priority**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **v0.0.46 oboe pause/resume + v0.0.47 NTP 예약 재생 둘 다 시도, v0.0.48에서 롤백 (HISTORY (43))**. 정공법 NTP는 다음 세션 정밀 작업 (sequence number + race 제거 + outputLatency 자동 보정)으로 재도입.
+- [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **보류 — 작업목록 제외 2026-05-03**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **NTP 정공법 2회 시도 모두 실패** — v0.0.46~v0.0.48 (HISTORY (43)) drift 63초 회귀 → 롤백, v0.0.49~v0.0.61 (HISTORY (44)) 13번 fix 사이클 → 사용자 청감 v0.0.48이 더 나음 → main reset. **§D-2 fix(v0.0.63)로 자연 해소 정황** — v0.0.67 12분 자동화에서 anchor_reset 0회, vfDiff RMS 21ms. 본격 재도입 트리거는 §C rate drift 결정(PCM streaming 구조 변경 후 30분+ 측정)에 묶임. backup branch 보존: `backup-v0.0.61-session`, `backup-v0.0.51-to-v0.0.55-session`.
 - [ ] **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (2026-04-26 (43) 신규, mid priority). `flutter run --device-id <iPhone>` USB로 실행 시 "Installing and launching..." 단계에서 1~3분 hung. iPhone 잠금/신뢰 다이얼로그 OK인데도 발생. iOS 26 + Xcode toolchain 호환 이슈 추정. 다음 세션엔 **IntelliJ Run** 또는 **Xcode IDE에서 직접 Run** 권장 (CLI flutter run 대신).
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
 - [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52)에서 A+B 동시 fix 완료** (`device_info_plus`로 디바이스명 발급 + stale 비교를 name AND ip로 강화). 실측 검증은 갤럭시 3대 또는 같은 모델 2대 환경 필요 (현재 보유 디바이스는 모델 다 달라서 A안만으로도 통과해버림 → 진짜 검증은 같은 모델 2대 이상으로).

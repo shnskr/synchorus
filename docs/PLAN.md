@@ -115,7 +115,7 @@
 
 ### MID
 
-5. **HISTORY (45) -20.84ms 잔재 자연 재현 시 root cause 분해** — v0.0.53 진단 컬럼 활성 상태로 다양 환경(BT 게스트, 다른 시간대 등) 측정. 큰 잔재 발생 시 `out_lat_*` 컬럼으로 직접 분해.
+5. ~~**HISTORY (45) -20.84ms 잔재 자연 재현 시 root cause 분해**~~ — **2026-05-03 §D-2로 자연 해소 정황 정리**. (a) outputLatency baked-in 가설은 (59) anchored vs current diff = 0.22ms로 사실상 부정. (b) §D-2(v0.0.63) 후 vfDiff signed mean -20.84ms → -5.25~-7.33ms로 4~7배 감소. (c) 자동화 N=3까지 진행했으나 -20ms 영역 미재진입. 진단 컬럼(`out_lat_*` + vf_diff_ms)은 활성 유지 — 큰 잔재 자연 재발 시 자동 캡처되어 HISTORY 미해결 이슈에 신규 항목으로 다시 띄움.
 
 6. ~~**EMA 단독 cherry-pick (B-1) 검토**~~ — **우선순위 ↓ (2026-05-02 (59))**. 측정 결과 outputLatency anchored vs current diff = 0.22ms로 사실상 0 → EMA 보존 효과 미미할 것으로 강한 신호. 본 항목은 (A)/(B) root cause fix 진행 후에도 잔재가 있을 때만 재고려.
 
