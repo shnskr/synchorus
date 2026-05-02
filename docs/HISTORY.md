@@ -3538,6 +3538,58 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 - 게스트 WiFi off/on (connectivity_plus 7.1.0 race fix)
 - iOS 게스트 BT 라우팅 (audio_session 0.2.x Kotlin migration 영향 없는지)
 
+### 2026-05-02 (68) — v0.0.62 첫 재생 정착 시간 측정 N=2 — 가설 수정 (audio_session 효과 ❌, EMA stable 판정 결함이 root cause)
+
+**환경**: S22 호스트 + Tab A7 Lite 게스트, 같은 WiFi. (60)/(67)과 동일.
+
+**1회차** (`measurements/v0.0.62_first_play_2026-05-02.csv`, 370행, 3분+):
+- 청감: 첫 재생 ~1초 정착 후 쭉 안정
+- 첫 anchor 시점: NR 12 (재생 +5.3초)
+- **첫 anchor EMA gap: 0.1ms** (filtered -762.1 vs winRaw -762.0) ⭐
+- fallback event: 10개 (anchor 박히기 전 충분한 EMA 수렴 시간)
+- anchor_reset 횟수: 2회 (NR 299, 336) — idle 후반
+- vfDiff signed mean: -10.96ms / RMS 19.53ms
+- drift_ms RMS (안정 구간): 2.93ms
+
+**2회차** (`measurements/v0.0.62_first_play_run2_2026-05-02.csv`, 352행, 3분+):
+- 청감: 첫 재생 ~2초 정착 + **30초간 미묘 틀어짐** + 그 이후 안정
+- 첫 anchor 시점: NR 5 (재생 **+2.5초**, 1회차 대비 2.8초 빠름)
+- **첫 anchor EMA gap: 2.0ms** (filtered -767.0 vs winRaw -765.0)
+- fallback event: 3개 (anchor 너무 빨리 박힘)
+- anchor_reset 횟수: 3회 — **NR 57, 76, 100 (재생 후 ~30~50초 구간 집중)**
+- 초기 30초 구간 vfDiff |mean|: 13.82ms (안정 구간 18.00ms) — 사용자 청감 "미묘 틀어짐 30초" 정확히 일치
+- reset 시 EMA gap: 5.8ms / 4.4ms / 3.3ms — 모두 (60) 진단한 §D-2 결함 발현 패턴
+
+**결정적 발견**:
+
+사용자 청감 "미묘 틀어짐 30초"가 csv NR 57~100 (재생 후 30초~50초) reset 3회 집중과 1:1 매핑. **첫 재생 정착 품질은 audio_session jank가 아니라 "첫 anchor 시점 EMA 수렴도"가 결정**:
+- 1회차: fallback 5초 → EMA 충분 수렴 → 첫 anchor 깔끔(gap 0.1ms) → 안정
+- 2회차: fallback 2.5초 → EMA 미수렴(gap 2.0ms) → 첫 anchor에 noise 베이크인 → 30초간 reset/재anchor 반복
+
+**기존 가설 (67) 수정**:
+
+| 가설 | 상태 |
+|---|---|
+| ❌ "audio_session 0.2.2 jank 제거 → 첫 재생 정착 시간 자연 개선" | **N=2로 기각**. 1회차 ~1초 vs 2회차 ~2초+30초 흔들림 변동성이 너무 큼. audio_session 효과 자체는 작거나 없을 가능성. |
+| ⭐ "PLAN HIGH-4 (§D-2, EMA stable 판정 결함)이 첫 재생 정착에 직접 영향" | **N=2로 채택**. 첫 anchor EMA gap (0.1ms vs 2.0ms)이 정착 품질 결정. 운 좋으면 OK / 운 나쁘면 30초 흔들림. |
+
+**(67) 1회차 anchor_reset 빈도 ↓ (4→2)도 우연성 가능성 ↑** — 2회차에서 3회로 다시 ↑됨. 단순 측정 오차 범위.
+
+**의존성 업데이트의 실제 가치 재정정**:
+- ⭐⭐ connectivity_plus 7.1.0 race crash 제거 / Android broadcast receiver flag — 여전히 유효 (이번 측정에서 직접 검증 안 했지만 코드 경로는 그대로)
+- ⭐ file_picker 10.3.5 2GB+ 파일 / 10.3.7 Android 타입 필터링 — 여전히 유효
+- ⭐ flutter_riverpod 3 stale ref throw — 여전히 유효
+- ❌ audio_session 0.2.2 jank → 첫 재생 정착 — N=2 측정으로 효과 단정 어려움
+
+**PLAN HIGH-4 우선순위 ↑** — 측정 수치 변동성의 root cause가 §D-2 결함으로 N=2 재현 확인. fix 후 1회차/2회차 케이스 변동성 사라져야 함:
+- D2-1 (winMinRaw 일치 기준): `(filteredOffsetMs - winMinRawOffsetMs).abs() < _stableThresholdMs`
+- D2-2 (AND 조합): 기존 변화량 + winMinRaw 일치 둘 다
+- D2-3 (fast phase 길이/α 조정만)
+
+이 중 가장 시급한 fix를 SYNC_ALGORITHM_V2 §D-2 단일 commit에 포함.
+
+**의존성 트랙 종료 진단**: 의존성 업데이트가 일부 가치 있는 fix(crash 제거, 파일 처리 개선)를 가져왔으나 **첫 재생 정착 시간 직접 개선은 없었음**. 이 문제는 알고리즘 트랙(§D-2)으로 해결해야 함이 N=2 측정으로 확정.
+
 ---
 
 #### 미해결 이슈
