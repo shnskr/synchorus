@@ -3342,6 +3342,30 @@ C. **A + B 동시 적용 (권장)**
 3. 비오디오: `network_info_plus` 6→8, `file_picker` 8→11, `device_info_plus` 12→13, `package_info_plus` 9→10
 4. 마지막: `flutter_riverpod` 2→3 (Notifier/Provider API 변경 큼, 회귀 위험 최대)
 
+### 2026-05-02 (62) — v0.0.58 just_audio 죽은 의존성 제거
+
+**배경**: (61) 다음 단계로 `just_audio` 0.9.46 → 0.10.5 메이저 업그레이드 진입. 영향 범위 grep 결과 — `lib/`/`poc/` 어디에도 import·`AudioPlayer`·`AudioSource` 등 사용처 0. v3 NativeAudioEngine 전환(2026-04-15) 시점에 디코딩·재생 경로 모두 네이티브로 이관됐는데 pubspec 의존성만 남아있던 상태. transitive로 다른 패키지가 쓰지도 않음 (`flutter pub deps` 확인 — direct only, audio_service도 just_audio 의존 없음). 사용자 결정: 메이저 업그레이드 대신 의존성 자체를 제거 (필요 시 재추가).
+
+**변경 (`v0.0.58`, 코드 변경 0 — pubspec/lock만)**:
+
+`pubspec.yaml`: `just_audio: ^0.9.43` 라인 제거 (37번째 줄).
+
+`flutter pub get` 결과 — 3개 패키지 정리:
+- `just_audio` 0.9.46 제거
+- `just_audio_platform_interface` 4.6.0 제거 (transitive)
+- `just_audio_web` 0.4.16 제거 (transitive)
+
+iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioPlugin` 등록 삭제 확인.
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug` ✓ 9.5s (기존 19.8s 대비 ~절반, 의존성 축소 효과)
+- iOS plugin registrant grep — `just_audio`/`JustAudio` 잔존 0
+
+**version bump**: 0.0.57+1 → 0.0.58+1.
+
+**다음 단계**: `audio_session` 0.1.25 → 0.2.3 메이저 업그레이드 (iOS AVAudioSession 라우팅 변경점 검토).
+
 ---
 
 #### 미해결 이슈
