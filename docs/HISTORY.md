@@ -3923,6 +3923,62 @@ p2p.sendToHost({'type': 'audio-request', 'data': {}});
 
 **다음 단계**: `./scripts/measure.sh --short` 재측정. 첫 시도 실패해도 재시도로 connect 성공 + drift 행 정상 기록 기대.
 
+### 2026-05-02 (76) — v0.0.67 자동화 측정 첫 성공 — v0.0.63 수동 baseline 동등 품질 확인
+
+**측정**: `./scripts/measure.sh --short` (180s) 1회. csv `measurements/auto_2026-05-02_211801.csv`, 323행.
+
+**event 분포**:
+- drift 307개 ⭐ (v0.0.64/65/66 0개에서 정상 회복)
+- anchor_set 1, anchor_reset 0
+- fallback 8 (anchor 박히기 전 정상)
+- host_play / host_pause / guest_start / guest_stop / seek 각각 1~2
+
+**anchor 시퀀스**:
+| NR | event | filtered | winRaw | **gap** |
+|---|---|---|---|---|
+| 11 | anchor_set | -268.2 | -268.0 | **0.2ms** ⭐ |
+
+→ §D-2 fix가 자동화 환경에서도 의도대로 작동. EMA 수렴 후 anchor 박힘.
+
+**drift 통계 (n=307)**:
+- vfDiff signed mean: 2.36ms
+- |mean|: 13.59ms
+- RMS: 16.05ms
+- range: -27.39 ~ +41.86ms
+
+**baseline 비교 (v0.0.63 수동 N=2)**:
+
+| 지표 | 수동 1회차 | 수동 2회차 | **자동화 v0.0.67** |
+|---|---|---|---|
+| anchor EMA gap | 1.3ms | 0.3ms | **0.2ms** |
+| anchor_reset | 0 | 0 | **0** |
+| vfDiff signed mean | -2.86 | -7.33 | **+2.36** |
+| vfDiff RMS | 14.98 | 18.08 | **16.05** |
+
+→ **수동 baseline과 동등 품질 확인**. 자동화로 인한 회귀 없음.
+
+**해결된 사항 누적**:
+1. ✅ 게스트 connect (v0.0.67 WiFi 절전 wakeup retry)
+2. ✅ Clock sync (v0.0.66 syncWithHost + startPeriodicSync)
+3. ✅ assets 직접 로드 (v0.0.65 다운로드 race 회피)
+4. ✅ §D-2 fix (v0.0.63) 자동화 환경에서도 정상 작동
+
+**자동화 인프라 가치 확인**:
+- 한 줄 명령 (`./scripts/measure.sh --short`)으로 측정 자동
+- 사용자 인터랙션 ~30초 → 0초로 단축
+- 빌드 + install + launch + 측정 + csv pull + 통계 + baseline 비교 일괄
+- N회 반복 부담 압도적 ↓
+
+**시간 측정**:
+- 21:12:31 측정 시작 (빌드)
+- 21:18:01 측정 종료
+- 총 ~5분 30초 (3분 측정 + buffer + sequence)
+
+**다음 단계 후보**:
+- `./scripts/measure.sh --long` 12분 본격 측정 (v0.0.63 수동과 동일 길이로 비교)
+- §C rate drift 결정을 위한 long-term 측정
+- 다른 PLAN 항목 (실기기 풀세트 회귀, 등)
+
 ---
 
 #### 미해결 이슈
