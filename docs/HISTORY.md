@@ -3316,6 +3316,32 @@ C. **A + B 동시 적용 (권장)**
 - **PLAN HIGH 4 (SYNC_ALGORITHM_V2 디자인)**: §D-2 추가됨, §A-F 빈칸 채우기 + 사용자 합의 + 단일 commit 진행이 다음 알고리즘 트랙 첫 작업.
 - 다른 영역(같은 모델 갤럭시 2대 환경에서 v0.0.54 다중 게스트 fix 검증, 의존성 업데이트 등)은 알고리즘과 독립이라 병행 가능.
 
+### 2026-05-02 (61) — v0.0.57 의존성 안전 묶음 upgrade (patch/minor)
+
+**배경**: PLAN MID-11 (의존성 업데이트) 진입. 메이저는 패키지별 단독 commit이 원칙이라 먼저 안전 묶음(patch/minor)만 일괄 처리. 사용자 의도 — 출시 전 점검 + 오디오 관련 메이저(`just_audio`/`audio_session`) 변경점 확인을 단계별로 진행.
+
+**변경 (`v0.0.57`, 코드 변경 0 — pubspec.lock만)**:
+
+`flutter pub upgrade` 한 번. 변경된 11개 패키지:
+- `connectivity_plus` 7.1.0 → 7.1.1 (patch)
+- `path_provider_android` 2.2.23 → 2.3.1 (minor)
+- `vm_service` 15.0.2 → 15.2.0 (minor)
+- `hooks` 1.0.2 → 1.0.3 (patch, transitive)
+- `sqflite` 2.4.2 → 2.4.2+1 (build metadata)
+- `sqflite_common` 2.5.6 → 2.5.6+1 (build metadata)
+- `synchronized` 3.4.0 → 3.4.0+1 (build metadata)
+- 신규 transitive 잠금: `jni` 1.0.0, `jni_flutter` 1.0.1, `package_config` 2.2.0, `record_use` 0.6.0
+
+**검증**: `flutter analyze` No issues. `flutter build apk --debug` ✓ 19.8s. 코드 변경 0이라 회귀 위험 매우 낮음.
+
+**version bump**: 0.0.56+1 → 0.0.57+1. pubspec.lock만 변경.
+
+**다음 단계**: 메이저 업그레이드는 패키지별 단독 commit (사용자 우선순위 — 오디오 먼저):
+1. `just_audio` 0.9.46 → 0.10.5 (디코딩 경로 잔존 grep 필요, v3 NativeAudioEngine 도입 후 의존도 ↓)
+2. `audio_session` 0.1.25 → 0.2.3 (iOS AVAudioSession 라우팅 변경점 가능)
+3. 비오디오: `network_info_plus` 6→8, `file_picker` 8→11, `device_info_plus` 12→13, `package_info_plus` 9→10
+4. 마지막: `flutter_riverpod` 2→3 (Notifier/Provider API 변경 큼, 회귀 위험 최대)
+
 ---
 
 #### 미해결 이슈
