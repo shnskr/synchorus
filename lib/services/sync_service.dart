@@ -264,11 +264,15 @@ class SyncService {
       _bestRtt = minSample.rttMs;
 
       // offset 안정성 추적 — fast phase 동안은 수렴 중이므로 카운트 안 함
+      // v0.0.63 §D-2 fix: AND 조합. step 변화량(EMA 진동 작음) + winMinRaw 일치
+      // (EMA가 진짜 값에 가까움) 둘 다 만족해야 stable. (60) 진단으로
+      // step 단독은 EMA convergence lag 시 false positive 발생 확정.
       final delta = (_filteredOffsetMs - _prevFilteredOffset).abs();
       _prevFilteredOffset = _filteredOffsetMs;
       if (_periodicSampleCount <= _fastPhaseCount) {
         _stableCount = 0; // fast convergence 중에는 안정 판정 금지
-      } else if (delta < _stableThresholdMs) {
+      } else if (delta < _stableThresholdMs &&
+          (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs) {
         _stableCount++;
       } else {
         _stableCount = 0;

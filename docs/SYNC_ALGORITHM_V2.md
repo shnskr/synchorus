@@ -155,7 +155,7 @@ v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win
 - D2-1(winMinRaw 일치만)은 step 조건 제거 — winMinRaw outlier 시 false positive 위험
 - D2-2는 step 변화량(EMA 진동 작음) + winMinRaw 일치(EMA가 진짜 값에 가까움) 둘 다 보장 → false positive 최소
 - D2-3(상수만)은 root cause 안 고침
-- 변경 1줄(AND 조건 추가). `_winMinRawOffsetMs`는 (60) v0.0.56에서 이미 추가된 필드 → 코드 변경 최소
+- 변경: 기존 1줄 → 2줄로 확장 (AND 조건 추가). `_winMinRawOffsetMs`는 (60) v0.0.56에서 이미 추가된 필드 → 코드 변경 최소
 
 **구현 위치**: `lib/services/sync_service.dart:271`
 

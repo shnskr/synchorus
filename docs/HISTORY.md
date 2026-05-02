@@ -3657,6 +3657,53 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 - fix 후 N=3+ 측정으로 청감 분포가 좋음/좋음/좋음으로 수렴하는지 검증 필요
 - SYNC_ALGORITHM_V2.md §A-F 빈칸 + §D-2 fix 채택 → 사용자 합의 → 단일 commit이 다음 알고리즘 트랙 첫 작업 (PLAN HIGH-4 기존 계획 그대로 + 우선순위 ⭐최상)
 
+### 2026-05-02 (70) — v0.0.63 §D-2 fix 적용 (D2-2 AND 조합)
+
+**배경**: PLAN HIGH-4 진행. (44) 13번 사이클 교훈에 따른 minimum-fix 전략 채택 — SYNC_ALGORITHM_V2 §A~F는 모두 "현행 유지 + 명세화" + §D-2만 실제 fix. 직전 commit `9fb0af4`에서 §A-F 합의 결정 명세화 완료. 이번 commit은 §D-2 fix 코드 적용.
+
+**변경 (`v0.0.63`, 코드 변경 1곳)**:
+
+`lib/services/sync_service.dart:271-272` — `isOffsetStable` 판정 조건 (1줄 → 2줄로 AND 확장):
+
+```dart
+// 변경 전
+} else if (delta < _stableThresholdMs) {
+
+// 변경 후
+} else if (delta < _stableThresholdMs &&
+    (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs) {
+```
+
+**의미**:
+- `delta < _stableThresholdMs` (기존): EMA 진동 작음 (slow phase α=0.1에서 step별 변화 < 2ms)
+- `(_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs` (신규): EMA 결과가 진짜 값(window 내 min-RTT sample의 raw offset)과 가까움
+- AND → 둘 다 만족해야 `_stableCount++` → false positive 최소
+
+**N=3 데이터 시뮬레이션 결과** ((68)/(69) 측정):
+
+| 케이스 | 첫 anchor 시점 / EMA gap | D2-2 적용 시 | 청감 예상 |
+|---|---|---|---|
+| 1회차 (운 좋음) | NR 12, 0.1ms | 둘 다 통과 → 동일 시점 anchor | 그대로 좋음 |
+| 2회차 (흔들림) | NR 5, 2.0ms | winMinRaw gap = 임계 borderline → 미통과 → anchor 미루어짐 | **30초 흔들림 사라질 가능성 ⭐** |
+| 3회차 (운 보통) | NR 23, 11.7ms | winMinRaw gap >> 2ms → 미통과 → anchor 미루어짐 | 청감 OK (현재도 OK) |
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug` ✓ 8.1s
+
+**version bump**: 0.0.62+1 → 0.0.63+1.
+
+**다음 단계**: v0.0.63 빌드 + 양쪽 기기 install → N=3+ 첫 재생 측정으로 검증:
+1. anchor_set 시점의 (filtered - winMinRaw) gap이 모든 케이스 < 2ms로 수렴해야 함
+2. 청감 분포가 좋음/좋음/좋음으로 수렴해야 함
+3. anchor_reset 빈도 idle 3분 4회 → 1~2회로 감소 기대
+4. trade-off 검증: 첫 anchor 시점 5~15초 늦어져도 청감 정착 ~1~2초 유지하는지 (fallback alignment 충분한지)
+
+**예상 결과 시나리오**:
+- ✅ 청감 분포 일관 좋음으로 수렴 → §D-2 fix 채택 + 다른 §은 현행 유지로 PLAN HIGH-3/4 둘 다 해결
+- ⚠️ 첫 anchor가 너무 늦어져 청감 정착 시간이 길어짐 → fallback alignment 정확도 별도 개선 필요
+- ❌ 청감 분포 변화 없음 → §D-2 fix가 청감과 비상관, 다른 §(A/B/D) 재검토 필요. 이때는 (44) 13번 사이클 회피 위해 fix 롤백 후 재명세
+
 ---
 
 #### 미해결 이슈
