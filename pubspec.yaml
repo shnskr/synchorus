@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.58+1
+version: 0.0.59+1
 
 environment:
   sdk: ^3.11.4
@@ -37,7 +37,7 @@ dependencies:
   file_picker: ^8.1.7
   path_provider: ^2.1.5
   connectivity_plus: ^7.1.0
-  audio_session: ^0.1.25
+  audio_session: ^0.2.3
   package_info_plus: ^9.0.1
   # nsd: 시스템 mDNS(Bonjour) wrap. iOS NSNetService + Android NsdManager.
   # raw UDP broadcast의 iOS multicast entitlement 필요성 우회.

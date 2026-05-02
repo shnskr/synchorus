@@ -3366,6 +3366,29 @@ iOS `GeneratedPluginRegistrant.m`은 빌드 시 자동 재생성 — `JustAudioP
 
 **다음 단계**: `audio_session` 0.1.25 → 0.2.3 메이저 업그레이드 (iOS AVAudioSession 라우팅 변경점 검토).
 
+### 2026-05-02 (63) — v0.0.59 audio_session 0.1.25 → 0.2.3 메이저 업그레이드
+
+**배경**: (62) 다음 단계. 사용처 grep — `lib/main.dart:12-13` 두 줄(`AudioSession.instance` + `configure(AudioSessionConfiguration.music())`)만 사용. iOS 네이티브 `AVAudioSession.sharedInstance()` 직접 호출은 시스템 API이지 audio_session 플러그인 아님(`ios/Runner/AudioEngine.swift` 등) → 영향 무관.
+
+**0.2.x breaking change 검토** (pub.dev/packages/audio_session/changelog WebFetch):
+- **유일한 breaking change**: `AUDIO_SESSION_MICROPHONE=0 by default on iOS` — Synchorus는 마이크 사용 안 함 → 영향 0
+- `AudioSession.instance` / `AudioSessionConfiguration.music()` API 변경 없음
+- Android Kotlin 마이그레이션 (내부 변경)
+- Flutter 최소 요구 3.27.0 → 현재 환경 3.41.6 충족
+
+**변경 (`v0.0.59`, 코드 변경 0 — pubspec/lock만)**:
+
+`pubspec.yaml`: `audio_session: ^0.1.25` → `^0.2.3`. `flutter pub get` 1개 의존성 변경.
+
+**검증**:
+- `flutter analyze` No issues
+- `flutter build apk --debug` ✓ 25.2s (Kotlin migration 영향, 0.0.58의 9.5s 대비 ↑)
+- 실기기 회귀 테스트는 별도 세션 (특히 iPhone BT 라우팅, audio focus 인터럽트 시나리오)
+
+**version bump**: 0.0.58+1 → 0.0.59+1.
+
+**다음 단계**: 비오디오 메이저 업그레이드 — `network_info_plus` 6→8, `file_picker` 8→11, `device_info_plus` 12→13, `package_info_plus` 9→10. 각각 단독 commit. 마지막 `flutter_riverpod` 2→3은 회귀 위험 최대라 별도 세션.
+
 ---
 
 #### 미해결 이슈
