@@ -105,7 +105,7 @@
 
 1-A. ~~**(81) 신규 회귀 fix — 파일 변경 시 호스트 무음 + 게스트 단독 재생**~~ — **v0.0.69 (82) 완료**. audio-url playing=false + framePos>0 sanity gate + _latestObs reset. 실기기 검증 통과.
 
-1-B. **(81) 신규 회귀 진단 — T4 peer count 갱신 누락** (HISTORY (81), mid). iPhone 강제 종료 시 호스트 카운트는 갱신, 다른 게스트(A7 Lite) 미갱신. logcat streaming 재현 + RoomScreen vs PlayerScreen 카운트 출처 추적 필요.
+1-B. ~~**(81) 신규 회귀 진단 — T4 peer count 갱신 누락**~~ — **v0.0.71 (84) 완료**. root cause: `socket.done.catchError` 분기 broadcast 누락. 정상/에러 분기 통합 fix. 실기기 3대 검증 통과.
 
 1-C. ~~**(82) 신규 회귀 fix — HTTP 404 stale state**~~ — **v0.0.70 (83) 완료**. `_cleanupTempDir` 활성 파일 보호 가드 + `_handleAudioRequest` disk 확인 + 진단 logging. 실기기 통과. root cause는 자연 재현 시 `[DIAG] startListening re-entry` 로그로 좁힐 예정.
 

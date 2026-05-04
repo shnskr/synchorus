@@ -4371,6 +4371,47 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - HISTORY (82) 1-B fix (T4 게스트 강제 종료 시 다른 게스트 peer count 갱신 누락)
 - 자연 재현 시 `[DIAG] startListening re-entry` 로그로 root cause 확정
 
+### 2026-05-04 (85) — v0.0.71 게스트 강제 종료 시 다른 게스트 peer count 갱신 fix
+
+**배경**: HISTORY (82) 1-B 회귀 — T4 회귀 테스트(S22 호스트 + A7 Lite + iPhone) 중 iPhone 강제 종료 시 호스트 peer count는 3→2 정상, 그러나 A7 Lite 게스트는 3 그대로.
+
+**root cause 발견**: `p2p_service.dart:286~290`의 `socket.done.catchError` 분기에서 `broadcastToAll('peer-left', peerCount)` 누락. 정상 종료(`then`) 분기엔 broadcast 있음.
+
+iPhone 강제 종료 = TCP RST → `socket.done` error 종료 → `catchError` 진입 → 호스트 자기 `_peers`에서 제거 + `_peerLeaveController`만 emit, **다른 게스트에게 알림 안 감**.
+
+**fix** (`p2p_service.dart:277~291`): 정상/에러 분기를 `onDone()` 함수로 통합. 양쪽 모두 broadcast 호출.
+
+```dart
+void onDone() {
+  if (!_peers.any((p) => p.id == peerId)) return;
+  _peers.removeWhere((p) => p.id == peerId);
+  _peerLeaveController.add(peerId);
+  broadcastToAll({
+    'type': 'peer-left',
+    'data': {'peerId': peerId, 'peerCount': _peers.length},
+  });
+}
+socket.done.then((_) => onDone()).catchError((_) => onDone());
+```
+
+**검증** (S22 호스트 + A7 Lite + iPhone 게스트):
+- iPhone 강제 종료 → S22 + A7 Lite 모두 peer count 3→2 ✓
+- iPhone 재입장 → 셋 다 peer count 3 ✓
+- A7 Lite 강제 종료 → S22 + iPhone 모두 peer count 2 ✓
+- 호스트 강제 종료 → 게스트 host-closed 정상 흐름 ✓
+
+**version bump**: 0.0.70+1 → 0.0.71+1.
+
+**부수 — IntelliJ로 iPhone install hung 회피**:
+- CLI `flutter run`은 `Installing and launching...` 단계 8분+ hung 재현 (MID-14)
+- IntelliJ에서 Flutter 플러그인으로 Run → 빌드 + install 정상 완료 (5:37PM 빌드 시작 → 5:38PM `devicectl install app` 호출 완료)
+- 이전 stale 프로세스 정리 필요했음 (kill 4868 4869 4876 4888 5279 5336 5752 7205 7262 7678)
+- 추가 fix 후보: MID-14 자체는 미해결, IntelliJ 우회로 검증 환경 안정화 가치 확인
+
+**다음 단계 후보**:
+- 다른 PLAN 항목 (HIGH-1 같은 모델 갤럭시 2대 / Anchor reset NTP 정공법 등)
+- 자연 재현 시 `[DIAG] startListening re-entry` 로그로 1-C root cause 확정
+
 ---
 
 #### 미해결 이슈
@@ -4405,7 +4446,7 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - [x] ~~**v0.0.27 errno=111 빠른 포기 실측 검증**~~ — 2026-04-24 (23)에서 S22+iPhone 조합으로 T4b 실측. **Darwin errno=61 미체크 버그** 발견 → v0.0.30에서 수정 → 재검증 ~10초 fast giveup PASS. W(게스트 WiFi off/on)는 일반 재연결 성공, errno=65/51 분기 재현은 추가 조건 필요 (WiFi 30초+ off 또는 AP 이동)
 - [ ] W 시나리오의 errno=65/51(Darwin EHOSTUNREACH/ENETUNREACH) 분기 실행 캡처 — 2026-04-24 (23)에서 WiFi off 시간이 짧아 Socket.onDone 도달 전 WiFi 복구됨. 30초+ off 또는 호스트와 다른 AP 이동 시나리오 필요
 - [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). **2026-04-24 (27) S22+iPhone 실측 PASS** — 비행기 모드 on/off 반복 중 양쪽 2명 유지 확인
-- [ ] **Peer count 불일치 회귀 — 게스트 강제 종료 시 다른 게스트 갱신 실패** (2026-05-04 (81) 신규, mid priority). T4 회귀 테스트 (S22 호스트 + A7 Lite + iPhone 게스트 3명) 중 iPhone 앱 강제 종료(스와이프) 시 호스트 peer count는 3→2 정상 갱신, 그러나 **A7 Lite 게스트는 3 그대로**. 코드(`p2p_service.dart:282~285`, `room_screen.dart:135~138`)는 정상으로 보이며 v0.0.32에서 fix된 영역. 회귀 가능 원인: (a) iPhone 강제 종료 시 TCP RST 지연 → 호스트 `socket.done` vs heartbeat dead 판정 경로 차이로 broadcast 타이밍 어긋남, (b) PlayerScreen이 RoomScreen과 별도 카운트 표시 (UI에서 다른 카운트 보고 가능성), (c) A7 Lite 측 message dispatcher가 특정 조건에서 'peer-left' 메시지 누락. **재현 필요**: logcat streaming + RoomScreen vs PlayerScreen 카운트 출처 추적.
+- [x] ~~**Peer count 불일치 회귀 — 게스트 강제 종료 시 다른 게스트 갱신 실패**~~ — **v0.0.71 (84) fix 완료**. `p2p_service.dart:286~290` `socket.done.catchError` 분기에서 broadcast 누락이 root cause. iPhone 강제 종료 = TCP RST → catchError 진입 → 다른 게스트 알림 안 감. 정상/에러 분기를 `onDone()` 함수로 통합. 실기기 3대(S22 + A7 Lite + iPhone) 검증 통과.
 - [x] ~~게스트 재연결 race(무한 loop)~~ — 2026-04-24 (27) p2p_service.dart onDone에 `identical(_hostSocket, socket)` 가드 추가(v0.0.34). 짧은 off(5~8초)에서 두 재연결 경로(`_handleDisconnected` + `_waitForWifiAndReconnect`)가 동시 성공 시 old socket의 onDone이 새 socket까지 destroy하면서 발생하던 무한 loop 차단
 - [x] ~~게스트 재연결 경로 중복(재동기화 2회, 1회 실패 보고)~~ — 2026-04-24 (28) `_reconnectInProgress` flag로 두 경로 직렬화(v0.0.35). race 자체 제거 → Reconnect 7→3, 재동기화 실패 0. v0.0.34 onDone 가드는 안전망으로 유지
 

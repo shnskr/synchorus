@@ -274,8 +274,11 @@ class P2PService {
       }, exclude: peerId);
     });
 
-    socket.done.then((_) {
-      // heartbeat에서 이미 제거된 경우 중복 처리 방지
+    // socket.done은 정상/에러 둘 다 종료 신호. 두 분기 모두 broadcast 필요 —
+    // iPhone 등 게스트 강제 종료 시 TCP RST로 done이 catchError 분기에 빠지면
+    // 다른 게스트에게 peer-left 알림 누락 → 다른 게스트 peerCount 갱신 안 됨
+    // (HISTORY (81) 1-B). 통합 처리로 fix.
+    void onDone() {
       if (!_peers.any((p) => p.id == peerId)) return;
       _peers.removeWhere((p) => p.id == peerId);
       _peerLeaveController.add(peerId);
@@ -283,11 +286,8 @@ class P2PService {
         'type': 'peer-left',
         'data': {'peerId': peerId, 'peerCount': _peers.length},
       });
-    }).catchError((e) {
-      if (!_peers.any((p) => p.id == peerId)) return;
-      _peers.removeWhere((p) => p.id == peerId);
-      _peerLeaveController.add(peerId);
-    });
+    }
+    socket.done.then((_) => onDone()).catchError((_) => onDone());
   }
 
   /// 소켓에서 메시지 수신 리스너
