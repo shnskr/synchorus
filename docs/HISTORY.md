@@ -4447,6 +4447,46 @@ iPhone 게스트 `event=fallback drift=±20~35ms` 매번 발생도 호스트(SR 
 - xrun + Pausing stuck (Tab A7 Lite oboe pause/resume xrun 미해결 이슈 영역) 별도 트랙
 - 그 외 PLAN 항목
 
+### 2026-05-04 (87) — v0.0.72 자동화 short baseline (N=2) — SR mismatch fix 효과 정량 검증
+
+**측정**: `./scripts/measure.sh --short × 2회 sequential` (3차 시도 중 S22 USB 연결 끊김으로 N=2 마감).
+
+**Run 결과**:
+
+| Run | csv | drift n | anchor gap | vfDiff signed mean | RMS | range | reset |
+|---|---|---|---|---|---|---|---|
+| 1 | `auto_2026-05-04_183336.csv` (321행) | 167 | **-0.80ms** | **+1.34ms** | 14.77ms | [-57, +28] | 0 |
+| 2 | `auto_2026-05-04_183924.csv` (322행) | 248 | **-1.20ms** | **+0.64ms** | 20.05ms | [-41, +40] | 0 |
+
+**누적 자동화 short baseline 비교**:
+
+| 버전 | vfDiff signed mean | gap | reset | 비고 |
+|---|---|---|---|---|
+| v0.0.67 | +2.36 | 0.2 | 0 | wakelock 도입 전 |
+| v0.0.68 N=2 | +8.46 / -18.94 | 0.4 / 1.5 | 0 | wakelock 도입, wide variance |
+| **v0.0.72 N=2** | **+1.34 / +0.64** | **-0.80 / -1.20** | **0** | **SR mismatch fix 후 — variance 좁혀지고 0 근처 수렴** |
+
+**해석**:
+- vfDiff signed mean **+0.64~+1.34ms** 매우 작은 값. 0 근처 수렴 = host vs guest 누적 속도 차이 거의 없음.
+- v0.0.68의 wide variance(+8 vs -19)가 v0.0.72에서 +1 / +0.6으로 좁혀짐. 측정 환경(자동화 idle) 변동성 자체는 같으니 **이전 wide variance의 source가 SR mismatch**였을 가능성 강한 증거.
+- anchor gap 모두 < 2ms (§D-2 fix 효과 유지).
+- anchor_reset 0회 N=2 일관.
+
+**SR mismatch root cause 정량 검증**:
+v0.0.71까지의 자동화 측정에서 보였던 wide variance가 v0.0.72에서 좁혀짐 → **음정 down 회귀 fix가 sync 안정성에도 부수 효과**. 이번 세션 디버깅했던 fallback 큰 drift 일부가 SR mismatch에서 파생된 효과였을 가설이 정량적으로 강해짐.
+
+**한계**:
+- N=2 (3차 시도 중 USB 끊김으로 중단)로 통계적 강도 제한
+- 자동화 idle 환경 측정 — 실제 사용자 환경 변동성과 다를 수 있음
+- vfDiff |mean| 14~16ms, RMS 14~20ms는 BT outputLatency / host outputLatency 비대칭 잔재 영역 (별도 트랙)
+
+**version bump 안 함**: 측정·문서 only, 코드 변경 0.
+
+**다음 단계 후보**:
+- BT outputLatency 동적 보정 (vfDiff 잔재 ~30ms 영역, MID priority)
+- HIGH-1 같은 모델 갤럭시 2대 검증 (디바이스 확보 시)
+- NTP 정공법 재도입 (DECISIONS 원칙 따라 SYNC_ALGORITHM_V2 합의 후 단일 commit, 별도 세션)
+
 ---
 
 #### 미해결 이슈
