@@ -4307,7 +4307,7 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 
 ### 2026-05-04 (83) — v0.0.69 파일 변경 시 게스트 단독 재생 fix
 
-**배경**: HISTORY (81) 회귀 — 호스트가 새 파일 선택 시 호스트 native 엔진 `getTimestamp` 28회 실패(~2.8초 무음) 동안 게스트만 단독 재생 시작.
+**배경**: HISTORY (82) 회귀 — 호스트가 새 파일 선택 시 호스트 native 엔진 `getTimestamp` 28회 실패(~2.8초 무음) 동안 게스트만 단독 재생 시작.
 
 **fix 진행** (단일 commit, 3단계):
 
@@ -4332,9 +4332,44 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 3. **iOS install hung 변종** — `flutter run` 시 `Installing and launching...` 단계에서 8분+ hung (이전 사례 1~3분). MID-14 변종, 원인 동일.
 
 **다음 단계 후보**:
-- HISTORY (81) 1-B 회귀 fix (T4 peer count 게스트 갱신 누락) — 별도 commit
+- HISTORY (82) 1-B 회귀 fix (T4 peer count 게스트 갱신 누락) — 별도 commit
 - 2번 신규 미해결 이슈 fix (HTTP 404 stale state)
 - 자동화 인프라 안정화 — S22 핫스팟 모드 도입 검토
+
+### 2026-05-04 (84) — v0.0.70 게스트 재접속 다운로드 404 fix + 진단 logging
+
+**배경**: HISTORY (83) 신규 미해결 이슈 1-C — 게스트 WiFi 토글 후 재접속 시 호스트 41236 GET → 404. 호스트 `_currentUrl`은 살아있으나 disk stableFile은 사라진 stale 케이스.
+
+**root cause 가설 추적**:
+
+`_cleanupTempDir` 코드(`native_audio_sync_service.dart:1487`)가 두 곳에서 호출:
+- `startListening:138` — RoomScreen 진입 시 잔여 temp 파일 정리 (의도)
+- `clearTempFiles:1518` — 방 나갈 때 (정상)
+
+**가드 누락 발견**: `_cleanupTempDir`이 `audio_*`로 시작하는 모든 파일을 무조건 삭제 — **현재 사용 중인 `_storedSafeName`도 보호 안 함**. 호스트가 어떤 경로로 `startListening` 재호출되면 자기 활성 파일을 자기가 삭제하는 부작용. `_currentUrl`/HTTP 서버는 살아있어 게스트는 audio-url 받지만 GET 시 disk에 파일 없어 404.
+
+다만 `startListening` 재호출 트리거 자체(앱 백그라운드/포그라운드, riverpod provider 재생성, RoomScreen rebuild 등)는 logging 부재로 미확정 — 자연 재현 시 좁히기 위해 진단 logging도 같이 추가.
+
+**fix** (방어적 가드 2개 + 진단 logging):
+
+1. `_cleanupTempDir:1494~1517` — `_storedSafeName == name`이면 보호. 삭제/보호 카운트 logging.
+2. `_handleAudioRequest:539~556` — disk 파일 존재 확인 후 응답. 없으면 `_currentUrl`/`_storedSafeName`/`_currentFileName` 모두 null로 정리(stale state 정리).
+3. `startListening:132~146` — 활성 `_storedSafeName`이 있는 상태에서 재호출 시 `[DIAG] startListening re-entry` 로그.
+
+**검증** (S22 호스트 + A7 Lite 게스트):
+- mp3 선택 → 정상 다운로드
+- A7 Lite WiFi 토글 → 재접속 → 다운로드 정상 (이전 v0.0.69에선 404 회귀 — fix 통과)
+
+**root cause 100% 미확정 인정**:
+- 두 가드 중 어느 쪽이 발동했는지 logging 부재로 미확인
+- 직전 v0.0.69 케이스 disk 사라짐 원인 (startListening 재호출 vs OS cleanup) 미확정
+- `[DIAG] startListening re-entry` 로그가 자연 재현 시 트리거 좁히기 가능
+
+**version bump**: 0.0.69+1 → 0.0.70+1.
+
+**다음 단계 후보**:
+- HISTORY (82) 1-B fix (T4 게스트 강제 종료 시 다른 게스트 peer count 갱신 누락)
+- 자연 재현 시 `[DIAG] startListening re-entry` 로그로 root cause 확정
 
 ---
 
@@ -4356,7 +4391,7 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - [ ] **Logger csv 경로 접근성** (2026-04-24 (30) 신규, low priority). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/`처럼 multi-user 공간에 떨어지면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. Android 한정 `/sdcard/Android/data/.../files/`로 저장 옵션 추가 검토.
 - [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **보류 — 작업목록 제외 2026-05-03**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **NTP 정공법 2회 시도 모두 실패** — v0.0.46~v0.0.48 (HISTORY (43)) drift 63초 회귀 → 롤백, v0.0.49~v0.0.61 (HISTORY (44)) 13번 fix 사이클 → 사용자 청감 v0.0.48이 더 나음 → main reset. **§D-2 fix(v0.0.63)로 자연 해소 정황** — v0.0.67 12분 자동화에서 anchor_reset 0회, vfDiff RMS 21ms. 본격 재도입 트리거는 §C rate drift 결정(PCM streaming 구조 변경 후 30분+ 측정)에 묶임. backup branch 보존: `backup-v0.0.61-session`, `backup-v0.0.51-to-v0.0.55-session`.
 - [x] ~~**파일 변경 시 호스트 무음 + 게스트만 단독 재생**~~ — **v0.0.69 (83)에서 4단계 fix 완료** (audio-url playing=false 강제 + framePos>0 sanity gate + audio-url 수신 시 _latestObs reset). 실기기 S22+A7 Lite로 두 번째 파일 변경 시 게스트 단독 재생 회귀 사라짐 확인.
-- [ ] **HTTP 404 stale state — 게스트 재접속 시 다운로드 실패** (2026-05-04 (83) 신규, mid priority). 게스트가 WiFi 토글 후 재입장 시 호스트 41236 GET → 404. nc로 직접 GET 시도해도 404 정상 응답. 호스트 `_currentUrl`은 살아있으나 disk stableFile은 사라진 stale 케이스. 호스트가 mp3 다시 선택하면 즉시 정상화. **fix 방향**: `_handleAudioRequest`(`native_audio_sync_service.dart:539`)에서 disk 파일 존재 확인 후 응답.
+- [x] ~~**HTTP 404 stale state — 게스트 재접속 시 다운로드 실패**~~ — **v0.0.70 (84) 방어적 fix 완료**. `_cleanupTempDir`에 활성 `_storedSafeName` 보호 가드 + `_handleAudioRequest`에 disk 파일 존재 확인 + `startListening` 재호출 진단 logging. 실기기 검증 통과. 단 root cause(startListening 재호출 트리거)는 미확정, 자연 재현 시 `[DIAG] startListening re-entry` 로그로 좁힐 예정.
 - [ ] **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (2026-04-26 (43) 신규, mid priority). `flutter run --device-id <iPhone>` USB로 실행 시 "Installing and launching..." 단계에서 1~3분 hung. iPhone 잠금/신뢰 다이얼로그 OK인데도 발생. iOS 26 + Xcode toolchain 호환 이슈 추정. 다음 세션엔 **IntelliJ Run** 또는 **Xcode IDE에서 직접 Run** 권장 (CLI flutter run 대신).
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
 - [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52)에서 A+B 동시 fix 완료** (`device_info_plus`로 디바이스명 발급 + stale 비교를 name AND ip로 강화). 실측 검증은 갤럭시 3대 또는 같은 모델 2대 환경 필요 (현재 보유 디바이스는 모델 다 달라서 A안만으로도 통과해버림 → 진짜 검증은 같은 모델 2대 이상으로).

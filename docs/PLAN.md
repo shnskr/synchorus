@@ -107,7 +107,7 @@
 
 1-B. **(81) 신규 회귀 진단 — T4 peer count 갱신 누락** (HISTORY (81), mid). iPhone 강제 종료 시 호스트 카운트는 갱신, 다른 게스트(A7 Lite) 미갱신. logcat streaming 재현 + RoomScreen vs PlayerScreen 카운트 출처 추적 필요.
 
-1-C. **(82) 신규 회귀 fix — HTTP 404 stale state** (HISTORY (82), mid). 게스트 재접속 시 호스트 `_currentUrl`은 살아있으나 disk 파일 사라진 케이스 → 다운로드 404. `_handleAudioRequest`에서 disk 확인 후 응답.
+1-C. ~~**(82) 신규 회귀 fix — HTTP 404 stale state**~~ — **v0.0.70 (83) 완료**. `_cleanupTempDir` 활성 파일 보호 가드 + `_handleAudioRequest` disk 확인 + 진단 logging. 실기기 통과. root cause는 자연 재현 시 `[DIAG] startListening re-entry` 로그로 좁힐 예정.
 
 2. ~~**v0.0.53 anchor fix 효과 검증 측정**~~ — **완료 (2026-05-02 (59))**. 결과: vfDiff signed -15.94ms (v0.0.52 -3.60ms 대비 4배↑), anchored vs current diff 0.22ms (EMA 효과 없음 확정). anchor 중복 호출 제거가 root cause 아니었음. 후속 작업은 신규 HIGH 항목 2-A/2-B로 분기.
 

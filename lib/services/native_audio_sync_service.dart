@@ -130,6 +130,15 @@ class NativeAudioSyncService {
   String? get measurementLogPath => _logger.logFilePath;
 
   Future<void> startListening({required bool isHost}) async {
+    // 진단 로그 (HISTORY (82) — 호스트 disk file이 사라지는 root cause 추적용).
+    // 활성 stableFile이 있는 상태에서 startListening 재호출되면 어떤 경로로
+    // 들어왔는지 확인 필요. _cleanupTempDir 보호 가드는 이미 적용했으나
+    // 자연 재현 시 호출 트리거 (앱 재바인드, riverpod 재생성 등) 좁히기 위함.
+    if (_storedSafeName != null) {
+      debugPrint(
+          '[DIAG] startListening re-entry — isHost=$isHost, '
+          'activeFile=$_storedSafeName, currentUrl=$_currentUrl');
+    }
     _isHost = isHost;
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen(_onMessage);
@@ -541,8 +550,22 @@ class NativeAudioSyncService {
   // 호스트: 피어 요청 처리
   // ═══════════════════════════════════════════════════════════
 
-  void _handleAudioRequest(String? fromId) {
+  void _handleAudioRequest(String? fromId) async {
     if (fromId == null || _currentUrl == null) return;
+    // disk stableFile 존재 확인. 외부 cleanup(OS tempDir 정리 등)으로 파일이
+    // 사라진 경우 stale audio-url 응답을 보내지 않음 (HISTORY (82) — 게스트 GET 404).
+    final safeName = _storedSafeName;
+    if (safeName != null) {
+      final tempDir = await getTemporaryDirectory();
+      final f = File('${tempDir.path}/$safeName');
+      if (!await f.exists()) {
+        debugPrint('[HOST] audio-request received but stableFile missing: $safeName');
+        _currentUrl = null;
+        _storedSafeName = null;
+        _currentFileName = null;
+        return;
+      }
+    }
     _p2p.sendToPeer(fromId, {
       'type': 'audio-url',
       'data': {
@@ -1486,15 +1509,30 @@ class NativeAudioSyncService {
     try {
       final tempDir = await getTemporaryDirectory();
       final files = tempDir.listSync();
+      // 현재 사용 중인 호스트 파일은 보호. startListening 재호출 시(앱 재바인드,
+      // riverpod provider 재생성 등) 활성 stableFile이 삭제되면 _currentUrl은 살아있고
+      // HTTP 서버도 살아있는데 disk만 사라져 게스트 GET 404 발생 (HISTORY (82)).
+      final activeName = _storedSafeName;
+      var deleted = 0;
+      var protected = 0;
       for (final f in files) {
         if (f is File) {
           final name = f.uri.pathSegments.last;
+          if (activeName != null && name == activeName) {
+            protected++;
+            continue;
+          }
           if (name.startsWith('audio_') || name.startsWith('dl_')) {
             try {
               await f.delete();
+              deleted++;
             } catch (_) {}
           }
         }
+      }
+      if (deleted > 0 || protected > 0) {
+        debugPrint('[DIAG] _cleanupTempDir: deleted=$deleted protected=$protected '
+            'activeName=$activeName');
       }
     } catch (_) {}
   }
