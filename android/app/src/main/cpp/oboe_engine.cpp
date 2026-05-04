@@ -248,17 +248,32 @@ public:
         // 첫 호출 또는 unload 후엔 stream 새로 open.
         std::lock_guard<std::mutex> lock(mLock);
         if (mStream) {
-            mPrewarmIdle.store(false, std::memory_order_release);
-            // pause 상태면 resume. 이미 active면 무해.
-            if (mStream->getState() == oboe::StreamState::Paused ||
-                mStream->getState() == oboe::StreamState::Pausing) {
-                oboe::Result result = mStream->requestStart();
-                if (result != oboe::Result::OK) {
-                    LOGE("start (resume): %s", oboe::convertToText(result));
-                    return false;
+            // v0.0.72: file sample rate가 stream actualSR과 다르면 stream 재생성.
+            // 첫 파일 44100Hz로 stream 열린 후 두 번째 파일 48000Hz 로드 시 stream
+            // 그대로 두면 file 데이터를 wrong rate hardware로 보내 음정 0.919배
+            // (반음 정도 낮음) 효과 발생 (HISTORY (85)).
+            if (mStreamSampleRate > 0 && mDecodedSampleRate > 0 &&
+                mStreamSampleRate != mDecodedSampleRate) {
+                LOGI("start: stream SR mismatch (stream=%d, file=%d) → reopen",
+                     mStreamSampleRate, mDecodedSampleRate);
+                mStream->stop();
+                mStream->close();
+                mStream.reset();
+                mStreamSampleRate = 0;
+                // fall through to prewarmInternal_locked below
+            } else {
+                mPrewarmIdle.store(false, std::memory_order_release);
+                // pause 상태면 resume. 이미 active면 무해.
+                if (mStream->getState() == oboe::StreamState::Paused ||
+                    mStream->getState() == oboe::StreamState::Pausing) {
+                    oboe::Result result = mStream->requestStart();
+                    if (result != oboe::Result::OK) {
+                        LOGE("start (resume): %s", oboe::convertToText(result));
+                        return false;
+                    }
                 }
+                return true;
             }
-            return true;
         }
         if (!mFileLoaded) {
             LOGE("start: no file loaded");

@@ -8,6 +8,7 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 
 | 결정 | 이유 |
 |---|---|
+| Oboe stream sample rate mismatch 시 재생성 (v0.0.72) | v0.0.46 "정지/재생 시 stream 재사용으로 setup latency 0" 의도가 새 파일 sr이 다른 케이스를 누락. 첫 파일 44100Hz로 stream 열린 후 두 번째 파일 48000Hz 로드 시 stream 그대로 → 48000Hz 데이터를 44100Hz hw로 → **0.919배 속도 + 음정 1.5반음 down**. `start()`에서 `mStreamSampleRate != mDecodedSampleRate`이면 stop+close+reset 후 prewarmInternal_locked로 재생성. 양방향 mismatch(느려짐/빨라짐) 모두 처리. |
 | anchor establishment 단일 진입 (v0.0.53) | `_tryEstablishAnchor`의 `seekToFrame(targetGuestVf)` + `_seekCorrectionAccum += initialCorrection` 블록은 1번만 호출. v0.0.48 롤백 시 v0.0.45 회복 코드 + v0.0.46 이후 코드가 합쳐지며 중복 발생 → `seekToFrame`은 idempotent라 위치는 같지만 accum이 두 배로 누적 → `_anchorGuestFrame`이 의도(`targetGuestVf`)보다 `+initialCorrection` 앞에 박힘 → vfDiff 베이크인 잔재(-3.6ms 등). 향후 anchor 로직 수정 시 **진입점 1개 원칙** 유지 |
 | 1:N 멀티 게스트 전제 (v0.0.32, v0.0.54) | 같은 이름 peer가 다수 존재 가능. p2p 로직 작성 시 1:1 가정 금지. 호스트 stale peer 정리는 `name AND ip` 동시 매칭(LAN P2P는 NAT 없어 ip가 디바이스 유일 식별), 게스트 닉네임은 `<device model>#<hex 4자리>`(같은 모델 2대 이상 충돌 방지, `device_info_plus`). peer-joined/left broadcast는 절대 peerCount 동봉(메시지 누락 시 증감 drift 누적 방지). v0.0.32 도입 → v0.0.54 다중 게스트 입장 불가 버그 fix로 확장 |
 | BT outputLatency 비대칭 anchor 베이크인 (v0.0.38) | 게스트와 호스트의 `outputLatency` 차이(BT 환경 ±50ms 가능)를 anchor 시 콘텐츠 정렬 seek에 베이크인 → framePos 기준 drift = 0으로 시작. 이후 `_recomputeDrift`는 (현재 outLatDelta − 앵커 outLatDelta) 변화분만 보정. `_anchoredOutLatDeltaMs` 필드. v3 폐루프 BT 안정성 핵심 |

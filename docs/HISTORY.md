@@ -4412,6 +4412,41 @@ socket.done.then((_) => onDone()).catchError((_) => onDone());
 - 다른 PLAN 항목 (HIGH-1 같은 모델 갤럭시 2대 / Anchor reset NTP 정공법 등)
 - 자연 재현 시 `[DIAG] startListening re-entry` 로그로 1-C root cause 확정
 
+### 2026-05-04 (86) — v0.0.72 Oboe stream sample rate mismatch fix (음정 떨어짐 회귀)
+
+**배경**: v0.0.71 회귀 테스트 중 사용자 보고 — 호스트(S22) + 게스트(A7 Lite) 둘 다 음정이 일관적으로 낮게 재생됨. iPhone은 정상.
+
+**진단 시퀀스**:
+
+1. **logcat oboe 패턴 발견** — S22, A7 Lite 모두 `state=Pausing + ErrorInvalidState + xrun 누적` 반복. 처음엔 xrun 효과로 가설 잡았으나 사용자 정정 — "음정이 일관 down된 것" → xrun(끊김)이 아닌 **sample rate mismatch**.
+2. **actualSR 확인** — `start stream OK: reqSR=44100 actualSR=44100 burst=96` (S22) / `burst=256` (A7 Lite). stream 44100Hz로 열려있음.
+3. **현재 파일 sr 확인** — `loadFile: sr=48000 ch=2 dur=352.5s mime=audio/mpeg`. 파일은 48000Hz.
+4. **mismatch root cause 확정**: 첫 파일이 44100Hz였고 stream 44100으로 열림 → 두 번째 파일 48000Hz 로드 시 stream 그대로 재사용 → 48000Hz 데이터를 44100Hz hardware로 출력 → **0.919배 속도 → 음정 약 1.5반음 낮음**.
+
+**root cause 코드 위치**: `oboe_engine.cpp:250~262` `start()` 메서드. v0.0.46 "정지/재생 시 stream 즉시 출력 위해 재사용" 의도로 `if (mStream) { ... return true; }` 처리했으나, **새 파일 sample rate가 다른 케이스를 누락**.
+
+**fix** (`oboe_engine.cpp:250~285`): `start()` 시작 시 `mStreamSampleRate != mDecodedSampleRate`이면 `stop() + close() + reset()` 후 `prewarmInternal_locked()`로 stream 재생성. 일치하면 기존 v0.0.46 동작 유지(setup latency 0).
+
+**검증** (실기기 S22 + A7 Lite):
+- 첫 파일(44100Hz) 재생 → 정상
+- 두 번째 파일(48000Hz)로 변경 → 사용자 청감 "음정 정상" 확정 ✓
+- logcat에 `start: stream SR mismatch → reopen` 로그 발현
+
+**파급 효과 — 이번 세션 sync 이슈 일부 reframe 가능성**:
+
+이번 SR mismatch가 호스트 0.919배 재생 → 게스트들과 큰 속도 차이 → drift-report에 큰 값 → fallback alignment가 비정상 seek 시도 → A7 Lite logcat의 `[FALLBACK] align: drift=53423.2ms, seekTo=-2563654` (53초 drift) 같은 값이 이걸로 설명됨.
+
+iPhone 게스트 `event=fallback drift=±20~35ms` 매번 발생도 호스트(SR mismatch 0.919배) vs iPhone(정상) 속도 차이로 누적된 drift일 가능성. **즉 이번 세션에서 디버깅했던 anchor reset/fallback drift 일부 또는 전부가 SR mismatch에서 파생된 증상**일 수 있음. 알고리즘 결함이 아니라 root cause(SR mismatch)에서 나온 효과.
+
+이 reframe은 가설이며 향후 같은 시나리오 재현 시 v0.0.72 fix 적용한 logcat에서 fallback drift 절대값이 작아지는지로 검증 가능.
+
+**version bump**: 0.0.71+1 → 0.0.72+1.
+
+**다음 단계 후보**:
+- v0.0.72 fix 후 자동화 측정 재실행 — drift 절대값 비교로 SR mismatch 효과 분리
+- xrun + Pausing stuck (Tab A7 Lite oboe pause/resume xrun 미해결 이슈 영역) 별도 트랙
+- 그 외 PLAN 항목
+
 ---
 
 #### 미해결 이슈
