@@ -151,7 +151,7 @@
 
 13. **acoustic loopback 외부 측정** (선택, 항목 8 검증에서 잔여 100ms+ 시 우선순위 ↑) — OS API 한계(BT codec/radio 단계 미보고) 잡으려면 마이크로 round-trip 측정. AOSP CTS 표준 방식.
 
-14. **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (HISTORY (43)). `flutter run --device-id <iPhone>` USB 1~3분 hung. IntelliJ Run 또는 Xcode IDE 권장.
+14. ~~**iOS 26.4.1 + macOS 26.3 환경 빌드 install hung**~~ — **회피 표준화 완료 (v0.0.71 (84) 후속)**. CLAUDE.md "실기기 빌드/설치" + "iOS debug 빌드 디버거 attach 필요" 섹션 갱신. CLI hung 발생 시 잔재 프로세스 정리 명령어 + IntelliJ/Xcode 권장 명시. 근본 fix(Apple/Flutter toolchain 측 이슈)는 미해결이지만 **운영 측면에선 표준 우회로 마감**.
 
 15. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관.
 

@@ -90,7 +90,14 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 #### 실기기 빌드/설치 (CLI, Xcode 불필요)
 - **Galaxy S22** (R3CT60D20XE): `flutter build apk --debug` → `flutter install --debug --device-id R3CT60D20XE`
 - **Galaxy Tab A7 Lite** (R9PW315GL0L): `flutter install --debug --device-id R9PW315GL0L`
-- **iPhone 12 Pro** (00008101-00063C963C52001E): `flutter run --device-id 00008101-00063C963C52001E` (iOS는 flutter install 불가, 항상 flutter run)
+- **iPhone 12 Pro** (00008101-00063C963C52001E): **CLI `flutter run` 비권장** — iOS 26.4.1 + macOS 26.3 환경에서 `Installing and launching...` 단계 1~8분 hung 재현 (HISTORY (43)/(82)/(84) MID-14). **IntelliJ Run** 또는 **Xcode IDE Run** 권장. CLI 시도 후 hung으로 종료하면 잔재 프로세스가 다음 빌드와 충돌하므로 정리 필요:
+  ```bash
+  ps aux | grep -iE "flutter|xcodebuild|devicectl|frontend_server|iproxy" | grep -v grep
+  # 오래된 PID들 (이전 hung 종료 후 살아남은 자식 프로세스) kill
+  ```
+
+#### iOS debug 빌드 디버거 attach 필요
+iOS debug 빌드는 Dart VM JIT 의존이라 디버거 끊으면 interpreter mode fallback → 동작 멈춤. 회귀 테스트 동안엔 IntelliJ/Xcode Run 창 띄워둔 채로 진행. 디버거 없이 길게 쓰려면 `flutter run --profile` (AOT 컴파일, hot reload 안 됨) 또는 release 빌드. Android debug는 무관.
 
 ### 에뮬레이터 네트워크
 에뮬레이터 테스트 시 adb forward 포트포워딩 필수 (에뮬은 192.168.x.x 직접 접근 불가):
