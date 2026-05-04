@@ -103,6 +103,12 @@
 
 1. **v0.0.54 다중 게스트 fix 실측 검증** — 같은 모델 갤럭시 2대 이상 환경에서 peer count 3 유지 + 비행기 모드 on/off 후에도 유지 확인. 현재 보유 디바이스(S22 + iPhone 12 Pro + Tab A7 Lite)는 모델 다 달라 A안만으로도 통과 → 진짜 검증은 같은 모델 2대 이상 필요. 상세: HISTORY (52).
 
+1-A. ~~**(81) 신규 회귀 fix — 파일 변경 시 호스트 무음 + 게스트 단독 재생**~~ — **v0.0.69 (82) 완료**. audio-url playing=false + framePos>0 sanity gate + _latestObs reset. 실기기 검증 통과.
+
+1-B. **(81) 신규 회귀 진단 — T4 peer count 갱신 누락** (HISTORY (81), mid). iPhone 강제 종료 시 호스트 카운트는 갱신, 다른 게스트(A7 Lite) 미갱신. logcat streaming 재현 + RoomScreen vs PlayerScreen 카운트 출처 추적 필요.
+
+1-C. **(82) 신규 회귀 fix — HTTP 404 stale state** (HISTORY (82), mid). 게스트 재접속 시 호스트 `_currentUrl`은 살아있으나 disk 파일 사라진 케이스 → 다운로드 404. `_handleAudioRequest`에서 disk 확인 후 응답.
+
 2. ~~**v0.0.53 anchor fix 효과 검증 측정**~~ — **완료 (2026-05-02 (59))**. 결과: vfDiff signed -15.94ms (v0.0.52 -3.60ms 대비 4배↑), anchored vs current diff 0.22ms (EMA 효과 없음 확정). anchor 중복 호출 제거가 root cause 아니었음. 후속 작업은 신규 HIGH 항목 2-A/2-B로 분기.
 
 2-A. ~~**anchor establish robustness**~~ — **SYNC_ALGORITHM_V2 §D-2로 흡수 (2026-05-02 (60))**. (60) raw 진단으로 root cause가 EMA convergence lag로 좁혀짐. 단독 fix 대신 디자인 단일 commit으로 묶음 (HIGH 4 참조).

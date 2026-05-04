@@ -4244,6 +4244,98 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 
 **변경 범위**: `docs/PLAN.md` MID-5 취소선 처리, `docs/HISTORY.md` 미해결 이슈 NTP 항목 보류 표시. 코드 변경 0.
 
+### 2026-05-04 (82) — v0.0.68 출시 전 실기기 풀세트 회귀 — 신규 회귀 2건 발견
+
+**환경**: S22 호스트(`R3CT60D20XE`) + Tab A7 Lite 게스트(`R9PW315GL0L`) + iPhone 12 Pro 게스트(`00008101-00063C963C52001E`). 셋 다 같은 AP `GANG-E` (192.168.35.x /24).
+
+**범위**: v0.0.57~v0.0.68 누적 영향 검증 (의존성 묶음 패치 + audio_session 0.2 + file_picker 11 + riverpod 3 + wakelock_plus).
+
+**진행**:
+
+1. **빌드/설치** ✅
+   - `flutter build apk --debug` → S22/A7 Lite `flutter install`. iPhone은 `flutter run`으로 1차 실패(`Failed to get CONFIGURATION_BUILD_DIR`, MID-14 변종) → 신뢰 다이얼로그 OK 후 재실행 성공.
+
+2. **AP 단말간 격리 회피** ⚠️ (회귀 무관)
+   - 초기 A7 Lite → S22 ping 100% loss, iPhone은 정상. 같은 BSSID·채널인데 비대칭. WiFi off→on 토글로 풀림. AP가 random MAC 일부 차단했을 가능성.
+   - 향후 자동 회귀 환경 안정화 위해 S22 모바일 핫스팟 표준화 검토.
+
+3. **P2P 연결 회귀** ✅
+   - 3대 동시 입장, peer count 3 일관 표시.
+
+4. **파일 전송 + 동기 재생 청감** ⚠️ 신규 회귀 발견
+   - 첫 재생: 청감 양호(echo/지연 못 느낌), seek/일시정지/재생 정상, drift 안정.
+   - **파일 변경 시 회귀**: 호스트 "대기 중" UI에서 게스트만 단독 재생 + 미세 sync 잔재.
+     - logcat: 호스트 새 파일 로드 직후 `[TS] ok recovered after 28 failures (vf=1152)` (~2.8초 ts 실패)
+     - 게스트: `[OBS-PLAYSTART] fp=-1 vf=0 sr=44100 hostOutLat=0.0 playing=true` stub 값 → `obs→startPlayback`
+     - root cause: `native_audio_sync_service.dart:843` `currentHostPlaying = _latestObs?.playing ?? hostPlaying`이 새 파일 케이스에서 호스트 native 엔진 ready 전에 true 판정.
+     - 미해결 이슈 `oboe::getTimestamp 간헐 실패`(HISTORY.md:4217)와 시너지.
+     - 미해결 이슈로 기록 (HIGH priority).
+
+5. **라이프사이클 T1~T4** ⚠️ T4에서 신규 회귀
+   - T1 호스트 백그라운드/복귀: iPhone 게스트 `[LIFECYCLE-GUEST] received host-paused` / `host-resumed` broadcast 정상 수신 ✓
+   - T2 비행기 모드 on/off: 정상 재접속 ✓
+   - T3 호스트 백그라운드 재생 유지: ✓
+   - **T4 iPhone 강제 종료**: 호스트 peer count 3→2 정상, 그러나 **A7 Lite 게스트는 3 그대로**. v0.0.32에서 fix됐던 영역의 회귀 가능성.
+   - 미해결 이슈로 기록 (mid priority, 재현 + 추적 필요).
+
+6. **의존성 회귀** ✅
+   - `file_picker 11`: 4번 항목 파일 변경 동작에서 implicit pass.
+   - `riverpod 3`: 코드 변경 0이라 묵시적 통과.
+   - `wakelock_plus`: 자동화 (79)에서 이미 검증.
+   - `audio_session 0.2` BT 라우팅: 이번 회귀에서 skip.
+
+**누적 결과**:
+
+| 항목 | 결과 |
+|---|---|
+| 빌드/설치 | ✅ (iPhone install hung 변종은 신뢰 다이얼로그 후 회피) |
+| 3대 동시 P2P 연결 | ✅ |
+| 첫 재생 청감 + drift | ✅ |
+| **파일 변경 시 동기** | ⚠️ 신규 회귀 (호스트 ts 실패 + 게스트 단독 재생) |
+| 라이프사이클 T1~T3 | ✅ (iPhone 포함 첫 검증) |
+| **T4 게스트 강제 종료 peer count** | ⚠️ 신규 회귀 (호스트만 갱신, 다른 게스트 누락) |
+| 의존성 회귀 | ✅ (BT skip) |
+
+**version bump 안 함**: 측정·문서 only, 코드 변경 0.
+
+**다음 단계 후보**:
+- 신규 회귀 2건 fix
+  - (A) 파일 변경 hostPlaying broadcast 게이팅 — `native_audio_sync_service.dart` 또는 audio-url broadcast 측에서 호스트 첫 ts ok 확인 후 hostPlaying=true 보내기
+  - (B) T4 peer count 갱신 누락 진단 — logcat streaming + RoomScreen vs PlayerScreen 카운트 출처 추적
+- HIGH-1 같은 모델 갤럭시 2대 다중 게스트 검증 (디바이스 확보 시)
+- `Anchor reset 후 fallback 큰 drift` NTP 정공법 재도입
+
+### 2026-05-04 (83) — v0.0.69 파일 변경 시 게스트 단독 재생 fix
+
+**배경**: HISTORY (81) 회귀 — 호스트가 새 파일 선택 시 호스트 native 엔진 `getTimestamp` 28회 실패(~2.8초 무음) 동안 게스트만 단독 재생 시작.
+
+**fix 진행** (단일 commit, 3단계):
+
+**Fix A** — `native_audio_sync_service.dart:392~400`. `loadFile` 끝 시점의 `audio-url` broadcast에서 `playing: _playing` → `playing: false` 강제. 새 파일 로드 직후 시점은 호스트가 명시적 `syncPlay` 누르기 전이라 false가 정확. 호스트 syncPlay 후 obs broadcast로 `playing=true` 게스트에 도달.
+
+**Fix B** — `native_audio_sync_service.dart:893~907`. `_handleAudioObs`에서 `obs.playing && obs.framePos > 0` sanity gate. 호스트 ts 간헐 실패(`framePos=-1`) 중인 stub obs 신뢰 안 함. 다음 정상 obs(<=500ms 후) 도달 시 시작.
+
+**Fix C** (게스트 측 obs 판정 강화) — `native_audio_sync_service.dart:840~855`. `loadFile` 끝 시점 `currentHostPlaying` 판정에 `_latestObs?.framePos > 0` 게이트. stub obs면 `urlHostPlaying`(audio-url의 false) 사용.
+
+**Fix D** (1차 검증 후 root cause 추가 발견) — `native_audio_sync_service.dart:704~707`. `_handleAudioUrl` 수신 시 `_latestObs = null` 명시적 reset. 1차 검증에서 게스트가 이전 파일 obs(framePos>0, playing=true)를 새 파일 loadFile 끝 시점에 그대로 신뢰해 단독 시작 발견.
+
+**검증 (실기기 S22 호스트 + A7 Lite 게스트)**:
+- Build 1차: A+B+C 적용. 두 번째 파일 변경 시 logcat `[GUEST] loadFile done, urlHostPlaying=false, hasValidObs=true, currentHostPlaying=true` → 게스트 단독 시작. **Fix B sanity gate 통과** (이전 파일 obs framePos>0이라).
+- Build 2차: D 추가. 두 번째 파일 변경 시 게스트 단독 재생 회귀 사라짐 ✓. 호스트 명시적 syncPlay 후 정상 동기 시작.
+
+**version bump**: 0.0.68+1 → 0.0.69+1.
+
+**부가 환경 변동성 — fix 검증 중 발견** (코드 무관, 별도 항목):
+
+1. **AP 단말간 격리 재발** — A7 Lite ↔ S22 ping 100% loss. `am force-stop com.synchorus.synchorus` 후 ping도 동일 → **앱과 무관한 OS/AP 레벨 이슈** 확정. WiFi 토글로 회피. iPhone은 정상 — A7 Lite의 random MAC + 11n idle drop 추정. 자동 회귀 환경 안정화 위해 S22 모바일 핫스팟 표준화 검토 가치 있음 (별도 트랙).
+2. **HTTP 404 stale state — 게스트 재접속 시 다운로드 실패** (신규 미해결 이슈). A7 Lite WiFi 토글 후 재입장 시 호스트 41236 GET → 404. `nc`로 직접 GET 시도해도 404 응답 정상 도달. 호스트 `_currentUrl`은 살아있는데 disk에 파일 사라진 stale 케이스. 호스트가 mp3 다시 선택하면 즉시 정상화. **fix 방향**: `_handleAudioRequest`(`native_audio_sync_service.dart:539`)에서 disk 파일 존재 확인 + 없으면 응답 보류 또는 재로드.
+3. **iOS install hung 변종** — `flutter run` 시 `Installing and launching...` 단계에서 8분+ hung (이전 사례 1~3분). MID-14 변종, 원인 동일.
+
+**다음 단계 후보**:
+- HISTORY (81) 1-B 회귀 fix (T4 peer count 게스트 갱신 누락) — 별도 commit
+- 2번 신규 미해결 이슈 fix (HTTP 404 stale state)
+- 자동화 인프라 안정화 — S22 핫스팟 모드 도입 검토
+
 ---
 
 #### 미해결 이슈
@@ -4263,6 +4355,8 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - [ ] **호스트 `oboe::getTimestamp` 간헐적 실패 — 체감 싱크 깨짐 원인** (2026-04-24 (30) 신규). S22 3분 재생 중 재생 시작 직후 26회, 정지 직전 15회 연속 실패 관측. 100ms 폴링 기준 **1.5~2.6초 동안 호스트가 재생 위치를 못 읽음** → 게스트는 외삽 계속이라 drift-report는 안정(0~3ms)해 보이나 실제 재생은 최대 1.5초치 어긋남. 원인 가설: stream xrun / HAL 일시 실패 / 라이프사이클 전환 부근 상관. `oboe_engine.cpp:278` 근처에서 실패 시 `AAudio_convertResultToText(result)` 로그 추가 → 원인 분류 필요. 완화 방향: 실패 중에도 최근 성공한 framePos + 경과 시간으로 보간해 obs 계속 전송.
 - [ ] **Logger csv 경로 접근성** (2026-04-24 (30) 신규, low priority). Android에서 `getApplicationDocumentsDirectory()`가 `/data/user/95/`처럼 multi-user 공간에 떨어지면 `run-as` 접근 불가. 실측 분석이 logcat buffer에 의존하게 됨. Android 한정 `/sdcard/Android/data/.../files/`로 저장 옵션 추가 검토.
 - [ ] **Anchor reset 후 fallback 단계 큰 drift** (2026-04-26 (42) 신규, **보류 — 작업목록 제외 2026-05-03**). 호스트 정지/재생/seek 시마다 게스트 측 anchor 폐기 → 5초 fallback 단계에서 외삽 부정확 → drift 최대 -634ms (0.6초 어긋남) 발견. Android 게스트 한정 stream open latency가 외삽에서 누락된 것이 직접 원인. v0.0.43 baseline에도 있던 이슈로 prewarm 회귀와 무관. **NTP 정공법 2회 시도 모두 실패** — v0.0.46~v0.0.48 (HISTORY (43)) drift 63초 회귀 → 롤백, v0.0.49~v0.0.61 (HISTORY (44)) 13번 fix 사이클 → 사용자 청감 v0.0.48이 더 나음 → main reset. **§D-2 fix(v0.0.63)로 자연 해소 정황** — v0.0.67 12분 자동화에서 anchor_reset 0회, vfDiff RMS 21ms. 본격 재도입 트리거는 §C rate drift 결정(PCM streaming 구조 변경 후 30분+ 측정)에 묶임. backup branch 보존: `backup-v0.0.61-session`, `backup-v0.0.51-to-v0.0.55-session`.
+- [x] ~~**파일 변경 시 호스트 무음 + 게스트만 단독 재생**~~ — **v0.0.69 (83)에서 4단계 fix 완료** (audio-url playing=false 강제 + framePos>0 sanity gate + audio-url 수신 시 _latestObs reset). 실기기 S22+A7 Lite로 두 번째 파일 변경 시 게스트 단독 재생 회귀 사라짐 확인.
+- [ ] **HTTP 404 stale state — 게스트 재접속 시 다운로드 실패** (2026-05-04 (83) 신규, mid priority). 게스트가 WiFi 토글 후 재입장 시 호스트 41236 GET → 404. nc로 직접 GET 시도해도 404 정상 응답. 호스트 `_currentUrl`은 살아있으나 disk stableFile은 사라진 stale 케이스. 호스트가 mp3 다시 선택하면 즉시 정상화. **fix 방향**: `_handleAudioRequest`(`native_audio_sync_service.dart:539`)에서 disk 파일 존재 확인 후 응답.
 - [ ] **iOS 26.4.1 + macOS 26.3 환경 빌드 install hung** (2026-04-26 (43) 신규, mid priority). `flutter run --device-id <iPhone>` USB로 실행 시 "Installing and launching..." 단계에서 1~3분 hung. iPhone 잠금/신뢰 다이얼로그 OK인데도 발생. iOS 26 + Xcode toolchain 호환 이슈 추정. 다음 세션엔 **IntelliJ Run** 또는 **Xcode IDE에서 직접 Run** 권장 (CLI flutter run 대신).
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
 - [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52)에서 A+B 동시 fix 완료** (`device_info_plus`로 디바이스명 발급 + stale 비교를 name AND ip로 강화). 실측 검증은 갤럭시 3대 또는 같은 모델 2대 환경 필요 (현재 보유 디바이스는 모델 다 달라서 A안만으로도 통과해버림 → 진짜 검증은 같은 모델 2대 이상으로).
@@ -4276,6 +4370,7 @@ wakelock_plus는 화면 wake lock 제공 (screen on, CPU keep alive). 그러나 
 - [x] ~~**v0.0.27 errno=111 빠른 포기 실측 검증**~~ — 2026-04-24 (23)에서 S22+iPhone 조합으로 T4b 실측. **Darwin errno=61 미체크 버그** 발견 → v0.0.30에서 수정 → 재검증 ~10초 fast giveup PASS. W(게스트 WiFi off/on)는 일반 재연결 성공, errno=65/51 분기 재현은 추가 조건 필요 (WiFi 30초+ off 또는 AP 이동)
 - [ ] W 시나리오의 errno=65/51(Darwin EHOSTUNREACH/ENETUNREACH) 분기 실행 캡처 — 2026-04-24 (23)에서 WiFi off 시간이 짧아 Socket.onDone 도달 전 WiFi 복구됨. 30초+ off 또는 호스트와 다른 AP 이동 시나리오 필요
 - [x] ~~Peer count 불일치~~ — 2026-04-24 (25) stale peer 정리 + peerCount broadcast 포함으로 수정(v0.0.32). **2026-04-24 (27) S22+iPhone 실측 PASS** — 비행기 모드 on/off 반복 중 양쪽 2명 유지 확인
+- [ ] **Peer count 불일치 회귀 — 게스트 강제 종료 시 다른 게스트 갱신 실패** (2026-05-04 (81) 신규, mid priority). T4 회귀 테스트 (S22 호스트 + A7 Lite + iPhone 게스트 3명) 중 iPhone 앱 강제 종료(스와이프) 시 호스트 peer count는 3→2 정상 갱신, 그러나 **A7 Lite 게스트는 3 그대로**. 코드(`p2p_service.dart:282~285`, `room_screen.dart:135~138`)는 정상으로 보이며 v0.0.32에서 fix된 영역. 회귀 가능 원인: (a) iPhone 강제 종료 시 TCP RST 지연 → 호스트 `socket.done` vs heartbeat dead 판정 경로 차이로 broadcast 타이밍 어긋남, (b) PlayerScreen이 RoomScreen과 별도 카운트 표시 (UI에서 다른 카운트 보고 가능성), (c) A7 Lite 측 message dispatcher가 특정 조건에서 'peer-left' 메시지 누락. **재현 필요**: logcat streaming + RoomScreen vs PlayerScreen 카운트 출처 추적.
 - [x] ~~게스트 재연결 race(무한 loop)~~ — 2026-04-24 (27) p2p_service.dart onDone에 `identical(_hostSocket, socket)` 가드 추가(v0.0.34). 짧은 off(5~8초)에서 두 재연결 경로(`_handleDisconnected` + `_waitForWifiAndReconnect`)가 동시 성공 시 old socket의 onDone이 새 socket까지 destroy하면서 발생하던 무한 loop 차단
 - [x] ~~게스트 재연결 경로 중복(재동기화 2회, 1회 실패 보고)~~ — 2026-04-24 (28) `_reconnectInProgress` flag로 두 경로 직렬화(v0.0.35). race 자체 제거 → Reconnect 7→3, 재동기화 실패 0. v0.0.34 onDone 가드는 안전망으로 유지
 

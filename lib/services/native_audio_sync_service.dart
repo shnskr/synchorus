@@ -389,12 +389,17 @@ class NativeAudioSyncService {
     _isLoading = false;
     _loadingController.add(false);
 
-    // 게스트에게 URL 전달
+    // 게스트에게 URL 전달.
+    // playing=false 강제 (v0.0.69): 새 파일 로드 직후 시점은 호스트 native 엔진이
+    // 새 파일로 reset된 직후라 첫 getTimestamp 회복까지 ~수 초 무음 구간이 있음.
+    // 이 동안 audio-url의 hostPlaying=_playing(이전 파일 재생 중이면 true)을 게스트가
+    // 그대로 신뢰하면 호스트 무음 + 게스트만 단독 재생 발생(HISTORY (81)).
+    // 호스트 syncPlay 누르면 obs broadcast로 playing=true가 게스트에 도달 → 시작.
     _p2p.broadcastToAll({
       'type': 'audio-url',
       'data': {
         'url': urlWithCacheBust,
-        'playing': _playing,
+        'playing': false,
         'fileName': originalName,
       },
     });
@@ -696,6 +701,10 @@ class NativeAudioSyncService {
       await _engine.stop();
     }
     _resetDriftState();
+    // 이전 파일 obs는 새 파일에 무효 — stale 사용으로 게스트 단독 재생 회귀 방지
+    // (HISTORY (81) 후속, v0.0.69 fix-2). loadFile 끝 시점 currentHostPlaying 판정과
+    // _handleAudioObs sanity gate 둘 다 _latestObs를 신뢰하므로 여기서 명시적 reset.
+    _latestObs = null;
 
     _isLoading = true;
     _loadingController.add(true);
@@ -832,14 +841,19 @@ class NativeAudioSyncService {
         await _resolveDurationFromTimestampIfNeeded();
       }
 
-      // 호스트가 재생 중이면 엔진 시작
-      // hostPlaying은 audio-url broadcast 시점 호스트 상태로 stale 가능성 있음.
-      // 다운로드 + loadFile 동안 (수 초) 호스트가 syncPause 눌렀으면 _latestObs.playing
-      // 이 false → 게스트만 재생 시작 방지. (v0.0.46 fix — 사용자 보고 케이스)
-      final currentHostPlaying = _latestObs?.playing ?? hostPlaying;
+      // 호스트가 재생 중이면 엔진 시작.
+      // _latestObs는 호스트 ts 간헐 실패 시 framePos=-1 stub 값일 수 있음
+      // (HISTORY (81) — 새 파일 로드 직후 28회 ts 실패 관찰).
+      // framePos>0 sanity gate로 stub obs는 신뢰하지 않고 hostPlaying fallback.
+      // hostPlaying은 v0.0.69부터 audio-url broadcast 시 false 강제 → 새 파일
+      // 케이스에선 시작 보류, 호스트 syncPlay 후 정상 obs(framePos>0) 도달 시 시작.
+      final hasValidObs = (_latestObs?.framePos ?? -1) > 0;
+      final currentHostPlaying =
+          hasValidObs ? _latestObs!.playing : hostPlaying;
       debugPrint(
           '[GUEST] loadFile done, urlHostPlaying=$hostPlaying, '
-          'currentHostPlaying=$currentHostPlaying, audioReady=$_audioReady');
+          'hasValidObs=$hasValidObs, currentHostPlaying=$currentHostPlaying, '
+          'audioReady=$_audioReady');
       if (currentHostPlaying) {
         await _startGuestPlayback();
       }
@@ -891,12 +905,15 @@ class NativeAudioSyncService {
 
       // v0.0.48 롤백: schedule-play 호스트 broadcast 안 함 → audio-obs 기반으로만
       // 게스트 재생 시작/정지. v0.0.45 동작.
-      if (obs.playing) {
+      // v0.0.69: framePos>0 sanity gate. 호스트 ts 간헐 실패(framePos=-1) 중인
+      // stub obs를 신뢰하면 호스트 무음인데 게스트만 단독 재생 발생(HISTORY (81)).
+      // framePos<=0 obs는 startPlayback 보류, 다음 정상 obs(<=500ms 후) 도달 시 시작.
+      if (obs.playing && obs.framePos > 0) {
         if (!_playing && _audioReady) {
           debugPrint('[GUEST] obs→startPlayback');
           unawaited(_startGuestPlayback());
         }
-      } else {
+      } else if (!obs.playing) {
         if (_playing) {
           unawaited(_stopGuestPlayback());
         }
