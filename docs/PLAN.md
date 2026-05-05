@@ -130,6 +130,7 @@
 8. **BT 워밍업 잔여 개선 (HISTORY (33-2), (37))**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴. Galaxy+버즈는 ~2초로 양호 (Samsung HAL 정확 보고 추정). iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) 시도.
 
 9. **호스트 `oboe::getTimestamp` 간헐 실패 — 자연 재발 대기** (HISTORY (30) → v0.0.36 → v0.0.37). 재발 시 logcat `OboeEngine:W` 태그 `streak start/end` 짝짓기 → state/xrun/wallMs로 분류.
+   - **외삽 모델 검토 (가설)**: `_recomputeDrift`(`native_audio_sync_service.dart:1376-1379`)가 wall clock 외삽 — `(hostWallNow - obs.hostTimeMs) * hostFpMs` — 을 쓰므로 obs가 stale이어도 외삽이 정확한 한 streak **그 자체로는 큰 위치 점프를 안 만듦**. (30) 체감 어긋남이 진짜였다면 root cause는 (a) **호스트 오디오 자체가 streak 동안 멈춤**(stream `ACTIVE` 이탈 / xrun → 외삽은 "갔을 거"로 추정하지만 실제 출력 못 감) 또는 (b) **재생 시작 직후 streak이 첫 anchor establish 시점을 늦추거나 잘못된 baseline에 박음** 분기. (31) state + xrunDelta 진단이 이 (a)/(b) 분기 가리는 용도 — 재발 시 해당 컬럼 우선 확인.
 
 10. **iOS host 환경 검증** — Mac 환경 필요.
 
