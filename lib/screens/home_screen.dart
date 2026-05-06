@@ -1,10 +1,12 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
@@ -41,9 +43,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     }
   }
 
-  /// 게스트 join 시 사용할 디바이스 이름.
+  /// 게스트 join 시 사용할 디바이스 표시명 (UI 전용).
   /// Android: model (예 "SM-S908N"), iOS: 사용자 설정명 (예 "홍길동의 iPhone").
-  /// 끝에 4자리 hex 접미사를 붙여 같은 모델 2대 이상 충돌까지 방지.
+  /// stale 매칭은 [_resolveDeviceId]의 UUID로 하므로 표시명 충돌은 무관. (v0.0.73)
   Future<String> _resolveDeviceName() async {
     String base = 'Guest';
     try {
@@ -58,10 +60,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
     } catch (_) {}
     if (base.isEmpty) base = 'Guest';
     if (base.length > 24) base = base.substring(0, 24);
-    final suffix = (DateTime.now().microsecondsSinceEpoch & 0xFFFF)
-        .toRadixString(16)
-        .padLeft(4, '0');
-    return '$base#$suffix';
+    return base;
+  }
+
+  /// 게스트의 영구 디바이스 식별자 (32자 hex, UUID v4 비호환 버전).
+  /// 첫 실행 시 [Random.secure]로 16바이트 발급 후 SharedPreferences 영속.
+  /// 같은 모델 디바이스 충돌 0 (1/2^128). 앱 재설치 시 갱신. (v0.0.73)
+  Future<String> _resolveDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? id = prefs.getString('device_uuid');
+    if (id != null && id.length == 32) return id;
+    final rng = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rng.nextInt(256));
+    id = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await prefs.setString('device_uuid', id);
+    return id;
   }
 
   @override
@@ -159,10 +172,11 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
       // 1:N 멀티 게스트 환경에서 모두 같은 이름으로 join하면 호스트 측 stale
       // peer 정리(p2p_service.dart `_handleNewPeer`)가 다른 디바이스를 stale로
-      // 오인해 무한 ping-pong을 일으킨다. 디바이스 모델명 + 4자리 hex 접미사로
-      // 같은 모델 충돌까지 방지. (v0.0.54, HISTORY (51))
+      // 오인해 무한 ping-pong을 일으킨다 (HISTORY (51)). v0.0.73부터는 영속
+      // deviceId(UUID)로 stale 매칭하므로 같은 모델 충돌 0. name은 UI 표시 전용.
       final guestName = await _resolveDeviceName();
-      await p2p.connectToHost(host.ip, host.port, guestName);
+      final deviceId = await _resolveDeviceId();
+      await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId);
 
       int peerCount = 1;
       try {
@@ -393,7 +407,9 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
           .firstWhere((m) => m['type'] == 'welcome')
           .timeout(const Duration(seconds: 5));
 
-      await p2p.connectToHost(ip, P2PService.defaultPort, 'Guest');
+      final guestName = await _resolveDeviceName();
+      final deviceId = await _resolveDeviceId();
+      await p2p.connectToHost(ip, P2PService.defaultPort, guestName, deviceId: deviceId);
 
       String roomCode = '----';
       int peerCount = 1;

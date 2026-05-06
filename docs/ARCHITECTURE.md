@@ -516,17 +516,16 @@ coordinator가 소유하는 주요 state:
 - `_awayReconnecting` (bool) — away loop tick 재진입 가드
 - `_leaving` / `_disposed` — 종단 상태 플래그
 
-#### 9-3. Peer count 관리 + 1:N 멀티 게스트 (v0.0.32, v0.0.54)
+#### 9-3. Peer count 관리 + 1:N 멀티 게스트 (v0.0.32, v0.0.54, v0.0.73)
 
 `Peer.id`가 socket 주소(`ip:port`) 기반이라 게스트 재접속 시 **다른 ID로 새 peer 추가**됨. 누적 방지 이중 방어:
 1. 호스트 `_handleNewPeer`에서 stale peer를 `destroy + remove + peer-left broadcast` 후 새 peer 등록
 2. 모든 `peer-joined`/`peer-left` broadcast에 `peerCount` 절대값 포함 → 게스트는 증감이 아닌 **절대값 우선 반영** (메시지 누락 시 drift 누적 방지)
 
-**v0.0.32에서 v0.0.54 보강** — 같은 이름 게스트가 여럿 있을 수 있는 1:N 환경 fix:
+**stale 매칭 진화**:
 - v0.0.32 `_handleNewPeer`는 같은 `name`이면 무조건 stale로 정리 → `home_screen.dart`가 모든 게스트를 `'Guest'` 하드코딩으로 join하던 상황과 결합 → 두 번째 게스트 입장이 첫 번째를 stale로 오인 → 무한 ping-pong → 호스트+1명만 유지 (게스트 3명 입장 불가 버그)
-- v0.0.54 A안: 게스트 닉네임을 `<device model>#<hex 4자리>`로 발급 (`device_info_plus ^12.4.0`, Android model / iOS name + 충돌 방지 hex)
-- v0.0.54 B안: stale 비교를 `name == peerName && remoteAddress == ip` 동시 매칭으로 강화 — LAN P2P는 NAT 없어 ip가 디바이스 유일 식별자. 사용자가 닉네임을 강제로 같게 만들어도 ip로 분리됨
-- A+B 동시 적용 → 이중 안전 (사용자 닉네임 강제 동일 케이스도 보장)
+- v0.0.54 A안: 게스트 닉네임을 `<device model>#<microsecond hex 4>`로 발급(`device_info_plus`). B안: stale 비교를 `name == peerName && remoteAddress == ip` 동시 매칭으로 강화. **잔존 코너**: 같은 모델 디바이스 2대가 같은 microsecond에 join 시 hex suffix 충돌(1/65536).
+- **v0.0.73 deviceId 영속화로 단순화**: `Random.secure()` 16바이트 hex(2^128 entropy)를 SharedPreferences `device_uuid`에 첫 실행 시 1회 발급·영구 사용. join 메시지에 `data.deviceId` 동봉 → 호스트 stale 매칭은 **`p.deviceId == peerDeviceId` 단독 비교**로 단순화 (name/IP 비교 폐기). 같은 모델 충돌 0, 같은 디바이스의 앱 재시작·비행기 모드 후 재접속도 정확 식별. `name`은 UI 표시 전용으로 분리(`<device model>` 또는 iOS 사용자 설정명, 충돌 무관). 자동 측정 게스트(`auto_measure_screen.dart`)도 같은 SharedPreferences 키 공유 → 일반/측정 모드 전환 시 ID 일관성 유지.
 
 **p2p 로직 작성 시 1:1 가정 금지** (CLAUDE.md "협업 원칙" 명시). 같은 이름 peer 다수 가능 전제로 설계.
 

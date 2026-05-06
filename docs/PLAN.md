@@ -101,7 +101,7 @@
 
 ### HIGH
 
-1. **v0.0.54 다중 게스트 fix 실측 검증** — 같은 모델 갤럭시 2대 이상 환경에서 peer count 3 유지 + 비행기 모드 on/off 후에도 유지 확인. 현재 보유 디바이스(S22 + iPhone 12 Pro + Tab A7 Lite)는 모델 다 달라 A안만으로도 통과 → 진짜 검증은 같은 모델 2대 이상 필요. 상세: HISTORY (52).
+1. ~~**v0.0.73 다중 게스트 fix 실측 검증**~~ — **2026-05-06 (89) PASS**. 3대(S22 호스트 + Tab A7 Lite + iPhone 12 Pro) 환경에서 (1) 기본 입장 peer count 3 유지, (2) A7 비행기 모드 on/off 후 재접속 3 유지, (3) iPhone 비행기 모드 on/off 후 재접속 3 유지, (4) A7 앱 강제 종료 → 즉시 2 → 재실행 후 3으로 복귀 모두 통과. v0.0.51 핑퐁 회귀 없음, 영속 deviceId 정상 작동. 같은 모델 2대 환경 검증 부담은 v0.0.73 fix(코드상 충돌 0)로 자체 해소.
 
 1-A. ~~**(81) 신규 회귀 fix — 파일 변경 시 호스트 무음 + 게스트 단독 재생**~~ — **v0.0.69 (82) 완료**. audio-url playing=false + framePos>0 sanity gate + _latestObs reset. 실기기 검증 통과.
 

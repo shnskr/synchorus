@@ -157,6 +157,7 @@ class P2PService {
 
   int? _lastHostPort;
   String? _lastMyName;
+  String? _lastMyDeviceId;
 
   /// 마지막 reconnect 시도에서 잡힌 SocketException의 errno (없으면 null).
   /// 호출부가 errno=111(refused) 같은 값으로 빠른 포기 판정에 사용.
@@ -164,14 +165,27 @@ class P2PService {
   int? get lastReconnectErrno => _lastReconnectErrno;
 
   /// 참가자: 호스트에 TCP 연결
-  Future<void> connectToHost(String ip, int port, String myName) async {
+  ///
+  /// [deviceId]는 SharedPreferences에 영속된 UUID v4 hex (`home_screen.dart`의
+  /// `_resolveDeviceId()`). 호스트의 stale peer 정리(_handleNewPeer)가 이 값으로
+  /// 같은 디바이스의 재접속을 식별하므로 같은 모델 충돌이 0이 됨. (v0.0.73)
+  Future<void> connectToHost(
+    String ip,
+    int port,
+    String myName, {
+    required String deviceId,
+  }) async {
     _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
     _connectedHostIp = ip;
     _lastHostPort = port;
     _lastMyName = myName;
+    _lastMyDeviceId = deviceId;
 
     // 입장 메시지 전송
-    _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': myName}});
+    _sendTo(_hostSocket!, {
+      'type': 'join',
+      'data': {'name': myName, 'deviceId': deviceId},
+    });
 
     // 호스트로부터 메시지 수신
     _listenToSocket(_hostSocket!, 'host');
@@ -182,7 +196,8 @@ class P2PService {
     final ip = _connectedHostIp;
     final port = _lastHostPort;
     final name = _lastMyName;
-    if (ip == null || port == null || name == null) return false;
+    final deviceId = _lastMyDeviceId;
+    if (ip == null || port == null || name == null || deviceId == null) return false;
 
     _hostSocket?.destroy();
     _hostSocket = null;
@@ -193,7 +208,10 @@ class P2PService {
         debugPrint('Reconnect attempt ${i + 1}/$retries to $ip:$port');
         await Future.delayed(Duration(seconds: i + 1)); // 1, 2, 3초 대기
         _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
-        _sendTo(_hostSocket!, {'type': 'join', 'data': {'name': name}});
+        _sendTo(_hostSocket!, {
+          'type': 'join',
+          'data': {'name': name, 'deviceId': deviceId},
+        });
         _listenToSocket(_hostSocket!, 'host');
         debugPrint('Reconnected successfully');
         _lastReconnectErrno = null;
@@ -216,6 +234,7 @@ class P2PService {
   void _handleNewPeer(Socket socket) {
     final peerId = '${socket.remoteAddress.address}:${socket.remotePort}';
     String peerName = 'Unknown';
+    String peerDeviceId = '';
 
     _listenToSocket(socket, peerId, onFirstMessage: (message) {
       if (message['type'] != 'join') {
@@ -225,25 +244,24 @@ class P2PService {
       }
 
       peerName = message['data']['name'] ?? 'Unknown';
+      peerDeviceId = message['data']['deviceId'] ?? '';
 
       // 재접속 케이스: peer.id는 "ip:port"라 게스트가 새 socket으로 오면 다른 ID로
-      // 보인다. 같은 이름의 stale peer들이 heartbeat timeout(15초) 전까지 남아 카운트
-      // 누적을 일으키는 문제 방지. 단 v0.0.32에서 이름만 비교했더니 1:N 환경에서
-      // 다른 디바이스(같은 'Guest' 이름)를 stale로 오인해 무한 ping-pong → 호스트+1명만
-      // 유지되는 회귀 발생(HISTORY (51)). LAN P2P는 NAT가 없어 IP가 디바이스를 유일하게
-      // 식별하므로 name + remoteAddress 둘 다 일치할 때만 진짜 같은 디바이스의 재접속으로
-      // 간주. (v0.0.54)
-      final newRemoteIp = socket.remoteAddress.address;
-      final stalePeers = _peers.where((p) {
-        if (p.name != peerName) return false;
-        try {
-          return p.socket.remoteAddress.address == newRemoteIp;
-        } catch (_) {
-          return false;
-        }
-      }).toList();
+      // 보인다. 같은 디바이스의 stale peer들이 heartbeat timeout(15초) 전까지 남아
+      // 카운트 누적을 일으키는 문제 방지.
+      //
+      // v0.0.32: name만 비교 → 1:N 환경에서 다른 디바이스(같은 'Guest' 이름)를 stale로
+      //          오인해 무한 ping-pong (HISTORY (51)).
+      // v0.0.54: name + remoteAddress 비교로 보강. 단 같은 모델 디바이스 2대가 같은
+      //          microsecond에 join하면 hex suffix가 충돌하는 1/65536 코너 잔존.
+      // v0.0.73: deviceId(SharedPreferences 영속 UUID v4) 단독 비교로 교체. deviceId가
+      //          비어 있으면(누락 메시지) stale 정리 자체를 건너뜀 — 기존 peer를 잘못
+      //          destroy하는 것보다 일시적 중복이 안전.
+      final stalePeers = peerDeviceId.isEmpty
+          ? <Peer>[]
+          : _peers.where((p) => p.deviceId == peerDeviceId).toList();
       for (final stale in stalePeers) {
-        debugPrint('[P2P] stale peer 정리 (name=$peerName, ip=$newRemoteIp): ${stale.id}');
+        debugPrint('[P2P] stale peer 정리 (deviceId=$peerDeviceId, name=$peerName): ${stale.id}');
         try { stale.socket.destroy(); } catch (_) {}
         _peers.remove(stale);
         _peerLeaveController.add(stale.id);
@@ -253,7 +271,7 @@ class P2PService {
         });
       }
 
-      final peer = Peer(id: peerId, name: peerName, socket: socket);
+      final peer = Peer(id: peerId, name: peerName, deviceId: peerDeviceId, socket: socket);
       _peers.add(peer);
       _peerJoinController.add(peer);
 

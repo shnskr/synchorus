@@ -7,11 +7,13 @@
 
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 
 import '../providers/app_providers.dart';
@@ -107,6 +109,20 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
     _exitTimer = Timer(Duration(seconds: seconds), () {
       SystemNavigator.pop();
     });
+  }
+
+  /// 자동 측정용 영구 deviceId. 일반 모드의 [HomeScreen._resolveDeviceId]와 같은
+  /// SharedPreferences 키('device_uuid')를 공유 — 같은 디바이스가 일반/측정 모드를
+  /// 오갈 때도 같은 ID를 유지. (v0.0.73)
+  Future<String> _resolveAutoMeasureDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? id = prefs.getString('device_uuid');
+    if (id != null && id.length == 32) return id;
+    final rng = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rng.nextInt(256));
+    id = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await prefs.setString('device_uuid', id);
+    return id;
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -218,15 +234,15 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
       _setStatus('WiFi 깨우기 (500ms)...');
       await Future.delayed(const Duration(milliseconds: 500));
 
-      final guestName =
-          'AutoMeasureGuest#${DateTime.now().microsecondsSinceEpoch & 0xFFFF}';
+      final guestName = 'AutoMeasureGuest';
+      final deviceId = await _resolveAutoMeasureDeviceId();
       Object? lastError;
       for (int attempt = 1; attempt <= 3; attempt++) {
         try {
           final welcomeFuture = p2p.onMessage
               .firstWhere((m) => m['type'] == 'welcome')
               .timeout(const Duration(seconds: 10));
-          await p2p.connectToHost(host.ip, host.port, guestName);
+          await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId);
           try {
             await welcomeFuture;
           } catch (_) {}

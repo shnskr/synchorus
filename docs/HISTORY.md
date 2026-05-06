@@ -4487,6 +4487,64 @@ v0.0.71까지의 자동화 측정에서 보였던 wide variance가 v0.0.72에서
 - HIGH-1 같은 모델 갤럭시 2대 검증 (디바이스 확보 시)
 - NTP 정공법 재도입 (DECISIONS 원칙 따라 SYNC_ALGORITHM_V2 합의 후 단일 commit, 별도 세션)
 
+### 2026-05-06 (88) — v0.0.73 게스트 식별을 영속 deviceId(UUID)로 교체 — 같은 모델 충돌 0
+
+**배경**: v0.0.54 (52) fix는 디바이스 모델명 + `microsecondsSinceEpoch & 0xFFFF` hex suffix로 게스트 이름을 발급하고, 호스트가 `name + remoteAddress` 둘 다 일치할 때 stale로 정리하는 구조였음. 같은 모델 디바이스 2대가 같은 microsecond에 join하면 hex suffix가 충돌 가능한 1/65536 코너가 잔존 → PLAN HIGH-1이 "같은 모델 2대 이상 환경 실측"을 요구하는 부담으로 남아 있었음. 현재 보유 디바이스(S22 + iPhone 12 Pro + Tab A7 Lite)는 모델이 모두 달라 이 코너 검증이 사실상 불가.
+
+**접근 (사용자 제안)**: model+timestamp 조합 대신 **앱 첫 실행 시 발급한 UUID를 영속화**하면 충돌 확률 0(1/2^128)이 되어 같은 모델 검증 자체가 불필요해짐. 같은 디바이스의 재접속(앱 재시작 / 비행기 모드 / 백그라운드 후 복귀)도 이름·IP가 아닌 영속 ID로 정확히 식별 가능.
+
+**변경**:
+1. `pubspec.yaml`
+   - `shared_preferences: ^2.5.2` 추가 (영속 저장).
+   - `version: 0.0.72+1 → 0.0.73+1`.
+2. `lib/models/peer.dart` — `Peer`에 `deviceId` 필수 필드 추가.
+3. `lib/services/p2p_service.dart`
+   - `connectToHost(ip, port, name, {required String deviceId})` — signature 확장. join 메시지 payload `{'name', 'deviceId'}`.
+   - `_lastMyDeviceId` 추가, `reconnectToHost`도 같은 ID 재사용.
+   - `_handleNewPeer`에서 `peerDeviceId = data['deviceId']` 수신, stale 매칭을 `name + remoteAddress` → `deviceId` 단독 비교로 교체. `deviceId`가 비어 있으면(메시지 누락) stale 정리 자체를 건너뜀 — 잘못 destroy하는 것보다 일시 중복이 안전.
+4. `lib/screens/home_screen.dart`
+   - `_resolveDeviceName()`에서 hex suffix 제거 → 표시명만 (`SM-S908N`, `홍길동의 iPhone`). UI 표시 전용.
+   - `_resolveDeviceId()` 추가: SharedPreferences 키 `device_uuid`에 `Random.secure()` 16바이트 hex(32자)를 첫 실행 시 1회 생성·저장 후 영구 재사용. `uuid` 패키지 의존성 안 씀(의존성 줄이기).
+   - 두 join 경로(`_joinRoom` 자동 발견, `_joinByIp` IP 직접 입력) 모두 deviceId 전달.
+5. `lib/measurement/auto_measure_screen.dart` — 자동 측정 게스트도 같은 SharedPreferences 키 공유(`_resolveAutoMeasureDeviceId`). 같은 디바이스가 일반/측정 모드를 오갈 때도 같은 ID 유지. 표시명은 `'AutoMeasureGuest'` 고정(timestamp 제거).
+
+**왜 SharedPreferences 키 공유인가**: 같은 디바이스에서 일반 모드 → 자동 측정 모드 전환 시 다른 deviceId가 발급되면 호스트는 다른 디바이스로 인식해 stale 정리 안 함. 같은 키를 공유해 ID 일관성 보장.
+
+**왜 `uuid` 패키지 안 씀**: `Random.secure()` + 16바이트 hex로 같은 entropy(2^128) 확보. 패키지 1개 줄임.
+
+**검증 효과**:
+- 같은 모델 2대 환경 검증 불필요 (코드상 충돌 0).
+- 갤럭시 3대(모델 무관) + 비행기 모드 on/off 검증으로 충분.
+- v0.0.54의 1/65536 코너 영구 제거.
+
+**호환성**: 메시지 포맷이 바뀌어 v0.0.72 이하 빌드와 v0.0.73 빌드를 섞으면 deviceId 누락 → 새 빌드 측이 stale 정리를 건너뜀(중복 peer가 일시적으로 보일 수 있음). 같은 빌드 사용 권장.
+
+**lint/analyzer**: `flutter analyze` clean (No issues found).
+
+### 2026-05-06 (89) — v0.0.73 다중 게스트 fix 실측 검증 PASS (3대 환경)
+
+**구성**: S22 (호스트, R3CT60D20XE) + Tab A7 Lite (게스트, R9PW315GL0L) + iPhone 12 Pro (게스트). 모델 모두 달라 v0.0.54 검증 부담이었던 "같은 모델 2대"는 이번에도 못 만족했지만 v0.0.73 영속 deviceId fix로 해당 코너가 코드상 사라졌으므로 모델 무관 검증으로 충분.
+
+**시나리오 결과**:
+
+| 단계 | 시나리오 | 결과 |
+|---|---|---|
+| 1 | S22 방 만들기 → A7 자동 발견 join → iPhone 자동 발견 join | peer count 3 유지 ✅ |
+| 2 | A7 비행기 모드 ON 5~10초 → OFF | 자동 재접속 후 peer count 3 유지 ✅ |
+| 3 | iPhone 비행기 모드 ON 5~10초 → OFF | 자동 재접속 후 peer count 3 유지 ✅ |
+| 4 | A7 앱 강제 종료 → 재실행 후 같은 방 재입장 | 3→2(즉시)→3(재입장) 정상 사이클 ✅ |
+
+**해석**:
+- 1~3단계: v0.0.51 핑퐁 회귀(2번째 게스트가 1번째를 stale로 destroy) 재현 안 됨 → v0.0.54 name+IP 매칭 또는 v0.0.73 deviceId 매칭이 의도대로 동작.
+- 4단계: 강제 종료 시 TCP RST가 즉시 호스트에 도달 → 호스트가 즉시 disconnect 감지 → peer count 3→2 broadcast (v0.0.71 (84) fix). 재입장 시 stale peer가 이미 정리된 상태라 deviceId 매칭은 발동 안 하고 그냥 add → 2→3.
+- v0.0.73 deviceId 매칭이 진짜 발동하는 시나리오는 **heartbeat timeout(15초) 전에 빠른 재접속**(비행기 모드 5~10초 케이스 = 2/3단계). UI상 정상 작동하므로 동작은 검증되었지만 logcat 캡처는 USB 연결 안 한 상태로 진행해 실제 `[P2P] stale peer 정리 (deviceId=...)` 로그 1회 발동 여부는 미캡처. 동작 결과(peer count 3 유지)로 충분 확인.
+
+**미캡처 로그**: 4단계 진행 중 S22 USB 분리 상태 → adb logcat 미수집. 다음 회귀 시 USB 연결한 채로 같은 시나리오 반복하면 stale 정리 로그 1회 캡처 가능. 다만 본 PASS 판정은 UI 결과로 충분.
+
+**version bump 안 함**: 측정·문서 only. v0.0.73 코드 변경은 (88)에서 이미 bump 완료.
+
+**PLAN HIGH-1 마감**: "다중 게스트 fix 실측 검증" 완료 처리. 같은 모델 2대 검증은 영구 불필요.
+
 ---
 
 #### 미해결 이슈
@@ -4510,7 +4568,7 @@ v0.0.71까지의 자동화 측정에서 보였던 wide variance가 v0.0.72에서
 - [x] ~~**HTTP 404 stale state — 게스트 재접속 시 다운로드 실패**~~ — **v0.0.70 (84) 방어적 fix 완료**. `_cleanupTempDir`에 활성 `_storedSafeName` 보호 가드 + `_handleAudioRequest`에 disk 파일 존재 확인 + `startListening` 재호출 진단 logging. 실기기 검증 통과. 단 root cause(startListening 재호출 트리거)는 미확정, 자연 재현 시 `[DIAG] startListening re-entry` 로그로 좁힐 예정.
 - [x] ~~**iOS 26.4.1 + macOS 26.3 환경 빌드 install hung**~~ — **회피 표준화 완료 (v0.0.71 (85) 후속)**. CLAUDE.md "실기기 빌드/설치" + "iOS debug 빌드 디버거 attach 필요" 섹션 갱신. CLI hung 시 잔재 프로세스 정리 + IntelliJ/Xcode IDE 권장. 근본 fix는 Apple/Flutter toolchain 측이라 운영 차원에선 표준 우회로 마감.
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
-- [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52)에서 A+B 동시 fix 완료** (`device_info_plus`로 디바이스명 발급 + stale 비교를 name AND ip로 강화). 실측 검증은 갤럭시 3대 또는 같은 모델 2대 환경 필요 (현재 보유 디바이스는 모델 다 달라서 A안만으로도 통과해버림 → 진짜 검증은 같은 모델 2대 이상으로).
+- [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52) name+IP fix → v0.0.73 (88) 영속 deviceId(UUID) fix로 단순화 완료**. 같은 모델 2대 환경 검증 부담 자체 해소(코드상 충돌 1/2^128). 갤럭시 3대(모델 무관) + 비행기 모드 검증으로 충분.
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
