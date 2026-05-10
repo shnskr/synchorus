@@ -317,6 +317,9 @@ private:
              mDecodedSampleRate, mStreamSampleRate,
              mStream->getFramesPerBurst());
 
+        // v0.0.74-fix: 새 stream 활성화 시 진단 카운터 reset
+        mLatDiagCount = 0;
+
         result = mStream->requestStart();
         if (result != oboe::Result::OK) {
             LOGE("start requestStart: %s", oboe::convertToText(result));
@@ -407,8 +410,34 @@ public:
         }
 
         auto latRes = mStream->calculateLatencyMillis();
+        bool latAbnormal = false;
         if (latRes) {
             *outOutputLatencyMs = latRes.value();
+            // v0.0.74-fix 진단: 비정상값 (음수=clock skew Issue #678, >500=outlier).
+            // 정상값 도달 시점 추적용. 안정 도달까지 첫 N회 + 그 후 spam 방지 throttle.
+            if (latRes.value() < 0 || latRes.value() > 500) {
+                latAbnormal = true;
+            }
+        } else {
+            latAbnormal = true;
+        }
+        if (latAbnormal) {
+            // 첫 5회 + 그 후 매 50회마다 (25Hz 폴링이면 2초마다)
+            if (mLatDiagCount < 5 || mLatDiagCount % 50 == 0) {
+                if (latRes) {
+                    LOGW("calcLatency abnormal[%d]: %.2fms",
+                         mLatDiagCount, latRes.value());
+                } else {
+                    LOGW("calcLatency abnormal[%d]: %s",
+                         mLatDiagCount, oboe::convertToText(latRes.error()));
+                }
+            }
+            mLatDiagCount++;
+        } else if (mLatDiagCount > 0) {
+            // 안정 도달 — 누적 비정상 횟수 보고 후 reset
+            LOGI("calcLatency recovered after %d abnormal: %.2fms",
+                 mLatDiagCount, latRes.value());
+            mLatDiagCount = 0;
         }
 
         int64_t framePos = 0;
@@ -644,6 +673,10 @@ private:
     int64_t mTsFailStreakCount{0};
     int64_t mTsFailStreakStartMonoNs{0};
     int32_t mTsFailStreakStartXRun{-1};
+
+    // v0.0.74-fix: calculateLatencyMillis 비정상값 누적 카운터.
+    // stream 활성 직후 -1/음수/>500 보고 패턴 추적. 안정 도달 시 0 reset.
+    int64_t mLatDiagCount{0};
 
     // ---- 디코딩된 오디오 버퍼 ----
     std::vector<int16_t> mDecodedData;

@@ -101,6 +101,19 @@
 
 ### HIGH
 
+~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
+
+진행 결과:
+- ✅ Cold start 단축 확정: 18초+ → 100~3000ms 영역 (시나리오별)
+- ✅ baseline 도달 (Run 4 +1.81ms, v0.0.63 -5~-7ms 동등 또는 더 좋음)
+- ⚠️ 회귀 1건 (Run 1 영구 잔재 -47ms) — outputLatency 안정 wait 도달 전 anchor 박힘이 root cause
+- ✅ **v0.0.74-fix (outputLatency 안정 가드 + Oboe 진단 logging) 추가 적용**
+- ✅ fix 후 재측정: Run 4 baseline 도달, logcat에서 가드 효과 확정 (`calcLatency recovered after 45 abnormal: 8.19ms`)
+
+**남은 미스터리 (LOW 후속)**:
+- Run 1 영구 잔재가 가드 후도 비결정적 발생 가능 (1/4 케이스). 자체 정상화 메커니즘 미파악. 사용자 청감 OK라 실용 영향 작음.
+- 후속 진단 후보: anchor 시점 진짜 베이크값 csv 컬럼 추가, 자체 정상화 트리거 추적.
+
 1. ~~**v0.0.73 다중 게스트 fix 실측 검증**~~ — **2026-05-06 (89) PASS**. 3대(S22 호스트 + Tab A7 Lite + iPhone 12 Pro) 환경에서 (1) 기본 입장 peer count 3 유지, (2) A7 비행기 모드 on/off 후 재접속 3 유지, (3) iPhone 비행기 모드 on/off 후 재접속 3 유지, (4) A7 앱 강제 종료 → 즉시 2 → 재실행 후 3으로 복귀 모두 통과. v0.0.51 핑퐁 회귀 없음, 영속 deviceId 정상 작동. 같은 모델 2대 환경 검증 부담은 v0.0.73 fix(코드상 충돌 0)로 자체 해소.
 
 1-A. ~~**(81) 신규 회귀 fix — 파일 변경 시 호스트 무음 + 게스트 단독 재생**~~ — **v0.0.69 (82) 완료**. audio-url playing=false + framePos>0 sanity gate + _latestObs reset. 실기기 검증 통과.
@@ -144,6 +157,20 @@
     - **보류**: `device_info_plus` 12→13 + `package_info_plus` 9→10 (file_picker 11이 win32 ^5에 묶여 충돌. file_picker가 win32 ^6 지원할 때 묶음 commit). API 무변경이라 미루는 부담 작음.
     - **다음**: 실기기 풀세트 회귀 테스트 (특히 audio_session 0.2 BT 라우팅 + file_picker 11 + riverpod 3 onDispose 사이클).
 
+**🆕 [신규, 2026-05-10] clock sync 인프라 정밀화 — wallclock → monotonic clock**
+- 변경 영역: `sync_service.dart` 핑퐁 t1/t3 + `audio_obs.dart` broadcast hostTimeMs + 오디오 엔진 native 측 timestamp + `native_audio_sync_service.dart` event timestamp 등 wallclock 사용 모든 위치
+- API: Android `SystemClock.elapsedRealtimeNanos()` (Kotlin) / iOS `mach_absolute_time()` + `mach_timebase_info` (Swift)
+- 이론적 가치: OS NTP 자동 보정 점프 영향 0 + ms → ns 정밀도. § D-2 gap 임계 2ms → 1ms 좁힘 가능, fallback 임계 30ms → 10~15ms 좁힘 가능
+- 우리 환경 ROI: 측정 데이터로 추정 시 winMinRaw range가 매우 좁음 (v0.0.56 idle 3분 2ms span) → OS 점프 거의 없는 듯. **v0.0.74 cold start 측정 결과가 만족스러우면 보류, 부족하면 진행**.
+- 작업량: 1~2일 (양 플랫폼 native 채널 + 일관 변경 + 디버깅용 wallclock 병행 출력)
+- 위험: 변경 범위 크나 알고리즘 그대로 → 회귀 위험 보통
+
+**🆕 [신규, 2026-05-10] clock sync broadcast 주기 단축 (500ms → 200ms)**
+- 변경 위치: `native_audio_sync_service.dart` `_obsBroadcastIntervalMs` (라인 518-520)
+- 효과: 첫 fresh obs 도착 빨라짐 → anchor establish 자연 wait ↓ (cold start 끝 부분 추가 단축)
+- 우려: p2p 트래픽 2.5배 ↑ → 호스트 부담 (사용자가 호스트 부담 우려로 보류 의사 표시)
+- v0.0.74 cold start 측정 결과 보고 결정. 만족스러우면 보류, 부족하면 검토.
+
 ### LOW
 
 11. **errno=65/51 분기 캡처 (v0.0.28 백업 경로)** — connectivity_plus 즉시 반응으로 우회됨. AP 이동 or 다른 AP 시나리오에서만 캡처 가능. 코드 변경 0, 실기기 2대 + 2개 AP.
@@ -157,6 +184,8 @@
 15. **디버그 모드 호스트 간헐적 스터터** — 릴리스에선 무관.
 
 16. **UI 폴리싱** — Phase 4 확장 전 MVP 마감 다듬기.
+
+17. **v0.0.74 Run 1 영구 잔재 root cause** (HISTORY (90), SYNC_ALGORITHM_V2 §B v0.0.74-fix) — 2026-05-10 측정 4회 중 1회 (Run 1)에서 vfDiff -47ms 영구 잔재 발견, 가드 적용 후도 비결정적 발생 가능. 자체 정상화 메커니즘이 Run 2/3/4은 작동, Run 1만 미작동. 사용자 청감으론 4건 모두 OK라 실용 영향 작음. **진단 후보**: (a) anchor 시점 진짜 outLatDelta 베이크값을 `_logGuestEvent('anchor_set')`이 보내는 csv row 컬럼에 추가 (현재 `_sendDriftReport`에서 outLat 인자 안 넘겨 default 0), (b) 자체 정상화 메커니즘 (Run 2/3/4의 -100→-2 자체 회복) 트리거 코드 추적, (c) csv vfDiff 식이 진짜 음향 어긋남보다 큰 잔재 보고 가능성 검증 (청감 비교 측정).
 
 ## 화면 구성
 

@@ -1,0 +1,25 @@
+05-10 13:44:06.369  5588  7092 I OboeEngine: loadFile: sr=44100 ch=2 dur=300.0s mime=audio/mpeg
+05-10 13:44:07.029  5588  7291 I OboeEngine: format changed: sr=44100 ch=2
+05-10 13:44:07.100  5588  7092 I OboeEngine: loadFile: streaming decode started, 13231871 est frames, 300.0s
+05-10 13:44:14.978  5588  7291 I OboeEngine: decode: actual frames 13229974 vs est 13231871
+05-10 13:44:14.984  5588  7291 I OboeEngine: decode thread done: 13229974 frames decoded
+05-10 13:44:15.769  5588  5588 I OboeEngine: start stream OK: reqSR=44100 actualSR=44100 burst=96
+05-10 13:47:19.453  5588  5588 W OboeEngine: calcLatency abnormal[0]: ErrorInvalidState
+05-10 13:47:19.453  5588  5588 W OboeEngine: getTimestamp streak start: ErrorInvalidState (-895) state=Pausing xrun=4 wallMs=1778388439453
+05-10 13:47:19.511  5588  5588 W OboeEngine: calcLatency abnormal[1]: ErrorInvalidState
+05-10 13:47:19.606  5588  5588 W OboeEngine: calcLatency abnormal[2]: ErrorInvalidState
+05-10 13:47:19.694  5588  8368 I OboeEngine: loadFile: sr=44100 ch=1 dur=300.0s mime=audio/mpeg
+05-10 13:47:19.706  5588  5588 W OboeEngine: calcLatency abnormal[3]: ErrorInvalidState
+05-10 13:47:19.806  5588  5588 W OboeEngine: calcLatency abnormal[4]: ErrorInvalidState
+05-10 13:47:19.849  5588  8384 I OboeEngine: format changed: sr=44100 ch=1
+05-10 13:47:19.876  5588  8368 I OboeEngine: loadFile: streaming decode started, 13231871 est frames, 300.0s
+05-10 13:47:23.906  5588  5588 I OboeEngine: calcLatency recovered after 45 abnormal: 8.19ms
+05-10 13:47:23.906  5588  5588 W OboeEngine: getTimestamp streak end: last=ErrorInvalidState count=45 duration=4452ms state=Started xrunDelta=0 wallMs=1778388443906
+05-10 13:47:26.934  5588  8384 I OboeEngine: decode: actual frames 13230000 vs est 13231871
+05-10 13:47:26.939  5588  8384 I OboeEngine: decode thread done: 13230000 frames decoded
+05-10 13:49:37.329  5588  9526 I OboeEngine: loadFile: sr=44100 ch=2 dur=300.0s mime=audio/mpeg
+05-10 13:49:37.581  5588  9539 I OboeEngine: format changed: sr=44100 ch=2
+05-10 13:49:37.616  5588  9526 I OboeEngine: loadFile: streaming decode started, 13231871 est frames, 300.0s
+05-10 13:49:40.411  5588  5588 I OboeEngine: start stream OK: reqSR=44100 actualSR=44100 burst=96
+05-10 13:49:45.538  5588  9539 I OboeEngine: decode: actual frames 13229974 vs est 13231871
+05-10 13:49:45.544  5588  9539 I OboeEngine: decode thread done: 13229974 frames decoded

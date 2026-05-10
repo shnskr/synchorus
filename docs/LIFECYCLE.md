@@ -174,23 +174,26 @@
 
 ### 2-3. 시간 동기화 (게스트 --> 호스트)
 
-**초기 핸드셰이크** -- 30회 ping-pong으로 clock offset 측정
+**초기 핸드셰이크** -- 최대 30회 ping-pong으로 clock offset 측정
 
 | 순서 | 동작 | 설명 |
 |:---:|------|------|
-| 1 | 게스트: sync-ping 전송 | `{t1: 전송시각, rid: 요청ID}` 를 100ms 간격으로 30회 |
+| 1 | 게스트: sync-ping 전송 | `{t1: 전송시각, rid: 요청ID}` 를 100ms 간격으로 fire-and-forget 송신 |
 | 2 | 호스트: sync-pong 응답 | `{t1, hostTime: 수신시각, rid}` 즉시 반환 |
-| 3 | 게스트: offset 계산 | `RTT = 수신시각 - t1`, `offset = hostTime - (t1 + RTT/2)` |
-| 4 | best RTT 선택 | RTT가 가장 작은 샘플의 offset을 초기값으로 확정 |
+| 3 | 게스트: offset 계산 | `RTT = t3 - t1`, `offset = hostTime - (t1 + t3)/2` (NTP 표준식) |
+| 4 | 종료 조건 | (a) **v0.0.74 early termination**: single raw RTT ≤ 10ms sample 10개 모이면 즉시 종료, 또는 (b) 30개 cap. 좋은 LAN에서만 단축 효과 (≤10ms 비율 28% → 평균 36 ping 필요 → 30 cap 거의 항상 도달) |
+| 5 | best RTT 선택 | 받은 sample 중 RTT가 가장 작은 sample의 offset을 초기값으로 확정 |
+| 6 | **carry over (v0.0.74)** | best 1개 `_SyncSample`을 `_recentWindow` 맨 뒤에 추가 → 주기 단계 시작 시 9초간 minSample 안전망 |
 
 **주기적 EMA 동기화** -- 1초 간격으로 지속적 보정
 
 | 순서 | 동작 | 설명 |
 |:---:|------|------|
 | 1 | 1초마다 ping 1회 | 음수 rid로 초기 핸드셰이크와 구분 |
-| 2 | sliding window | 최근 10개 샘플 유지(v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소), 그 중 min-RTT 샘플 선택 |
-| 3 | EMA 필터 | 처음 10샘플: alpha=0.5 (빠른 수렴), 이후: alpha=0.1 (안정 유지). 상수: `_emaAlphaFast`/`_emaAlphaSlow`/`_fastPhaseCount` (`sync_service.dart:32-34`) |
-| 4 | 안정 판정 | offset 변화 < 2ms가 5회 연속이면 `isOffsetStable = true` |
+| 2 | sliding window | 최근 10개 샘플 유지(v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소), 그 중 min-RTT 샘플 선택. v0.0.74 carry over로 시작 시 best 1개 보존 → 9초간 안정 |
+| 3 | EMA 필터 | **v0.0.74: 단일 alpha = 0.1**. fast phase(처음 10샘플 α=0.5) 제거. carry over로 출발점 이미 안정 + §D-2 gap 보호가 전제. `sync_service.dart:32` `_emaAlpha = 0.1` |
+| 4 | 안정 판정 (§D-2 v0.0.63 AND 조합) | `delta < 2ms` (EMA step 변화량) **AND** `\|filtered - winMinRaw\| < 2ms` (EMA가 진짜 값에 가까움) 둘 다 만족 시 `_stableCount++`, 한 번이라도 불만족이면 0 reset. 5회 연속 만족 시 `isOffsetStable = true`. v0.0.74는 5회 그대로 유지(보수적) |
+| 5 | isOffsetStable 의미 | anchor establish 진입 게이트. false 동안엔 fallback alignment(30ms 임계 거친 정렬). filteredOffsetMs는 stable 여부 무관하게 항상 사용됨 — drift 계산/fallback 양쪽 모두에서 |
 
 ### 2-4. 오디오 파일 공유
 

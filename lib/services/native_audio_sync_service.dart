@@ -1245,6 +1245,13 @@ class NativeAudioSyncService {
     if (obs == null || !obs.playing) return;
     // 호스트 HAL timestamp 없으면 정밀 앵커 불가 → fallback에 맡김
     if (obs.framePos < 0) return;
+    // v0.0.74-fix: outputLatency 안정 가드. Oboe `calculateLatencyMillis`는 stream
+    // 활성화 직후 -1 (Result::Error) 또는 음수 (HAL/system clock skew, Issue #678)
+    // 반환 가능 → safeOutputLatencyMs가 0으로 변환. 이 시점에 outLatDelta=0/잘못된
+    // 값이 anchor에 베이크되면 게스트 syncSeek 위치 자체가 어긋나 vfDiff 영구 잔재.
+    // 양쪽 진짜 측정값 도달 후에만 establish.
+    if (obs.hostOutputLatencyMs <= 0) return;
+    if (ts.safeOutputLatencyMs <= 0) return;
 
     // 앵커 순간의 호스트 wall clock = 게스트 wall + offset
     final anchorHostWall = ts.wallMs + offset;

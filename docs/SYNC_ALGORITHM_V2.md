@@ -65,6 +65,54 @@ iOS/Android 양쪽의 `outputLatency`가 BT 환경에서 비대칭(특히 iPhone
 - **검증 방법**: csv `out_lat_host_raw` / `out_lat_guest_raw` / `out_lat_delta_current` / `out_lat_delta_anchored` 4개 컬럼. v0.0.56 (60) 측정에서 `delta_current - delta_anchored` = +0.22ms (mean) → EMA 효과 사실상 0 확인. iPhone BT 워밍업 케이스만 추가 측정 필요(현재 데이터는 갤럭시+갤럭시).
 - **합의된 결정**: **B1 (베이크인) — 현행 유지**. 근거: (60) 측정 anchored vs current diff 0.22ms로 EMA 효과 미미 + v0.0.51~v0.0.55 EMA 시도 vfDiff 23배 회귀 + race 위험. iPhone BT 워밍업 케이스는 별도 항목(PLAN MID-8 BT 워밍업 잔여 개선)으로 분리.
 
+### v0.0.74-fix 후속: outputLatency 안정 가드 (2026-05-10)
+
+**배경**: v0.0.74에서 fast phase 제거로 cold start wait 단축했더니 **호스트 outputLatency 안정 wait가 노출**되어 회귀 발생. 측정에서 호스트가 stream 활성화 후 1.9~4초까지도 `calculateLatencyMillis`가 `Result::Error` 반환 (HAL timestamp 측정 불가) → `safeOutputLatencyMs` 가 0으로 변환 → 그 시점에 anchor 박히면 `outLatDelta = 0` 잘못 베이크 → 게스트 syncSeek 위치 자체가 어긋남 → **vfDiff 영구 잔재** (Run 1 -47ms 케이스, 자체 정상화 안 일어남).
+
+**Oboe API 알려진 이슈 (Issue #678)**:
+- `calculateLatencyMillis()` 내부 식: `latency = nextFramePresentationTime - nextFrameWriteTime`
+- HAL hardware clock(CLOCK_MONOTONIC, presentationTime)과 system steady_clock(writeTime) 동기 불일치 시 음수 반환 가능
+- 디바이스/HAL 의존 — 일부 디바이스에선 `Math.abs()`로 우회 가능, 우리는 0으로 무시(보수적).
+
+**fix 결정 — anchor establish에 outputLatency 안정 가드**:
+
+```dart
+// _establishAnchor (라인 1248-1253)
+if (obs.hostOutputLatencyMs <= 0) return;       // 호스트 HAL latency 측정 안정 전
+if (ts.safeOutputLatencyMs <= 0) return;        // 게스트 HAL latency 측정 안정 전
+```
+
+`safeOutputLatencyMs`가 -1/음수/>500을 모두 0으로 변환하므로 **0 가드 한 줄로 모든 비정상 케이스 차단** (Issue #678 음수, Result::Error -1, outlier 모두).
+
+**Oboe 진단 logging 추가** (`oboe_engine.cpp:411-432`):
+- 비정상 raw 값 추적용. 첫 5회 + 매 50회 throttle.
+- 안정 도달 시 `recovered after N abnormal: X.XXms` 로그.
+- stream 활성화 시 `mLatDiagCount = 0` reset.
+- 디바이스/Android 버전별 안정 wait 패턴 진단 가능.
+
+**측정 검증 (2026-05-10 (90))**:
+
+| Run | vfDiff mean | 평가 |
+|---|---|---|
+| Run 1 (이전, 가드 전) | -82ms | 큰 회귀 |
+| Run 1 (가드 후, 비결정) | -47ms (영구 잔재) | 1/4 비결정 outlier |
+| Run 2 (mp3 변경) | -7.51ms | baseline ✅ |
+| Run 3 (새 방) | -12ms | baseline 근처 |
+| Run 4 (1분, 대부분 케이스) | **+1.81ms** | **baseline 매우 좋음** |
+
+logcat 검증:
+```
+13:47:19.453 calcLatency abnormal[0]: ErrorInvalidState   ← stream Pausing
+... 4452ms 동안 abnormal 누적
+13:47:23.906 calcLatency recovered after 45 abnormal: 8.19ms
+```
+→ 가드가 4.5초 동안 anchor 차단 → 정상값(8.19ms) 도달 후 박힘. **fix 효과 확정**.
+
+**남은 미스터리**:
+- Run 1 영구 잔재 (1/4 케이스)는 가드 적용 후도 비결정적으로 발생. 자체 정상화 메커니즘 (Run 2/3/4은 작동, Run 1만 안 함) 트리거 미파악.
+- 사용자 청감으로는 모든 케이스 OK — csv 식 한계 또는 음악 특성으로 47ms 못 느낀 가능성.
+- 후속 진단: anchor 시점 진짜 베이크값 csv 컬럼 추가 + 자체 정상화 메커니즘 추적.
+
 ---
 
 ## C. rate drift 1% 보정
@@ -151,11 +199,32 @@ v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win
 - 청감 (idle 시작 후 첫 ~30초) — 1/2/3회차 같은 패턴이 좋음/좋음/좋음으로 수렴하는지
 - N=3+ 재측정 필수 — N=2로는 변동성 단정 어려움
 
-**합의된 결정**: **D2-2 (AND 조합) 채택**. `(filteredOffsetMs - _prevFilteredOffset).abs() < _stableThresholdMs && (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs`로 stable 판정. 근거:
+**합의된 결정**: **D2-2 (AND 조합) 채택** (v0.0.63 적용). `(filteredOffsetMs - _prevFilteredOffset).abs() < _stableThresholdMs && (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs`로 stable 판정. 근거:
 - D2-1(winMinRaw 일치만)은 step 조건 제거 — winMinRaw outlier 시 false positive 위험
 - D2-2는 step 변화량(EMA 진동 작음) + winMinRaw 일치(EMA가 진짜 값에 가까움) 둘 다 보장 → false positive 최소
 - D2-3(상수만)은 root cause 안 고침
 - 변경: 기존 1줄 → 2줄로 확장 (AND 조건 추가). `_winMinRawOffsetMs`는 (60) v0.0.56에서 이미 추가된 필드 → 코드 변경 최소
+
+### v0.0.74 후속: fast phase 제거 (2026-05-10)
+
+§D-2 AND 조합이 false positive 보호망으로 충분히 작동한다는 전제로 v0.0.74에서 cold start wait 단축 작업:
+
+- **변경 1 (early termination)**: 초기 핸드셰이크 30 ping 무조건 받기 → ≤10ms RTT sample 10개 모이면 즉시 종료. 30 cap fallback 유지.
+- **변경 2 (carry over)**: 30 ping 중 best 1개를 `_recentWindow` 맨 뒤에 추가. 9초간 minSample 안전망.
+- **변경 3 (fast phase 제거)**: `_emaAlphaFast/_emaAlphaSlow/_fastPhaseCount` 3개 상수 → `_emaAlpha = 0.1` 단일. `_periodicSampleCount` 필드 제거. fast phase 분기 6곳 정리. carry over로 출발점 안정 + §D-2 gap 보호 전제로 fast phase 무용화.
+- **변경 4 (stable 5번 그대로)**: `_stableRequiredCount = 5` 유지. 보수적 — false positive 보호망 그대로.
+
+**예상 효과**: cold start wait 18초+ → 약 8~10초 (LAN 안정 환경). 좋은 LAN에선 early termination 작동 시 추가 단축.
+
+**위험 분석**:
+- 불안정 WiFi에서도 §D-2 gap이 자가 진단으로 작동 — minSample 변동 시 gap 커짐 → stable 안 됨 → 안전 wait. 회귀 위험 없음.
+- carry over best가 outlier일 가능성 — 측정 분포에서 ≤5ms 비율 0.1%로 매우 낮음. 첫 주기 sample 들어왔을 때 §D-2 gap이 자동 검증.
+
+**측정 검증 (2026-05-10 (90))**:
+- ✅ Cold start 1.9~3.5초 (이전 18초 대비 5~9배 단축, 의도대로)
+- ❌ vfDiff 회귀 발생 — Run 1 -82ms, Run 2 -11.7ms (baseline -5~-7ms 대비 2~11배)
+- 🔍 Root cause: anchor establish가 outputLatency 안정 wait 도달 전에 박힘. 호스트가 1.9~4초 재생 후도 outputLatency=0 보고. **이전 fast phase 10초가 outputLatency 안정 wait 우연히 cover했음**. v0.0.74에서 그 cover 사라지면서 본래 누락된 outputLatency 가드 노출.
+- → fix 방향: anchor establish에 `outputLatency > 0` 가드 추가 (offset 동기화 자체는 정상, 본 §D-2 fix 결정 유지).
 
 **구현 위치**: `lib/services/sync_service.dart:271`
 

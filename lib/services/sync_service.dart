@@ -28,13 +28,18 @@ class _SyncSample {
   int get rawOffsetMs => t2 - ((t1 + t3) ~/ 2);
 }
 
-// EMA 파라미터 (PoC Phase 3 검증 완료, 초기 수렴 가속 추가)
-const double _emaAlphaFast = 0.5; // 초기 수렴용 (처음 10 샘플)
-const double _emaAlphaSlow = 0.1; // 안정 후 (new 0.1)
-const int _fastPhaseCount = 10; // 빠른 수렴 샘플 수
+// EMA 파라미터 (v0.0.74: fast phase 제거 — carry over로 출발점 안정 + §D-2 gap 보호)
+const double _emaAlpha = 0.1; // 단일 alpha (이전 _emaAlphaSlow 값 유지)
 const int _windowSize = 10; // sliding window 크기 (v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소)
 const double _stableThresholdMs = 2.0; // offset 안정 판정 기준 (ms)
 const int _stableRequiredCount = 5; // 연속 안정 횟수
+
+// v0.0.74: 초기 핸드셰이크 early termination 조건
+// (single raw RTT ≤ _earlyTermRttThresholdMs) sample이 _earlyTermSampleCount개 모이면 즉시 종료.
+// 못 모으면 30개 cap fallback. 보수적: 우리 측정 분포에서 ≤10ms 비율 28%라 평균 36 ping
+// 필요 → 30 cap에 거의 항상 걸림. 좋은 LAN 환경에서만 단축 효과.
+const int _earlyTermRttThresholdMs = 10;
+const int _earlyTermSampleCount = 10;
 
 class SyncService {
   final P2PService _p2p;
@@ -86,9 +91,6 @@ class SyncService {
   /// 주기 단계에서 보낸 ping의 t1 보관 (pong 매칭용)
   final Map<int, int> _pendingPingT1 = {};
 
-  /// 주기 단계 EMA 업데이트 횟수 (빠른/느린 alpha 전환용)
-  int _periodicSampleCount = 0;
-
   /// offset 안정성 추적
   double _prevFilteredOffset = 0.0;
   int _stableCount = 0;
@@ -118,7 +120,6 @@ class SyncService {
     _periodicPongSub = null;
     _recentWindow.clear();
     _pendingPingT1.clear();
-    _periodicSampleCount = 0;
     _prevFilteredOffset = 0.0;
     _stableCount = 0;
   }
@@ -139,6 +140,10 @@ class SyncService {
     // 매 라운드마다 리셋 (클럭 드리프트 보정을 위해)
     int roundBestRtt = 999999;
     int roundOffset = _offsetMs;
+    // v0.0.74: best sample 추적 (carry over용 — 종료 시 _recentWindow 맨 뒤에 추가)
+    _SyncSample? bestSample;
+    // v0.0.74: early termination — 임계 이하 RTT sample 카운터
+    int rttUnderThresholdCount = 0;
 
     // 로컬 변수로 listener를 관리하여 다른 호출과의 경합 방지
     late final StreamSubscription sub;
@@ -150,22 +155,43 @@ class SyncService {
 
       final t1 = message['data']['t1'] as int;
       final hostTime = message['data']['hostTime'] as int;
-      final now = DateTime.now().millisecondsSinceEpoch;
+      final t3 = DateTime.now().millisecondsSinceEpoch;
 
-      final rtt = now - t1;
-      final offset = hostTime - (t1 + rtt ~/ 2);
+      final sample = _SyncSample(t1: t1, t2: hostTime, t3: t3);
+      final rtt = sample.rttMs;
+      final offset = sample.rawOffsetMs;
 
       if (rtt < roundBestRtt) {
         roundBestRtt = rtt;
         roundOffset = offset;
+        bestSample = sample;
+      }
+
+      // v0.0.74 early termination 카운트
+      if (rtt <= _earlyTermRttThresholdMs) {
+        rttUnderThresholdCount++;
       }
 
       completed++;
-      if (completed >= count && !completer.isCompleted) {
+      // 종료 조건: (a) 임계 이하 sample N개 모임 OR (b) count 다 받음
+      final shouldComplete = (rttUnderThresholdCount >= _earlyTermSampleCount) ||
+          (completed >= count);
+      if (shouldComplete && !completer.isCompleted) {
         _offsetMs = roundOffset;
         _bestRtt = roundBestRtt;
         _filteredOffsetMs = roundOffset.toDouble();
         _synced = true;
+        // v0.0.74 B: best 1개를 _recentWindow 맨 뒤에 carry over.
+        // sliding window는 인덱스 0(가장 앞)에서 빠지므로 맨 뒤에 박으면 9개 새 sample이
+        // 들어올 때까지 안 빠짐 → 9초 동안 minSample 안전망 보장.
+        // startPeriodicSync 진입 시 _recentWindow.clear() 안 하므로 보존됨.
+        if (bestSample != null) {
+          _recentWindow.add(bestSample!);
+          // window 사이즈 초과 가드 (이전 _recentWindow 남아있을 가능성 대비)
+          while (_recentWindow.length > _windowSize) {
+            _recentWindow.removeAt(0);
+          }
+        }
         sub.cancel();
         if (_activeSyncSub == sub) _activeSyncSub = null;
         completer.complete(SyncResult(
@@ -203,6 +229,13 @@ class SyncService {
           _bestRtt = roundBestRtt;
           _filteredOffsetMs = roundOffset.toDouble();
           _synced = true;
+          // v0.0.74 B: timeout 케이스도 best 1개 carry over (부분 sample 받았으면)
+          if (bestSample != null) {
+            _recentWindow.add(bestSample!);
+            while (_recentWindow.length > _windowSize) {
+              _recentWindow.removeAt(0);
+            }
+          }
           return SyncResult(
             offsetMs: _offsetMs,
             rttMs: _bestRtt,
@@ -217,10 +250,13 @@ class SyncService {
   /// 참가자: 1초 주기 EMA 동기화 시작.
   /// 매 1초 단일 ping → pong 수신 시 sliding window에 추가 →
   /// window 내 min-RTT 샘플의 offset을 EMA로 기존 filtered와 혼합.
+  ///
+  /// v0.0.74: fast phase 제거. carry over로 출발점 안정 + §D-2 gap 보호 전제.
+  /// _recentWindow는 syncWithHost가 best 1개를 carry over했으므로 clear 안 함.
   void startPeriodicSync() {
     _periodicSyncTimer?.cancel();
     _periodicPongSub?.cancel();
-    _recentWindow.clear();
+    // v0.0.74 B: _recentWindow.clear() 제거 — syncWithHost가 best 1개 carry over함.
     _pendingPingT1.clear();
 
     // pong 수신 listener
@@ -253,25 +289,20 @@ class SyncService {
       _lastRttMs = sample.rttMs;
       _winMinRttMs = minSample.rttMs;
 
-      // 초기 10샘플은 alpha=0.3 (빠른 수렴), 이후 0.1 (안정 유지)
-      _periodicSampleCount++;
-      final alpha = _periodicSampleCount <= _fastPhaseCount
-          ? _emaAlphaFast
-          : _emaAlphaSlow;
-      _filteredOffsetMs = _filteredOffsetMs * (1 - alpha) +
-          minSample.rawOffsetMs * alpha;
+      // v0.0.74: fast phase 제거 — 단일 alpha (0.1) 즉시 적용.
+      // carry over로 _filteredOffsetMs와 minSample이 이미 진짜 offset에 가까운 상태에서 시작.
+      _filteredOffsetMs = _filteredOffsetMs * (1 - _emaAlpha) +
+          minSample.rawOffsetMs * _emaAlpha;
       _offsetMs = _filteredOffsetMs.round();
       _bestRtt = minSample.rttMs;
 
-      // offset 안정성 추적 — fast phase 동안은 수렴 중이므로 카운트 안 함
-      // v0.0.63 §D-2 fix: AND 조합. step 변화량(EMA 진동 작음) + winMinRaw 일치
-      // (EMA가 진짜 값에 가까움) 둘 다 만족해야 stable. (60) 진단으로
-      // step 단독은 EMA convergence lag 시 false positive 발생 확정.
+      // offset 안정성 추적 — §D-2 AND 조합 (v0.0.63):
+      // step 변화량(EMA 진동 작음) + winMinRaw 일치(EMA가 진짜 값에 가까움) 둘 다 만족.
+      // (60) 진단으로 step 단독은 EMA convergence lag 시 false positive 확정.
+      // v0.0.74: fast phase 분기 제거. carry over + AND 조건이 false positive 방어.
       final delta = (_filteredOffsetMs - _prevFilteredOffset).abs();
       _prevFilteredOffset = _filteredOffsetMs;
-      if (_periodicSampleCount <= _fastPhaseCount) {
-        _stableCount = 0; // fast convergence 중에는 안정 판정 금지
-      } else if (delta < _stableThresholdMs &&
+      if (delta < _stableThresholdMs &&
           (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs) {
         _stableCount++;
       } else {
@@ -280,7 +311,7 @@ class SyncService {
 
       debugPrint('Periodic sync: offset=${_filteredOffsetMs.toStringAsFixed(1)}ms, '
           'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}, '
-          'stable=$_stableCount, alpha=${alpha.toStringAsFixed(1)}');
+          'stable=$_stableCount');
     });
 
     // 1초 주기 ping

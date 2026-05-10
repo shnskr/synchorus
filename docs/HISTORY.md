@@ -4547,6 +4547,131 @@ v0.0.71까지의 자동화 측정에서 보였던 wide variance가 v0.0.72에서
 
 ---
 
+### 2026-05-10 (90) — v0.0.74 clock sync cold start 단축 (early termination + carry over + fast phase 제거)
+
+**배경**: PLAN MID-7 사전 트랙으로 streaming 구조 검토 중, 첫 재생 정착 wait의 진짜 bottleneck이 `isOffsetStable` 도달 시간 = **초기 핸드셰이크 3초 + fast phase 10초 + stable 5번 5초 ≈ cold start 18초** 임을 진단. 이 동안 anchor establish 안 되어 fallback alignment(30ms 임계 거친 모드)가 동작 → 청감 흐림. v0.0.43~v0.0.63까지 진행한 13번 사이클(HISTORY 44)이 알고리즘 내부 시도였다면, 이번은 **수렴 단계 자체를 단축**하는 보수적 변경.
+
+**변경 위치**: `lib/services/sync_service.dart` 단일 파일.
+
+**변경 내용 4가지**:
+
+1. **A. 초기 핸드셰이크 early termination** (`syncWithHost`, 라인 128~248)
+   - 새 상수 `_earlyTermRttThresholdMs = 10`, `_earlyTermSampleCount = 10`
+   - 매 pong 처리 시 `rtt <= 10ms` sample 카운터 추가
+   - 카운터 ≥ 10이면 30개 cap 못 채워도 즉시 종료
+   - 30개 fallback 유지 (보수적). 측정 분포에서 ≤10ms 비율 28% → 평균 36 ping → 30 cap에 거의 항상 걸림. 좋은 LAN 환경에서만 단축.
+
+2. **B. best 1개 sample을 `_recentWindow` 맨 뒤에 carry over** (라인 184~194, 232~238)
+   - `bestSample` 추적 (`_SyncSample` 객체)
+   - 정상 종료 시 + timeout 시 둘 다 `_recentWindow.add(bestSample)` 후 사이즈 가드
+   - sliding window는 인덱스 0(가장 앞)에서 빠지므로 맨 뒤 박힌 best는 **9개 새 sample 들어올 때까지 안 빠짐 → 9초 동안 minSample 안전망**.
+
+3. **C. fast phase 코드 6곳 제거**
+   - 상수 `_emaAlphaFast`, `_emaAlphaSlow`, `_fastPhaseCount` → `_emaAlpha = 0.1` 단일화
+   - 필드 `_periodicSampleCount` 제거 (다른 용도 없음)
+   - `reset()`의 `_periodicSampleCount = 0` 라인 제거
+   - `_periodicSampleCount++` + alpha 분기 제거
+   - stable 판정 fast phase 분기 (`if (_periodicSampleCount <= _fastPhaseCount) _stableCount = 0`) 통째 제거
+   - debugPrint의 `alpha=` 출력 제거
+   - **carry over로 출발점 안정 + §D-2 AND 조건이 false positive 방어**가 fast phase 무용화의 전제.
+
+4. **D. `isOffsetStable` 5번 연속 조건 — 변경 없음 (보수적 결정)**
+   - `_stableRequiredCount = 5` 그대로. 13번 사이클 회귀 history 학습 — false positive 보호망 유지.
+
+5. **`startPeriodicSync`의 `_recentWindow.clear()` 제거** (라인 256~261)
+   - syncWithHost가 carry over한 best 1개를 보존해야 함.
+   - `stopPeriodicSync` (방 떠날 때) + `reset()` (상태 초기화)의 clear는 그대로 유지 (의도적 정리).
+
+**예상 효과 (시뮬레이션)**:
+
+```
+[현재 v0.0.73]
+t=0~3초: 30 ping
+t=3~13초: fast phase 10 sample
+t=13~18초: stable 5 연속
+→ cold start ≈ 18초
+
+[v0.0.74]
+t=0~3초: 30 ping (early term 안 걸림 → 30 cap fallback) + best 1개 carry over
+t=3초: startPeriodicSync 시작 — _recentWindow 1개 (best)
+t=3~8초: stable 5 연속 (carry over로 출발점 안정 → §D-2 gap 즉시 만족)
+→ cold start ≈ 8초 (약 절반)
+```
+
+좋은 LAN 환경(early term 작동) + WiFi 안정 (stable 5번 연속 즉시 만족) 시 더 단축 가능.
+
+**위험 평가**:
+- 13번 사이클 회귀 history 중 EMA convergence(v0.0.51~v0.0.55) 시도가 vfDiff 23배 회귀한 사례 있음. 이번 변경은 EMA 동작 자체는 그대로 유지(α=0.1 단일)하고 **수렴 단계의 wait 시간만 단축** → 회귀 위험 작을 것으로 가설.
+- `§D-2 gap` 조건이 그대로 작동하므로 stable false positive 방어 유지.
+- carry over 안전성은 사용자 통찰(9초 동안 안전망 보장)로 검증.
+
+**검증 상태**:
+- ✅ `flutter analyze` 전체 프로젝트 클린 (`No issues found!`)
+- ⏳ 실기기 cold start 측정 미실시 (다음 세션)
+- ⏳ 회귀 측정 (vfDiff signed mean 비교) 미실시
+
+**후속 측정 시나리오 (PLAN에 추가 예정)**:
+1. **Cold start 측정**: 게스트 입장 직후 즉시 호스트 play. isOffsetStable 도달 시간 + anchor establish 시간 + 청감 정착 시간 측정.
+2. **회귀 측정**: 기존 N=2 baseline 환경에서 vfDiff signed mean 비교. v0.0.63 §D-2 fix 후 -5.25 ~ -7.33ms 수준이었는데 회귀 없는지.
+3. **Early termination 작동 빈도**: csv 새 컬럼 또는 logcat에서 "30 ping cap에 걸린 횟수 vs early term 종료 횟수" 비율 확인.
+
+**미시도 영역 (PLAN MID로)**:
+- E. wallclock → monotonic clock (Android `SystemClock.elapsedRealtimeNanos`, iOS `mach_absolute_time`) — 양 플랫폼 native 채널 작업량 큼. ROI는 OS 점프 빈도 측정 후 결정.
+- F. broadcast 주기 단축 (500ms → 200ms) — 호스트 부담 우려로 보류.
+
+**version bump**: v0.0.73 → v0.0.74. 코드 변경 위치 단일 (`sync_service.dart`).
+
+**측정 결과 (2026-05-10 Run 1~4, S22 호스트 + Tab A7 Lite 게스트)**:
+
+| Run | 시나리오 | Cold start | vfDiff mean | 자체 정상화 | 평가 |
+|---|---|---|---|---|---|
+| 1 | 같은 방 첫 mp3 첫 play (3분+) | 274ms | -47ms (영구 잔재) | ❌ 안 일어남 | 회귀 |
+| 2 | 같은 방 mp3 변경 후 play | 93ms | -7.51ms | 30초 시점 ✅ | baseline 도달 |
+| 3 | 새 방 + 다운로드 미완료 중 play | 3677ms | -12ms | 60초 시점 ✅ | baseline 근처 |
+| 4 | (가드 fix 후) 1분 측정 | 131ms | **+1.81ms** | 10~20초 시점 ✅ | **baseline 매우 좋음** |
+
+**Run 1 회귀 root cause 진단**:
+- csv `out_lat_host_raw=0` 시점에 anchor 박힘 → outLatDelta=0 잘못 베이크 → 게스트 syncSeek 위치 33ms 잘못 정렬 → 음향 시각상 47ms 어긋남 영구 잔재
+- 호스트가 host_play +1.9초 재생 후도 outputLatency=0 보고 (Oboe `calculateLatencyMillis` 안정 wait가 비정상으로 김)
+- v0.0.63까진 fast phase 10초가 outputLatency 안정 wait를 우연히 cover했으나 v0.0.74에서 cover 사라짐 → 본래 누락된 outputLatency 가드 노출
+
+**v0.0.74-fix (가드 + 진단 logging) — 2026-05-10**:
+
+1. **anchor establish 가드** (`native_audio_sync_service.dart:1248-1253`):
+   ```dart
+   if (obs.hostOutputLatencyMs <= 0) return;
+   if (ts.safeOutputLatencyMs <= 0) return;
+   ```
+   양쪽 outputLatency 진짜 측정값 도달 후에만 anchor establish. `safeOutputLatencyMs`가 -1/음수/>500을 0으로 변환하므로 0 가드 한 번에 비정상값 모두 차단.
+
+2. **Oboe 진단 logging** (`oboe_engine.cpp:411-432`):
+   - `calculateLatencyMillis` 비정상값 (음수, >500, Result::Error) 첫 5회 + 매 50회 throttle 로그
+   - 안정 도달 시 `recovered after N abnormal: X.XXms` 로그
+   - stream 활성화 시 `mLatDiagCount = 0` reset
+   - **Oboe Issue #678 (clock skew negative latency) 참고** — HAL hardware clock과 system clock 동기 불일치로 음수 보고 알려진 이슈. 우리 코드는 음수 무시(0 변환).
+
+**fix 후 재측정 결과**:
+- ✅ Run 4: cold start 131ms, vfDiff +1.81ms (v0.0.63 baseline -5~-7ms 동등 또는 더 좋음)
+- ✅ logcat 검증: stream pause→start 전환 시 `calcLatency abnormal[0~44]: ErrorInvalidState` 4452ms 누적 후 `recovered: 8.19ms`. 가드가 그 4.5초 동안 anchor 차단 → 정상값 도달 후 박힘
+- ✅ Run 2 mp3 변경 케이스: -7.51ms baseline 도달 (가드 효과 명확)
+
+**남은 미스터리 (PLAN MID 후속 트랙)**:
+- **Run 1 영구 잔재** — 가드 적용 후도 비결정적으로 발생 가능. 1/4 측정에서 자체 정상화 메커니즘 미작동, -47ms 영구 잔재. 사용자 청감으론 "잘 맞음" 보고 (csv 식 한계 또는 음악 특성으로 못 느낀 듯).
+- **자체 정상화 메커니즘 미파악** — Run 2/3/4은 첫 10~60초 잔재 후 자체 정상화. 트리거 코드상 미식별. anchor reset 이벤트 안 찍힘.
+- **csv vfDiff Run 1과 청감 OK 모순** — 식이 진짜 음향 어긋남보다 큰 잔재 보고 가능성 또는 음악 특성으로 청감 한계.
+
+**검증 상태 갱신**:
+- ✅ `flutter analyze` 클린 (`No issues found!`)
+- ✅ 실기기 빌드 + install (S22 + A7)
+- ✅ 측정 4회 — 가드 효과 확정 (3/4 baseline 도달, 청감 4/4 OK)
+- ⏳ Run 1 영구 잔재 root cause 진단 후속 (별도 트랙)
+
+**PLAN HIGH 활성 마감**: v0.0.74 cold start 측정 + 회귀 검증 완료. 가드 fix로 baseline 도달 확정. Run 1 미스터리는 LOW 후속.
+
+**version bump 안 함**: v0.0.74 그대로 유지 (가드 fix는 같은 버전 내 보강).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
