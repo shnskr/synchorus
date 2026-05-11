@@ -105,8 +105,8 @@
 
 진행 상태:
 - ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
-- ⏳ step 2-G1 (v0.0.76 예정) — native ring buffer만 단독 commit. G-2와 분리 (회귀 추적 격리)
-- ⏳ step 2-G2 (v0.0.77 예정) — Dart prepare→ready→go 흐름 + ready timeout 200ms + 큰 seek race fix
+- ✅ step 2-G1 (v0.0.76) — native ring buffer 단독 완료 (2026-05-11). 51분 곡 로드 검증, decode 시간 2~3배 단축
+- ✅ step 2-G2 (v0.0.77) — Dart prepare→ready→go + ready timeout 200ms + 큰 seek race fix 구현 완료 (2026-05-11). 실기기 측정 검증 대기
 - ⏳ step 3 — G-3 측정 → EMA 활용 별도 commit
 - ⏳ 30분+ 측정 검증 (MID-7 자연 해소)
 - ⏳ iOS 회귀 검증

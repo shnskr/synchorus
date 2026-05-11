@@ -351,12 +351,13 @@ v0.0.51 debounce / v0.0.59 마지막-이김 / v0.0.47 NTP 모두 race로 회귀.
 - **합의된 결정** (2026-05-11 확정):
   - ✅ **G2-iii 하이브리드 채택**
   - ✅ **Ready timeout = 200ms**
-  - ✅ **Seek 즉시/대기 분기**: 버퍼 안 = 즉시 (drift 보정 등 작은 seek), 버퍼 밖 = G-2 하이브리드 적용 (시작 시나리오와 동일 처리)
+  - ✅ **Seek 즉시/대기 분기**: 재생 중 큰 seek = G-2 하이브리드 (`syncSeek`이 `_initiatePrepareAndStart` 호출), 일시정지 중 seek = 기존 `seek-notify` 흐름, 작은 drift 보정 seek = `_engine.seekToFrame` 직접 호출 (변경 없음)
   - ✅ **Ready timeout 후 동작**:
-    - (a) 200ms 내 모두 ready → 동시 시작
-    - (b) 미달 있음 → 호스트 + ready된 게스트 즉시 시작, 미달 게스트 예측 점프 catch-up
+    - (a) 200ms 내 모두 ready → 동시 시작 (`ready_then_go`)
+    - (b) 미달 있음 → 호스트 + ready된 게스트 즉시 시작 (`host_immediate_with_catchup`), 미달 게스트는 schedule-play 받아 wallEpochMs에 시작 (디코드 못 따라가면 잠시 무음 후 polling으로 회복)
     - (c) 5초 내 ready 안 됨 → 해당 게스트 dead peer 처리 후보 (기존 heartbeat 메커니즘과 통합, 별도 race 메커니즘 도입 X)
   - ✅ **v0.0.47 `scheduleStart` 인프라 그대로 활용** (`native_audio_service.dart:149-154`) — 추가 native 코드 거의 없음
+  - ✅ **구현 완료** (v0.0.77, 2026-05-11 HISTORY (93)) — `_ReadyCollector` + 메시지 라우팅 + `_initiatePrepareAndStart` + `_handleAudioReady` + `_handleAudioPrepare` + `_resolveAndStart`. 실기기 검증 대기.
 
 ### G-3. 디코드 throughput 동적 캘리브레이션
 

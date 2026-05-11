@@ -19,4 +19,6 @@ object NativeAudio {
     external fun nativeSetMuted(muted: Boolean)
     external fun nativeIsMuted(): Boolean
     external fun nativeUnload(): Boolean
+    // §G G-2: ring buffer [startFrame, endFrame) 디코드 완료 여부.
+    external fun nativeIsFrameRangeReady(startFrame: Long, endFrame: Long): Boolean
 }

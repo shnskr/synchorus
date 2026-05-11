@@ -4789,6 +4789,66 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.76
 
+### 2026-05-11 (93) — v0.0.77 §G step 2-G2 — Dart Ready-then-Go 하이브리드 시작
+
+**배경**: HISTORY (91)에서 csv 깊은 분석으로 잡힌 race — 큰 seek 직후 stale obs + seek 후 ts 비교로 vfDiff 100초+ 발생. v0.0.74에서도 동일 (177초). G-2 하이브리드 시작 패턴이 정확히 이 race fix하는 디자인 (SYNC_ALGORITHM_V2.md §G-2).
+
+**디자인 (§G-2 합의)**:
+- 호스트가 시작/큰 seek 시 `audio-prepare {prepareSeq, targetFrame}` broadcast
+- 게스트는 seek + ring buffer 1초 분량 디코드 wait → `audio-ready` 송신
+- 호스트는 ready timeout 200ms 안에 모두 ready → 동시 시작 (`ready_then_go`)
+- 미달 → 호스트 + ready된 게스트만 즉시 시작, 미달은 catch-up (`host_immediate_with_catchup`)
+- 5초 안에 ready 안 오면 dead peer 후보 (heartbeat 메커니즘 위임)
+- v0.0.47 `scheduleStart(wallEpochMs, fromFrame)` NTP 인프라 그대로 활용
+
+**변경**:
+- `oboe_engine.cpp`: `isFrameRangeReady(start, end)` public 메서드 + JNI export `nativeIsFrameRangeReady` 추가. ring [tail, head)에 [start, end) 포함 여부.
+- `NativeAudio.kt`: `external fun nativeIsFrameRangeReady` 추가
+- `MainActivity.kt`: `isFrameRangeReady` 라우팅 추가
+- `AudioEngine.swift` + `AppDelegate.swift`: iOS 측 `isFrameRangeReady()` (audioFile != nil이면 true — AVAudioFile은 즉시 random access)
+- `native_audio_service.dart`: `Future<bool> isFrameRangeReady(int, int)` 메서드 추가
+- `native_audio_sync_service.dart`:
+  - `_ReadyCollector` 클래스 신설 (prepareSeq + expectedPeers + readyPeers + timeout)
+  - 메시지 라우팅: `audio-prepare` (게스트 처리) / `audio-ready` (호스트 처리)
+  - `_initiatePrepareAndStart(targetFrame)`: 호스트 prepare 모집 시작. 게스트 0이면 즉시 scheduleStart
+  - `_handleAudioReady`: 게스트 ready 수신 + allReady면 즉시 resolve
+  - `_resolveAndStart({forceTimeout})`: scheduleStart broadcast + 호스트 자기 scheduleStart
+  - `_handleAudioPrepare`: 게스트 측. seek + isFrameRangeReady polling (50ms 간격, 5초 timeout) + ready 송신
+  - `syncPlay`: `_engine.start()` 직접 → `_initiatePrepareAndStart(vf)` 호출
+  - `syncSeek`: 재생 중이면 `_initiatePrepareAndStart(target)` (큰 seek race fix), 일시정지 중이면 기존 `seek-notify` 흐름 유지
+
+**상수**:
+- `_readyTimeoutMs = 200` — ready 모집 timeout
+- `_readyDeadPeerTimeoutMs = 5000` — dead peer 후보 (heartbeat 위임)
+- `_scheduleStartMarginMs = 80` — ready → scheduleStart 사이 마진
+
+**csv event 신규** (기존 컬럼 재활용):
+- `event=ready_then_go` — 모두 ready, 동시 시작
+- `event=host_immediate_with_catchup` — 200ms timeout, 호스트 즉시 + 미달 catch-up
+- `event=ready_solo` — 게스트 0, 호스트 단독 즉시 시작
+- `guestVf 컬럼` — wait_ms (ready 모집 wait 시간) 재활용
+
+**검증**:
+- ✅ `flutter analyze` No issues
+- ✅ `flutter build apk --debug` 통과 (14.1s, NDK + Kotlin + Dart)
+- ⏳ 실기기 측정 필요:
+  - 큰 seek 시 vfDiff 100초+ → G-2로 fix 확인 (HISTORY (91) 91/156/177초 → 0 또는 매우 작음 기대)
+  - 평상 시 재생/작은 seek 회귀 0
+  - 첫 입장 후 시작 시 ready_then_go 동작 확인 (logcat `[G2-PREPARE/READY/RESOLVE]`)
+
+**회귀 위험**: 보통.
+- syncPlay/syncSeek 흐름 변경 — 가장 자주 호출되는 메서드
+- 새 race 도입 가능성 (prepareSeq + ReadyCollector 동기화)
+- 완화: `_activeReady?.timeout?.cancel()` + `prepareSeq` 비교로 stale 처리, 컴파일 통과
+- 회귀 발생 시 빠른 롤백 (단일 commit 격리)
+
+**다음 (§G step 3)**:
+- G-3 측정 세션 (디코드 throughput EMA + in-flight 폴링) → 별도 PR
+- 30분+ 측정 검증 (MID-7 자연 해소 — ring buffer로 14분 한도 풀림)
+- iOS 회귀 검증
+
+**빌드**: v0.0.77
+
 ---
 
 #### 미해결 이슈
