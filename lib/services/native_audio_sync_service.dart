@@ -172,6 +172,8 @@ class NativeAudioSyncService {
         _handleDriftReport(message);
       } else if (type == 'download-report' && _isHost) {
         _handleDownloadReport(message);
+      } else if (type == 'decode-load-report' && _isHost) {
+        _handleDecodeLoadReport(message);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -379,6 +381,18 @@ class NativeAudioSyncService {
     }
     sw.stop();
     debugPrint('[DECODE-HOST] loadFile took ${sw.elapsedMilliseconds}ms');
+    // §G step 1: decode 측정값 csv 기록 (G-3 EMA 캘리브레이션 사전 데이터)
+    final hostDecodeLoadMs = sw.elapsedMilliseconds;
+    final hostDecodeTotalFrames = loadResult.totalFrames ?? 0;
+    final hostDecodeThroughputFpms = hostDecodeLoadMs > 0
+        ? hostDecodeTotalFrames / hostDecodeLoadMs
+        : 0.0;
+    _logDecodeLoad(
+      guestId: 'host',
+      decodeLoadMs: hostDecodeLoadMs,
+      decodeTotalFrames: hostDecodeTotalFrames,
+      decodeThroughputFpms: hostDecodeThroughputFpms,
+    );
     if (!loadResult.ok) {
       _isLoading = false;
       _loadingController.add(false);
@@ -612,6 +626,55 @@ class NativeAudioSyncService {
     );
   }
 
+  /// §G step 1: 게스트로부터 받은 decode 측정값을 logger에 기록.
+  void _handleDecodeLoadReport(Map<String, dynamic> message) {
+    final from = message['_from'] as String?;
+    final data = message['data'] as Map<String, dynamic>?;
+    if (from == null || data == null) return;
+    final decodeLoadMs = (data['decodeLoadMs'] as num?)?.toInt() ?? 0;
+    final decodeTotalFrames = (data['decodeTotalFrames'] as num?)?.toInt() ?? 0;
+    final decodeThroughputFpms =
+        (data['decodeThroughputFpms'] as num?)?.toDouble() ?? 0;
+    _logDecodeLoad(
+      guestId: from,
+      decodeLoadMs: decodeLoadMs,
+      decodeTotalFrames: decodeTotalFrames,
+      decodeThroughputFpms: decodeThroughputFpms,
+    );
+  }
+
+  /// §G step 1: decode_load event를 csv에 기록 (호스트 자체 + 게스트 보고 공통).
+  /// G-3 EMA 캘리브레이션 사전 데이터 확보용.
+  void _logDecodeLoad({
+    required String guestId,
+    required int decodeLoadMs,
+    required int decodeTotalFrames,
+    required double decodeThroughputFpms,
+  }) {
+    if (!_isHost) return;
+    final wallMs = DateTime.now().millisecondsSinceEpoch;
+    _logger.log(
+      wallMs: wallMs,
+      guestId: guestId,
+      driftMs: 0,
+      vfDiffMs: 0,
+      hostObsWall: wallMs,
+      offsetMs: 0,
+      hostVf: 0,
+      guestVf: 0,
+      seekCount: 0,
+      decodeLoadMs: decodeLoadMs,
+      decodeTotalFrames: decodeTotalFrames,
+      decodeThroughputFpms: decodeThroughputFpms,
+      event: 'decode_load',
+    );
+    debugPrint(
+      '[DECODE-LOAD] from=$guestId loadMs=$decodeLoadMs '
+      'frames=$decodeTotalFrames '
+      'throughput=${decodeThroughputFpms.toStringAsFixed(2)} f/ms',
+    );
+  }
+
   /// 호스트 자기 이벤트(syncPlay/Pause/Seek)를 logger에 직접 기록.
   /// guestId는 'host'로 박아 게스트 보고와 구분. drift_ms/vf_diff_ms 등은
   /// 호스트 이벤트엔 의미 없어 0으로 둠. host_seek 시 hostVf에 target frame,
@@ -833,6 +896,23 @@ class NativeAudioSyncService {
       final loadResult = await _engine.loadFile(tempFile.path);
       swDecode.stop();
       debugPrint('[DECODE-GUEST] loadFile took ${swDecode.elapsedMilliseconds}ms');
+
+      // §G step 1: decode 측정값 호스트에 보고 (csv 캘리브레이션 데이터)
+      if (_downloadSessionId == mySession && !_downloadAborted) {
+        final guestDecodeLoadMs = swDecode.elapsedMilliseconds;
+        final guestDecodeTotalFrames = loadResult.totalFrames ?? 0;
+        final guestDecodeThroughputFpms = guestDecodeLoadMs > 0
+            ? guestDecodeTotalFrames / guestDecodeLoadMs
+            : 0.0;
+        _p2p.sendToHost({
+          'type': 'decode-load-report',
+          'data': {
+            'decodeLoadMs': guestDecodeLoadMs,
+            'decodeTotalFrames': guestDecodeTotalFrames,
+            'decodeThroughputFpms': guestDecodeThroughputFpms,
+          },
+        });
+      }
 
       // 디코드 완료 후 세션 유효성 재확인
       if (_downloadSessionId != mySession) {

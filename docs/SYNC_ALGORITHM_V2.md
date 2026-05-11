@@ -281,6 +281,139 @@ v0.0.51 debounce / v0.0.59 마지막-이김 / v0.0.47 NTP 모두 race로 회귀.
 
 ---
 
+## G. PCM streaming + 하이브리드 시작 패턴 (2026-05-11 신규)
+
+**배경**:
+- Android 현행 `oboe_engine.cpp:155` `mDecodedData.assign(estFrames × ch × sizeof(int16_t))` 사전할당 패턴 → 곡 길이 비례 메모리 (5분 ≈ 58MB), 14분 한도 (`:143` 150MB cap). PLAN MID-7 30분+ 측정 막힘.
+- iOS는 `AVAudioFile + scheduleSegment`가 OS 레벨 streaming이라 이미 무관 → 이번 변경은 **Android를 iOS 동작 모델로 정렬**.
+- 부수적으로 시작 / 큰 seek 시점의 sync 잔재 처리 패턴도 같이 명세.
+
+### G-1. PCM 메모리 모델 — 사전할당 → Ring buffer
+
+- **선택지**:
+
+  | 옵션 | 메모리 | 곡 길이 한도 | 구현 비용 | seek 비용 |
+  |---|---|---|---|---|
+  | (현행) 전체 사전할당 | 곡 비례 (5분=58MB) | 14분 | 0 (현행) | 항상 즉시 |
+  | (G1-A) Ring buffer 고정 60s | 일정 (~11.5MB) | 무제한 | 중간~큼 | 버퍼 안=즉시, 밖=재디코드 |
+  | (G1-B) 청크 LRU 캐시 | 조절 가능 | 무제한 | 큼 | 캐시 hit=0, miss=재디코드 |
+  | (G1-C) 디스크 PCM + mmap | ~0 RAM | 디스크 한도 | 중간 | 디스크 seek (SSD ms) |
+
+- **race 시나리오 시뮬레이션**:
+  - **사용자 큰 seek 연타** (10분 → 30분 → 5분 → 25분, 0.3초 간격): 디코드 head가 매번 점프 + 직전 디코드 abort. abort 안전성 (디코드 스레드 mid-frame 종료) 확인 필요. 현행 `mDecodeAbort` (`oboe_engine.cpp:166`) 패턴 재사용 가능.
+  - **재생 중 OS swap-out** (백그라운드 진입 → 메모리 회수): ring buffer는 일정 크기라 swap-out 영향 작음. 사전할당은 큰 영역 swap → 복귀 시 page fault 폭증.
+  - **디코드 underrun** (디코드 스레드가 재생보다 늦음): 재생 head가 디코드 head를 따라잡으면 무음 발생. 안전 마진 (Pre-fill) 필수.
+
+- **검증 방법**: csv 신규 컬럼:
+  - `pcm_buf_used_ms`: ring buffer 점유 분량 (ms)
+  - `pcm_buf_underrun_count`: 재생 head가 디코드 head 따라잡은 횟수
+  - `decode_throughput_frames_per_ms`: 매 디코드 cycle throughput EMA
+  - 30분+ 측정 (PLAN MID-7) 자연 해소: 이전 14분 한도 → 무제한.
+
+- **합의된 결정** (2026-05-11 확정):
+  - ✅ **G1-A Ring buffer 채택** (단일성, iOS 정렬, race 안전성)
+  - ✅ **버퍼 크기 60초** (~11.5MB) — 음악 앱 사용 패턴에 충분
+  - ✅ **behind/ahead 분배 = 10s / 50s** — 짧은 rewind 흡수 + 디코드 여유 충분
+  - ✅ **Pre-fill (재생 시작 임계) = 1초 분량** — mp3 디코드 빠르니 안전 마진 1초
+  - ✅ **`TOO_LONG` 한도 완전 제거** (`oboe_engine.cpp:143-148` 삭제) — streaming이라 의미 없음
+
+### G-2. 시작 / 큰 seek 패턴 — Ready-then-Go 하이브리드
+
+기존 v3 폐루프(평상 시 ±5~7ms, HISTORY HIGH 4 §D-2 검증)는 **시작 후 1~2초 내 수렴**. 잔재는 시작 직후만 청각 인지 가능 → 시작 시점 처리만 신규 결정.
+
+**실측으로 잡힌 회귀 (2026-05-11 HISTORY (91))**:
+- 큰 seek (사용자 슬라이더) 직후 호스트 obs broadcast 갭 (최대 500ms) 안에 게스트 syncSeek 처리 → `_fallbackAlignment`가 stale obs + seek 후 ts 비교 → driftMs 100초+ 발생
+- v0.0.74 측정 vfDiff abs_max 177,845ms / v0.0.75 156,028ms — step 1 변경 무관 확정 (v0.0.74 기존 race)
+- 회복: fallback seek (driftMs>30 → seekToFrame) 1~2초 내 ±5ms 수렴, 청감은 회복 구간 인지
+- **G-2 하이브리드가 이 race를 정확히 fix** (ready timeout 200ms로 양측 obs/anchor 동기화 후 시작 → race 0)
+
+- **선택지**:
+
+  | 옵션 | 호스트 응답성 | 시작 시점 잔재 (정상/BT) | 청각 인지 |
+  |---|---|---|---|
+  | (G2-i) Ready-then-Go (모든 게스트 ready 대기) | 0.3~0.5초 대기 | ±10ms / ±20ms | 거의 없음 |
+  | (G2-ii) 호스트 즉시 + 게스트 catch-up (예측 점프) | 즉시 | ±70~150ms / ±200ms+ | 명확 |
+  | (G2-iii) 하이브리드 (ready timeout 200ms) | 정상=동시 / 느린 게스트 있을 때만 즉시 | ±10ms / ±50ms | 정상=없음, BT=살짝 |
+
+- **race 시나리오 시뮬레이션**:
+  - **사용자 seek 후 빠른 재seek** (T0: 30분 broadcast → T0+150ms: 5분 broadcast): 게스트가 첫 prepare 디코드 중 두 번째 도착. `_downloadSessionId` 패턴 (`native_audio_sync_service.dart:710`) 응용 → `_seekSessionId` 도입, 첫 디코드 abort + 두 번째로 진행.
+  - **느린 게스트 ready 200ms 미달** (디코드 슬로우 디바이스): 호스트 + ready된 게스트는 즉시 시작, 느린 게스트는 예측 점프로 catch-up. 시작 후 폐루프(audio-obs)가 1~2초 내 ±5ms 수렴.
+  - **게스트 ready 신호 dropped (네트워크 jitter)**: 5초 timeout → 해당 게스트 dead peer 후보 (P2P heartbeat 기존 메커니즘 재사용).
+
+- **검증 방법**: csv 신규 컬럼:
+  - `start_pattern`: `ready_then_go` / `host_immediate_with_catchup` / `single_guest_only`
+  - `ready_wait_ms`: 호스트가 ready 신호 대기한 시간 (0 = 즉시 시작)
+  - `start_drift_ms`: 시작 직후 첫 audio-obs 측정 drift (ready-then-go 검증)
+  - `catchup_recovery_ms`: 시작 후 ±5ms 도달까지 시간 (하이브리드 효과 검증)
+  - 청감 테스트: 같은 공간 호스트+게스트 청취 시 시작 시점 인지 가능성.
+
+- **합의된 결정** (2026-05-11 확정):
+  - ✅ **G2-iii 하이브리드 채택**
+  - ✅ **Ready timeout = 200ms**
+  - ✅ **Seek 즉시/대기 분기**: 버퍼 안 = 즉시 (drift 보정 등 작은 seek), 버퍼 밖 = G-2 하이브리드 적용 (시작 시나리오와 동일 처리)
+  - ✅ **Ready timeout 후 동작**:
+    - (a) 200ms 내 모두 ready → 동시 시작
+    - (b) 미달 있음 → 호스트 + ready된 게스트 즉시 시작, 미달 게스트 예측 점프 catch-up
+    - (c) 5초 내 ready 안 됨 → 해당 게스트 dead peer 처리 후보 (기존 heartbeat 메커니즘과 통합, 별도 race 메커니즘 도입 X)
+  - ✅ **v0.0.47 `scheduleStart` 인프라 그대로 활용** (`native_audio_service.dart:149-154`) — 추가 native 코드 거의 없음
+
+### G-3. 디코드 throughput 동적 캘리브레이션
+
+G-2 하이브리드의 "예측 점프" (catch-up 게스트가 미래 호스트 위치로 seek) 정확도를 위해 디코드 throughput 학습 필요.
+
+- **선택지**:
+
+  | 옵션 | 정확도 | 구현 비용 | 적용 시점 |
+  |---|---|---|---|
+  | (G3-A) 정적 평균값 (기기별 hardcoded) | ±50~100ms 잔재 | 0 | 즉시 |
+  | (G3-B) 디코드 throughput EMA 학습 | ±10~30ms 잔재 | 작음 | 첫 N회 부정확 후 수렴 |
+  | (G3-C) in-flight 폴링 (CPU spike 감지) | ±20~50ms 잔재 (spike 발생 시) | 중간 | 실시간 |
+  | (G3-D) 누적 잔재 학습 (장기 보정) | 환경별 fine-tune | 큼 | 첫 점프 부정확 후 수렴 |
+
+- **race 시나리오 시뮬레이션**:
+  - **첫 점프 (학습 데이터 0)**: G3-A 정적 평균값으로 fallback. EMA는 첫 디코드 후 갱신.
+  - **CPU spike 발생 중 점프**: G3-B EMA만으론 부정확 (평균값 < 실제). G3-C in-flight 폴링이 디코드 시작 후 throughput 실측 → `cancelSchedule` + 재등록 (다만 잦은 갱신은 sync 흔들림, threshold 필요).
+  - **BT 라우팅 변동 중**: throughput 자체는 무관, `outputLatency` 변동으로 잔재 발생. 사후 폐루프(기존)에 위임.
+
+- **검증 방법**: csv 신규 컬럼:
+  - `decode_throughput_ema`: EMA 학습값 (frames/ms)
+  - `predicted_decode_ms`: 예측 디코드 시간
+  - `actual_decode_ms`: 실측 디코드 시간
+  - `prediction_error_ms`: |예측 - 실측|
+  - 측정 세션: 정상 환경 + CPU 부하 환경 + BT 환경 분리.
+
+- **합의된 결정** (2026-05-11 확정):
+  - ✅ **G3-B + G3-C 결합** — EMA 학습 (안정 시) + in-flight 폴링 (spike 대응)
+  - ✅ **G3-D는 후속 작업** — 첫 출시 후 데이터 누적 시 검토
+  - ✅ **측정 → 활용 분리**: 캘리브레이션 csv 컬럼은 **G-1 ring buffer PR과 같이 추가**해 데이터 먼저 확보, EMA 활용은 데이터 검토 후 별도 PR
+
+### G-4. 작업 순서
+
+`## 작업 흐름 (강제)` 형식 따라:
+
+1. **csv 측정 인프라 추가** (G-1, G-2, G-3 컬럼 모두) — sync 동작 변경 0
+2. **이 §G 섹션 사용자 합의** (위 confirm 대기 항목 모두 결정)
+3. **단일 commit으로 G-1 ring buffer 구현** (`oboe_engine.cpp` 리팩터 + `TOO_LONG` 제거)
+4. **단일 commit으로 G-2 하이브리드 시작 구현** (Dart `native_audio_sync_service.dart` ready 흐름 + iOS native scheduleSegment ready 콜백)
+5. **G-3 캘리브레이션 측정 세션** (정상/CPU 부하/BT 환경 분리, 1일)
+6. **G-3 EMA 활용 commit** (예측 점프 정확도 ↑)
+7. **30분+ 측정 검증** (PLAN MID-7 자연 해소 확인)
+8. **iOS 회귀 검증** (변경 작지만 ready 흐름 추가, 기존 단순 시작 시나리오 회귀 없음 확인)
+
+각 commit 후 청감 검증 + csv 분석. 회귀 시 즉시 롤백.
+
+### G-5. iOS 영향 정리
+
+| # | 항목 | iOS 영향 |
+|---|---|---|
+| G-1 | Ring buffer | 없음 (이미 streaming) |
+| G-2 | 하이브리드 시작 | **있음** — Dart 측 ready 흐름 + iOS native `scheduleSegment` 후 ready 콜백 추가 |
+| G-3 | 디코드 throughput | iOS는 `loadFile` 시간 거의 0 → throughput 의미 작음. 대신 `scheduleSegment → 첫 frame 출력까지 시간` 측정 필요 (별도 지표) |
+
+iOS native 코드 변경: `AudioEngine.swift`에 ready 콜백 메서드 추가 정도. 작음.
+
+---
+
 ## 핵심 학습 (2026-04-28 세션 종합)
 
 이 문서를 채울 때 잊지 말 것:

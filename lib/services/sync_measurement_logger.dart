@@ -49,8 +49,13 @@ class SyncMeasurementLogger {
     // raw_offset_ms: 가장 최근 ping/pong sample의 raw offset (EMA 적용 전)
     // win_min_raw_offset_ms: window 내 min-RTT sample raw offset (실제 EMA 입력)
     // last_rtt_ms / win_min_rtt_ms: 최근/window-min RTT — RTT outlier 추적
+    // §G step 1 진단 컬럼 (2026-05-11): G-3 EMA 캘리브레이션 데이터 사전 확보용.
+    // decode_load_ms: native loadFile 소요 시간 (ms)
+    // decode_total_frames: loadFile 직후 totalFrames (없으면 0)
+    // decode_throughput_fpms: decode_total_frames / decode_load_ms (frames per ms)
+    // event='decode_load' row만 의미, 다른 row는 모두 0.
     _sink!.writeln(
-      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,decode_load_ms,decode_total_frames,decode_throughput_fpms,event',
     );
     _nextSeq = 0;
     _isActive = true;
@@ -76,12 +81,15 @@ class SyncMeasurementLogger {
     double winMinRawOffsetMs = 0,
     int lastRttMs = 0,
     int winMinRttMs = 0,
+    int decodeLoadMs = 0,
+    int decodeTotalFrames = 0,
+    double decodeThroughputFpms = 0,
     String event = 'drift',
   }) {
     if (!_isActive) return;
     final seq = _nextSeq++;
     _sink?.writeln(
-      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$decodeLoadMs,$decodeTotalFrames,${decodeThroughputFpms.toStringAsFixed(2)},$event',
     );
   }
 

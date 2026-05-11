@@ -24,7 +24,22 @@ class MainActivity : AudioServiceActivity() {
                             Thread {
                                 val ok = NativeAudio.nativeLoadFile(path)
                                 if (ok) {
-                                    mainHandler.post { result.success(true) }
+                                    // §G step 1: iOS와 형식 통일 (Map 반환).
+                                    // arr[5]=sampleRate, arr[6]=totalFrames — mDecodedSampleRate/
+                                    // mDecodedTotalFrames에서 직접 추출 (ts.ok 무관).
+                                    // Dart LoadResult.fromMap이 sampleRate Double 처리하므로 toDouble.
+                                    val arr = NativeAudio.nativeGetTimestamp()
+                                    val totalFrames = arr[6]
+                                    val sampleRate = arr[5].toDouble()
+                                    mainHandler.post {
+                                        result.success(
+                                            mapOf(
+                                                "ok" to true,
+                                                "totalFrames" to totalFrames,
+                                                "sampleRate" to sampleRate,
+                                            )
+                                        )
+                                    }
                                 } else {
                                     val err = NativeAudio.nativeGetLastError()
                                     mainHandler.post { result.error("LOAD_FAILED", err, null) }

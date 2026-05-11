@@ -101,6 +101,8 @@
 
 ### HIGH
 
+**§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms (모두 ready=동시 시작 / 미달=호스트 즉시+catch-up / 5초 timeout=heartbeat 위임), G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR. 작업 순서 (§G-4): G-1 ring buffer commit (csv 컬럼 동시) → G-2 하이브리드 시작 commit → G-3 측정 → G-3 EMA 활용 commit → 30분+ 측정 검증 (MID-7 자연 해소) → iOS 회귀 검증.
+
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 
 진행 결과:
@@ -138,7 +140,7 @@
 
 6. ~~**EMA 단독 cherry-pick (B-1) 검토**~~ — **우선순위 ↓ (2026-05-02 (59))**. 측정 결과 outputLatency anchored vs current diff = 0.22ms로 사실상 0 → EMA 보존 효과 미미할 것으로 강한 신호. 본 항목은 (A)/(B) root cause fix 진행 후에도 잔재가 있을 때만 재고려.
 
-7. **30분+ 장시간 idle 측정** — rate drift 누적 검증. **2026-05-02 (77) v0.0.67 자동화 12분 측정에서 vfDiff signed mean -5.25ms로 큰 추세 미관찰**. 30분 측정은 14분 PCM 한계(`oboe_engine.cpp:143` 150MB)로 직접 불가. §C 결정은 PCM streaming 구조 변경 후로 미룸. 또는 측정 mp3를 여러 번 연속 재생(seek 0 반복)으로 우회 가능 — 다만 첫 anchor reset 발생.
+7. **30분+ 장시간 idle 측정** — rate drift 누적 검증. **2026-05-02 (77) v0.0.67 자동화 12분 측정에서 vfDiff signed mean -5.25ms로 큰 추세 미관찰**. 30분 측정은 14분 PCM 한계(`oboe_engine.cpp:143` 150MB)로 직접 불가. §C 결정은 PCM streaming 구조 변경 후로 미룸. 또는 측정 mp3를 여러 번 연속 재생(seek 0 반복)으로 우회 가능 — 다만 첫 anchor reset 발생. **2026-05-11 §G 작업으로 14분 한도 자연 해소 예정** (HIGH 영역 §G PCM streaming 항목 참조).
 
 8. **BT 워밍업 잔여 개선 (HISTORY (33-2), (37))**. iPhone 게스트 BT는 처음 ~40초 잔여 패턴. Galaxy+버즈는 ~2초로 양호 (Samsung HAL 정확 보고 추정). iPhone+버즈 케이스 한정 옵션 A(무음 prebuffer + outputLatency 수렴 게이팅) 시도.
 

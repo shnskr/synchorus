@@ -83,7 +83,7 @@ class NativeAudioService {
   /// 성공 시 {ok, totalFrames, sampleRate} 반환, 실패 시 PlatformException throw.
   Future<LoadResult> loadFile(String path) async {
     final result = await _channel.invokeMethod('loadFile', path);
-    // Android: bool, iOS: Map {ok, totalFrames, sampleRate}
+    // Android: Map (§G step 1부터, 이전 bool fallback 호환 유지), iOS: Map
     if (result is bool) {
       return LoadResult(ok: result);
     } else if (result is Map) {
