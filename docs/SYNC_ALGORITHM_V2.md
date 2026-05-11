@@ -316,6 +316,7 @@ v0.0.51 debounce / v0.0.59 마지막-이김 / v0.0.47 NTP 모두 race로 회귀.
   - ✅ **behind/ahead 분배 = 10s / 50s** — 짧은 rewind 흡수 + 디코드 여유 충분
   - ✅ **Pre-fill (재생 시작 임계) = 1초 분량** — mp3 디코드 빠르니 안전 마진 1초
   - ✅ **`TOO_LONG` 한도 완전 제거** (`oboe_engine.cpp:143-148` 삭제) — streaming이라 의미 없음
+  - ✅ **G-1과 G-2 분리 commit (2026-05-11)** — 원안 단일 commit에서 변경. 이유: native 변경 + Dart 상태머신 묶음이 회귀 추적 어려움. G-1 단독 검증으로 ring buffer 정상 동작 격리 검증 후 G-2 별도 commit (race 격리). G-1 단독은 큰 seek 시 v0.0.74 fallback 패턴 그대로 유지.
 
 ### G-2. 시작 / 큰 seek 패턴 — Ready-then-Go 하이브리드
 

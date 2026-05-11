@@ -101,7 +101,15 @@
 
 ### HIGH
 
-**§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms (모두 ready=동시 시작 / 미달=호스트 즉시+catch-up / 5초 timeout=heartbeat 위임), G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR. 작업 순서 (§G-4): G-1 ring buffer commit (csv 컬럼 동시) → G-2 하이브리드 시작 commit → G-3 측정 → G-3 EMA 활용 commit → 30분+ 측정 검증 (MID-7 자연 해소) → iOS 회귀 검증.
+**§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms, G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR.
+
+진행 상태:
+- ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
+- ⏳ step 2-G1 (v0.0.76 예정) — native ring buffer만 단독 commit. G-2와 분리 (회귀 추적 격리)
+- ⏳ step 2-G2 (v0.0.77 예정) — Dart prepare→ready→go 흐름 + ready timeout 200ms + 큰 seek race fix
+- ⏳ step 3 — G-3 측정 → EMA 활용 별도 commit
+- ⏳ 30분+ 측정 검증 (MID-7 자연 해소)
+- ⏳ iOS 회귀 검증
 
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 

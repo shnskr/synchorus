@@ -4747,6 +4747,48 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.75
 
+### 2026-05-11 (92) — v0.0.76 §G step 2-G1 — native ring buffer 단독 (G-2와 분리)
+
+**배경**: §G step 2 원안은 G-1 + G-2 한 commit. 작업 진행 중 native 변경 + Dart 상태머신 묶음이 회귀 추적 어려움 + race 격리 위험 발견 → 분리 commit으로 사용자 합의 변경.
+
+**G-1 (이번 commit)**: native ring buffer만. Dart 측 변경 0.
+**G-2 (다음 commit, v0.0.77 예정)**: Dart prepare→ready→go 흐름.
+
+**변경** (`oboe_engine.cpp`):
+- ring buffer 상수 추가: `kRingSeconds=60`, `kRingBehindSeconds=10`, `kRingAheadSeconds=50`
+- 멤버 변수: `mRingHead`/`mRingTail` (atomic) + `mRingMutex`/`mRingCv` 추가, `mSeqDecodeEnd`/`mSeekDecodeStart`/`mSeekDecodeEnd` 제거
+- `mRingCapacityFrames = sampleRate × 60` — 60s 분량 사전할당 (~11.5MB, 곡 길이 무관)
+- `loadFile`: 사전할당 (`estFrames × ch × 2B`) → ring (`60s × sr × ch × 2B`). **`TOO_LONG` 한도 완전 제거** (14분 한도 → 무제한).
+- `isFrameDecoded`: 두 영역(seq+seek) 비교 → 단일 윈도우 `[tail, head)` 비교
+- `ringFrameIdx(contentFrame)` helper 신규 (modular)
+- `onAudioReady`: vf가 ring 윈도우 안이면 modular index로 read, 밖이면 무음. 매 콜백 끝에 `tail = max(tail, vf - behindFrames)` atomic 갱신 (lock 없음)
+- `seekToFrame`: 윈도우 안=즉시 (vf만), 밖=`mRingHead/mRingTail = newFrame` reset + `mDecodeSeekTarget` 트리거 + `mRingCv` notify
+- `decodeLoop`: ring 가득 차면 (`head - tail >= capacity`) `mRingCv.wait_for(50ms)`, modular write (wrap-around 시 두 chunk 분할), `mRingHead.store(writeFrame)` advance
+- `fillGaps` 함수 완전 제거 (sliding window라 갭 개념 없음)
+
+**검증**:
+- ✅ `flutter build apk --debug` 통과 (8.7s, NDK incremental rebuild)
+- ⏳ 실기기 측정 필요:
+  - 5분 곡 로드 시 메모리 ~11.5MB (이전 ~58MB) 확인
+  - 14분+ 곡 로드 가능 (이전 `TOO_LONG`) 확인
+  - 일반 재생/일시정지/작은 seek 정상 (회귀 없음)
+  - 큰 seek 시 v0.0.74 fallback 패턴 그대로 (G-2에서 fix 예정, 이번 commit엔 그대로 유지)
+
+**회귀 위험 평가**:
+- 보통 — native 핵심 함수 8개 변경, ring buffer modular index + wrap-around 처리 신규
+- 완화: 컴파일 통과 + 단계적 검증 + 큰 seek 시 회복은 기존 fallback alignment 메커니즘이 처리
+- 회귀 발생 시 빠른 롤백 (단일 commit 격리)
+
+**다음 (§G step 2-G2)**:
+- Dart prepare→ready→go 흐름
+- 호스트 측 ready 모집 (timeout 200ms)
+- 게스트 측 prepare 핸들러 + ready 송신
+- 큰 seek 시 G-2 하이브리드 적용 (vfDiff 100초+ race fix)
+- 신규 P2P 메시지 (`audio-prepare`, `audio-ready`)
+- csv 컬럼 (`start_pattern`, `ready_wait_ms`, `start_drift_ms`, `catchup_recovery_ms`)
+
+**빌드**: v0.0.76
+
 ---
 
 #### 미해결 이슈
