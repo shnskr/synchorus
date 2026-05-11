@@ -106,7 +106,8 @@
 진행 상태:
 - ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
 - ✅ step 2-G1 (v0.0.76) — native ring buffer 단독 완료 (2026-05-11). 51분 곡 로드 검증, decode 시간 2~3배 단축
-- ✅ step 2-G2 (v0.0.77) — Dart prepare→ready→go + ready timeout 200ms + 큰 seek race fix 구현 완료 (2026-05-11). 실기기 측정 검증 대기
+- ❌ step 2-G2 (v0.0.77) — Dart prepare→ready→go 구현 후 실기기 회귀 발견 ("호스트 큰 seek 후 무음, 새 음원 로드해야 풀림"). v0.0.78 fix 시도(seekToFrame이 ring head/tail 안 건드림) 도 미해소. **v0.0.78에서 revert → G-1 baseline 복귀 (2026-05-12 (94))**. 재시도 시 `_ReadyCollector` ↔ `decodeLoop` ↔ `seekToFrame` 셋의 상태 전이를 atomic만이 아닌 mutex/cv로 단일 thread에서 갱신하도록 재설계 필요.
+- ⏳ step 2-G2 재설계 (보류) — decodeLoop stuck 원인 격리 + 동기화 재설계 후 재시도
 - ⏳ step 3 — G-3 측정 → EMA 활용 별도 commit
 - ⏳ 30분+ 측정 검증 (MID-7 자연 해소)
 - ⏳ iOS 회귀 검증

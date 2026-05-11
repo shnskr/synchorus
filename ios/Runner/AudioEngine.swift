@@ -23,12 +23,6 @@ class AudioEngine {
 
     // MARK: - Public API
 
-    /// §G G-2: iOS는 AVAudioFile 즉시 random access (OS streaming). audioFile 로드 후
-    /// 항상 ready. Android의 ring buffer 디코드 wait과 달리 즉시 신호 가능.
-    func isFrameRangeReady() -> Bool {
-        return audioFile != nil
-    }
-
     func loadFile(_ path: String) -> [String: Any] {
         if isEngineRunning { stop() }
 

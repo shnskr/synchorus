@@ -357,7 +357,7 @@ v0.0.51 debounce / v0.0.59 마지막-이김 / v0.0.47 NTP 모두 race로 회귀.
     - (b) 미달 있음 → 호스트 + ready된 게스트 즉시 시작 (`host_immediate_with_catchup`), 미달 게스트는 schedule-play 받아 wallEpochMs에 시작 (디코드 못 따라가면 잠시 무음 후 polling으로 회복)
     - (c) 5초 내 ready 안 됨 → 해당 게스트 dead peer 처리 후보 (기존 heartbeat 메커니즘과 통합, 별도 race 메커니즘 도입 X)
   - ✅ **v0.0.47 `scheduleStart` 인프라 그대로 활용** (`native_audio_service.dart:149-154`) — 추가 native 코드 거의 없음
-  - ✅ **구현 완료** (v0.0.77, 2026-05-11 HISTORY (93)) — `_ReadyCollector` + 메시지 라우팅 + `_initiatePrepareAndStart` + `_handleAudioReady` + `_handleAudioPrepare` + `_resolveAndStart`. 실기기 검증 대기.
+  - ⚠️ **v0.0.77 구현 후 회귀 → v0.0.78 revert (2026-05-12 HISTORY (94))**. 실기기에서 "호스트 큰 seek 직후 무음, 새 음원 로드해야 풀림" 증상. 두 차례 fix 시도(원래 + seekToFrame이 ring head/tail 미수정) 모두 stuck 미해소 → decodeLoop가 멈춘다는 강한 신호. G-1 ring buffer baseline (v0.0.76)으로 복귀. **재시도 전제**: `_ReadyCollector` (Dart 측) ↔ `decodeLoop` (native) ↔ `seekToFrame` (native) 셋의 상태 전이를 atomic만이 아니라 native 측에서 단일 mutex/cv로 직렬화하는 동기화 재설계 필요. ring head/tail/seek target은 decodeLoop 단일 thread에서만 set, 외부는 "요청 큐"로만 영향.
 
 ### G-3. 디코드 throughput 동적 캘리브레이션
 

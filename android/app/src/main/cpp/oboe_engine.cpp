@@ -573,16 +573,6 @@ public:
 
     int64_t getTotalFrames() const { return mDecodedTotalFrames; }
 
-    // §G G-2 ready 판정: ring [tail, head)에 [startFrame, endFrame)이 완전히 포함?
-    // 게스트가 prepare 후 1초 분량 디코드 완료 polling용.
-    bool isFrameRangeReady(int64_t startFrame, int64_t endFrame) const {
-        if (!mFileLoaded) return false;
-        if (endFrame <= startFrame) return true;
-        const int64_t tail = mRingTail.load(std::memory_order_acquire);
-        const int64_t head = mRingHead.load(std::memory_order_acquire);
-        return startFrame >= tail && endFrame <= head;
-    }
-
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* stream,
         void* audioData,
@@ -1093,15 +1083,6 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeUnload(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().unload() ? JNI_TRUE : JNI_FALSE;
-}
-
-// §G G-2: ring [tail, head)에 [startFrame, endFrame) 포함 여부.
-JNIEXPORT jboolean JNICALL
-Java_com_synchorus_synchorus_NativeAudio_nativeIsFrameRangeReady(
-    JNIEnv* /*env*/, jobject /*thiz*/,
-    jlong startFrame, jlong endFrame) {
-    return engine().isFrameRangeReady(startFrame, endFrame)
-        ? JNI_TRUE : JNI_FALSE;
 }
 
 }

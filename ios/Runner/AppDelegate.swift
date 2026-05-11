@@ -77,18 +77,6 @@ import UIKit
                 result(self.audioEngine.isMuted())
             case "unload":
                 result(self.audioEngine.unload())
-            case "isFrameRangeReady":
-                // §G G-2: iOS는 AVAudioFile 즉시 random access. audioFile 로드돼있으면 항상 ready.
-                guard let args = call.arguments as? [String: Any],
-                      let _ = (args["startFrame"] as? NSNumber)?.int64Value,
-                      let _ = (args["endFrame"] as? NSNumber)?.int64Value
-                else {
-                    result(FlutterError(code: "BAD_ARGS",
-                                        message: "isFrameRangeReady requires startFrame+endFrame",
-                                        details: nil))
-                    return
-                }
-                result(self.audioEngine.isFrameRangeReady())
             default:
                 result(FlutterMethodNotImplemented)
             }

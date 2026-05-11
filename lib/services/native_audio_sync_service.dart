@@ -82,19 +82,6 @@ class NativeAudioSyncService {
   int _seekCount = 0;
   int _seekCooldownUntilMs = 0;
 
-  // ── §G G-2 하이브리드 시작 (Ready-then-Go) ─────────────────
-  // 호스트 측: 시작 / 큰 seek 시 prepare → ready 모집 → scheduleStart 흐름.
-  // ready timeout 200ms (모두 ready=동시 시작 / 미달=호스트 즉시+catch-up).
-  // 5초 안에 ready 안 오면 그 게스트는 dead peer 후보 (heartbeat 위임).
-  // prepareSeq: 동시 prepare 충돌 방지 (사용자 빠른 seek 연타 시 새 prepare → 이전 무효).
-  static const int _readyTimeoutMs = 200;
-  static const int _readyDeadPeerTimeoutMs = 5000;
-  // 호스트 → 게스트가 ready 후 호스트가 scheduleStart 보낸 다음 그 시각까지 마진.
-  // ready 도달 시간 + 네트워크 jitter + clock skew 흡수.
-  static const int _scheduleStartMarginMs = 80;
-  int _prepareSeqCounter = 0;
-  _ReadyCollector? _activeReady;
-
   // ── seek 후 position 점프 방지 ──────────────────────────────
   // seek 직후 폴링이 아직 이전 위치를 반환 → UI에 순간 점프 발생.
   // seek 시 즉시 target position을 emit하고, 일정 시간 폴링 position을 무시.
@@ -187,10 +174,6 @@ class NativeAudioSyncService {
         _handleDownloadReport(message);
       } else if (type == 'decode-load-report' && _isHost) {
         _handleDecodeLoadReport(message);
-      } else if (type == 'audio-prepare' && !_isHost) {
-        await _handleAudioPrepare(message['data']);
-      } else if (type == 'audio-ready' && _isHost) {
-        _handleAudioReady(message);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -466,8 +449,7 @@ class NativeAudioSyncService {
     var vf = await _engine.getVirtualFrame();
     final sr = ts?.sampleRate ?? 0;
     if (ts != null && ts.totalFrames > 0 && vf >= ts.totalFrames) {
-      // 곡 끝 — 처음부터. ring head/tail reset 위해 seekToFrame(0).
-      await _engine.seekToFrame(0);
+      await syncSeek(Duration.zero);
       vf = 0;
     }
 
@@ -482,12 +464,19 @@ class NativeAudioSyncService {
       });
     }
 
-    // §G G-2 하이브리드 시작: prepare → ready 모집 → scheduleStart.
-    // 게스트 0이면 즉시 scheduleStart (모집 skip).
-    debugPrint('[SYNCPLAY-HOST] G-2 prepare initiated, vf=$vf');
-    await _initiatePrepareAndStart(vf);
+    // v0.0.48 롤백: NTP 예약 재생 보류, v0.0.45 동작 회복.
+    // (NTP 코드 인프라는 보존 — 다음 세션 재활용. _engine.scheduleStart / cancelSchedule
+    // 와 schedule-play/schedule-pause 메시지 핸들러 모두 dead path로 남김.)
+    final ok = await _engine.start();
+    if (!ok) return;
+    _playing = true;
+    _playingController.add(true);
+    debugPrint('[SYNCPLAY-HOST] engine.start ok');
 
-    _logHostEvent(event: 'host_play', hostVf: vf);
+    _broadcastObs();
+    _startObsBroadcast();
+
+    _logHostEvent(event: 'host_play');
   }
 
   Future<void> syncPause() async {
@@ -518,22 +507,14 @@ class NativeAudioSyncService {
         (position.inMilliseconds * ts.sampleRate / 1000).round();
     final clampedTarget = targetFrame.clamp(0, ts.totalFrames);
 
-    if (_playing) {
-      // §G G-2: 재생 중 큰 seek → prepare → ready → scheduleStart 흐름.
-      // (작은 drift 보정 seek은 syncSeek 안 거치고 _engine.seekToFrame 직접 호출.)
-      // 재생 중이라 일단 stop (scheduleStart 전 무음).
-      await _engine.stop();
-      debugPrint('[SYNCSEEK-HOST] G-2 prepare, targetFrame=$clampedTarget');
-      await _initiatePrepareAndStart(clampedTarget);
-    } else {
-      // 일시정지 중 seek — 게스트도 같이 점프, 재생 시작 X. 기존 흐름.
-      await _engine.seekToFrame(clampedTarget);
-      _p2p.broadcastToAll({
-        'type': 'seek-notify',
-        'data': {'targetMs': position.inMilliseconds},
-      });
-      _broadcastObs();
-    }
+    // v0.0.48 롤백: 재생 중/정지 모두 seekToFrame 직접 (NTP schedule 사용 안 함).
+    await _engine.seekToFrame(clampedTarget);
+    _p2p.broadcastToAll({
+      'type': 'seek-notify',
+      'data': {'targetMs': position.inMilliseconds},
+    });
+
+    _broadcastObs();
 
     _logHostEvent(
       event: 'host_seek',
@@ -660,188 +641,6 @@ class NativeAudioSyncService {
       decodeTotalFrames: decodeTotalFrames,
       decodeThroughputFpms: decodeThroughputFpms,
     );
-  }
-
-  // ═══════════════════════════════════════════════════════════
-  // §G G-2 하이브리드 시작 (Ready-then-Go) — prepare/ready/scheduleStart 흐름
-  // ═══════════════════════════════════════════════════════════
-
-  /// 호스트: 시작 / 큰 seek 시 prepare 모집 시작.
-  /// targetFrame = 시작/점프할 콘텐츠 frame.
-  /// 게스트 없으면 즉시 scheduleStart, 있으면 ready 모집 (timeout 200ms).
-  Future<void> _initiatePrepareAndStart(int targetFrame) async {
-    if (!_isHost) return;
-
-    // 이전 진행 중 prepare 무효화 (사용자 빠른 seek 연타).
-    _activeReady?.timeout?.cancel();
-    _activeReady?.deadPeerTimeout?.cancel();
-
-    final prepareSeq = ++_prepareSeqCounter;
-    final connectedPeerIds = _p2p.peers.map((p) => p.id).toSet();
-    final initiatedWallMs = DateTime.now().millisecondsSinceEpoch;
-
-    // 호스트 자기는 seek 즉시 (ring buffer 윈도우 안이면 무 비용, 밖이면 디코드 head 점프).
-    await _engine.seekToFrame(targetFrame);
-
-    if (connectedPeerIds.isEmpty) {
-      // 게스트 0 — ready 모집 의미 없음, 즉시 scheduleStart.
-      _activeReady = null;
-      final startWallMs = initiatedWallMs + _scheduleStartMarginMs;
-      await _engine.scheduleStart(startWallMs, targetFrame);
-      _playing = true;
-      _playingController.add(true);
-      _broadcastObs();
-      _startObsBroadcast();
-      _logHostEvent(event: 'ready_solo', hostVf: targetFrame);
-      return;
-    }
-
-    _activeReady = _ReadyCollector(
-      prepareSeq: prepareSeq,
-      targetFrame: targetFrame,
-      expectedPeers: connectedPeerIds,
-      initiatedWallMs: initiatedWallMs,
-    );
-
-    // ready timeout 200ms — 미달 시 catch-up 모드로 즉시 시작.
-    _activeReady!.timeout = Timer(
-      const Duration(milliseconds: _readyTimeoutMs),
-      () => _resolveAndStart(forceTimeout: true),
-    );
-    // 5초 timeout — heartbeat 위임 (별도 dead peer 처리 안 함, logging만).
-    _activeReady!.deadPeerTimeout = Timer(
-      const Duration(milliseconds: _readyDeadPeerTimeoutMs),
-      () {
-        if (_activeReady == null || _activeReady!.prepareSeq != prepareSeq) return;
-        final missing = _activeReady!.missingPeers;
-        if (missing.isNotEmpty) {
-          debugPrint('[G2-DEAD-PEER] prepareSeq=$prepareSeq missing=$missing — heartbeat 위임');
-        }
-      },
-    );
-
-    // prepare broadcast — 게스트가 seek + ring buffer 디코드 wait 후 ready 송신.
-    _p2p.broadcastToAll({
-      'type': 'audio-prepare',
-      'data': {
-        'prepareSeq': prepareSeq,
-        'targetFrame': targetFrame,
-      },
-    });
-
-    debugPrint(
-      '[G2-PREPARE] prepareSeq=$prepareSeq targetFrame=$targetFrame '
-      'expectedPeers=${connectedPeerIds.length}',
-    );
-  }
-
-  /// 호스트: 게스트로부터 ready 신호 받음.
-  void _handleAudioReady(Map<String, dynamic> message) {
-    final from = message['_from'] as String?;
-    final data = message['data'] as Map<String, dynamic>?;
-    if (from == null || data == null) return;
-    final collector = _activeReady;
-    if (collector == null) return;
-    final seq = (data['prepareSeq'] as num?)?.toInt() ?? -1;
-    if (seq != collector.prepareSeq) return; // stale ready
-    if (collector.resolved) return;
-
-    collector.readyPeers.add(from);
-    debugPrint(
-      '[G2-READY] from=$from prepareSeq=$seq '
-      '(${collector.readyPeers.length}/${collector.expectedPeers.length})',
-    );
-
-    if (collector.allReady) {
-      _resolveAndStart(forceTimeout: false);
-    }
-  }
-
-  /// 호스트: 모두 ready 또는 timeout 시 scheduleStart broadcast + 호스트 시작.
-  Future<void> _resolveAndStart({required bool forceTimeout}) async {
-    final collector = _activeReady;
-    if (collector == null || collector.resolved) return;
-    collector.resolved = true;
-    collector.timeout?.cancel();
-
-    final nowWallMs = DateTime.now().millisecondsSinceEpoch;
-    final waitMs = nowWallMs - collector.initiatedWallMs;
-    final startWallMs = nowWallMs + _scheduleStartMarginMs;
-    final pattern = collector.allReady
-        ? 'ready_then_go'
-        : 'host_immediate_with_catchup';
-
-    // scheduleStart broadcast (기존 schedule-play 메시지 재사용).
-    _p2p.broadcastToAll({
-      'type': 'schedule-play',
-      'data': {
-        'wallEpochMs': startWallMs,
-        'fromVf': collector.targetFrame,
-      },
-    });
-
-    // 호스트 자기 scheduleStart.
-    await _engine.scheduleStart(startWallMs, collector.targetFrame);
-    _playing = true;
-    _playingController.add(true);
-    _broadcastObs();
-    _startObsBroadcast();
-
-    debugPrint(
-      '[G2-RESOLVE] pattern=$pattern waitMs=$waitMs '
-      'forceTimeout=$forceTimeout startWallMs=$startWallMs '
-      'targetFrame=${collector.targetFrame}',
-    );
-
-    _logHostEvent(
-      event: pattern,
-      hostVf: collector.targetFrame,
-      targetMs: waitMs,
-    );
-
-    // deadPeerTimeout은 그대로 둠 (5초 안에 미달 게스트 logging).
-  }
-
-  /// 게스트: prepare 받음 → seekToFrame → ring 디코드 wait → ready 송신.
-  Future<void> _handleAudioPrepare(Map<String, dynamic>? data) async {
-    if (data == null) return;
-    final prepareSeq = (data['prepareSeq'] as num?)?.toInt() ?? -1;
-    final targetFrame = (data['targetFrame'] as num?)?.toInt() ?? 0;
-    if (prepareSeq < 0) return;
-
-    debugPrint('[G2-PREPARE-RECV] prepareSeq=$prepareSeq targetFrame=$targetFrame');
-
-    // 새 위치로 점프 (ring 윈도우 안이면 즉시, 밖이면 head/tail reset + decodeLoop 점프).
-    await _engine.seekToFrame(targetFrame);
-
-    // ring buffer 1초 분량 디코드 wait (50ms polling, 5초 timeout).
-    final ts = _engine.latest;
-    final sr = ts?.sampleRate ?? 48000;
-    final readyEndFrame = targetFrame + sr; // 1초 분량
-    final deadline = DateTime.now()
-        .add(const Duration(milliseconds: _readyDeadPeerTimeoutMs));
-    bool ready = false;
-    while (DateTime.now().isBefore(deadline)) {
-      ready = await _engine.isFrameRangeReady(targetFrame, readyEndFrame);
-      if (ready) break;
-      await Future.delayed(const Duration(milliseconds: 50));
-    }
-
-    if (!ready) {
-      debugPrint('[G2-READY-TIMEOUT] prepareSeq=$prepareSeq 5초 내 디코드 미완 — ready 안 보냄');
-      return;
-    }
-
-    final readyWallMs = DateTime.now().millisecondsSinceEpoch;
-    _p2p.sendToHost({
-      'type': 'audio-ready',
-      'data': {
-        'prepareSeq': prepareSeq,
-        'targetFrame': targetFrame,
-        'readyWallMs': readyWallMs,
-      },
-    });
-    debugPrint('[G2-READY-SEND] prepareSeq=$prepareSeq');
   }
 
   /// §G step 1: decode_load event를 csv에 기록 (호스트 자체 + 게스트 보고 공통).
@@ -1900,9 +1699,6 @@ class NativeAudioSyncService {
 
   Future<void> dispose() async {
     cleanupSync();
-    _activeReady?.timeout?.cancel();
-    _activeReady?.deadPeerTimeout?.cancel();
-    _activeReady = null;
     _positionController.close();
     _durationController.close();
     _playingController.close();
@@ -1914,28 +1710,4 @@ class NativeAudioSyncService {
     await _engine.dispose();
     await _logger.dispose();
   }
-}
-
-/// §G G-2 Ready-then-Go 호스트 측 ready 모집 자료구조.
-/// prepareSeq: 동시 prepare 충돌 방지 (사용자 빠른 seek 연타 시 새 collector → 이전 무효).
-/// resolved: 200ms timeout 또는 모두 ready 시 true. 한 번만 scheduleStart.
-class _ReadyCollector {
-  final int prepareSeq;
-  final int targetFrame;
-  final Set<String> expectedPeers;
-  final Set<String> readyPeers = <String>{};
-  final int initiatedWallMs;
-  Timer? timeout;
-  Timer? deadPeerTimeout;
-  bool resolved = false;
-
-  _ReadyCollector({
-    required this.prepareSeq,
-    required this.targetFrame,
-    required this.expectedPeers,
-    required this.initiatedWallMs,
-  });
-
-  bool get allReady => readyPeers.containsAll(expectedPeers);
-  Set<String> get missingPeers => expectedPeers.difference(readyPeers);
 }

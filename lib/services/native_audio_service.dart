@@ -190,16 +190,6 @@ class NativeAudioService {
     return await _channel.invokeMethod<bool>('unload') ?? false;
   }
 
-  /// §G G-2: ring buffer [startFrame, endFrame) 디코드 완료 여부.
-  /// 게스트가 prepare 후 1초 분량 디코드 wait polling용.
-  /// Android: ring [tail, head) 비교. iOS: AVAudioFile 즉시 ready (항상 true).
-  Future<bool> isFrameRangeReady(int startFrame, int endFrame) async {
-    return await _channel.invokeMethod<bool>('isFrameRangeReady', {
-      'startFrame': startFrame,
-      'endFrame': endFrame,
-    }) ?? false;
-  }
-
   /// 주기적 타임스탬프 폴링 시작.
   void startPolling({Duration interval = const Duration(milliseconds: 100)}) {
     stopPolling();

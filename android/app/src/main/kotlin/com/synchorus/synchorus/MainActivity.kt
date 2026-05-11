@@ -101,16 +101,6 @@ class MainActivity : AudioServiceActivity() {
                         result.success(NativeAudio.nativeIsMuted())
                     }
                     "unload" -> result.success(NativeAudio.nativeUnload())
-                    "isFrameRangeReady" -> {
-                        val args = call.arguments as? Map<*, *>
-                        val start = (args?.get("startFrame") as? Number)?.toLong()
-                        val end = (args?.get("endFrame") as? Number)?.toLong()
-                        if (start == null || end == null) {
-                            result.error("ARG", "isFrameRangeReady requires startFrame+endFrame", null)
-                        } else {
-                            result.success(NativeAudio.nativeIsFrameRangeReady(start, end))
-                        }
-                    }
                     else -> result.notImplemented()
                 }
             }

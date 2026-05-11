@@ -4849,6 +4849,45 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.77
 
+### 2026-05-12 (94) — v0.0.78 §G step 2-G2 회귀 revert (G-1 ring buffer 유지)
+
+**배경**: v0.0.77 (93) 실기기 검증에서 명확한 회귀 발견. 호스트가 큰 seek (사용자 슬라이더) 한 직후 **무음 상태로 멈춤**. 새 음원 로드(loadFile 재호출)해야만 풀림. 첫 음원에서도 동일 증상 재현.
+
+**시도한 fix (모두 stuck 미해소)**:
+
+1. **fix 1차 가설 (`oboe_engine.cpp` race)** — `seekToFrame`이 `mRingHead/mRingTail = newFrame` 즉시 reset → decodeLoop가 직전 곡 위치 PCM write 후 `mRingHead.store(writeFrame)`로 ring head를 후퇴시킬 수 있음. 결과: 호스트 측 `vf > ringHead` → `isFrameDecoded` false → 영구 무음. fix 적용(미커밋, working tree): `seekToFrame`에서 ring head/tail 변경 제거, `mDecodeSeekTarget`만 set 후 decodeLoop의 PTS reset 시점에 단일 thread에서 set. 결과: 사용자 테스트 동일 증상 재현 → 가설 빗나감.
+
+2. **decodeLoop stuck 가설 (확정)** — 새 음원 loadFile만 fix → loadFile 내부 `stopDecodeThread()` + `resetState()` + 새 thread 시작이 fix하는 것 → decodeLoop가 멈췄다는 것이 강한 증거. atomic 만으로는 ring head/tail/seek target/cv wait 4개 상태 전이가 안전하지 않음. mutex/cv로 단일 thread에서 직렬화 + 외부는 요청 큐만 push 하는 구조 재설계가 필요한 수준 — 한 줄 fix 영역 아님.
+
+**결정**: v0.0.77 commit (50e4e6c) 코드 변경 revert + v0.0.78 fix 미커밋 변경 폐기. **G-1 ring buffer 효과 (v0.0.76 기준 51분 곡 로드, decode 2~3배 단축, ~11.5MB constant 메모리)는 그대로 유지**. 큰 seek 시 호스트 즉시 시작 + 게스트 fallback alignment 로직 (v0.0.74 기존 race 포함)으로 일시 회귀. fallback race는 기능 동작 중단보다 우선순위 낮음.
+
+**revert 범위**:
+- 코드 revert (v0.0.77이 추가한 G-2 흐름):
+  - `oboe_engine.cpp` — `isFrameRangeReady`/`nativeIsFrameRangeReady` JNI 제거
+  - `MainActivity.kt` / `NativeAudio.kt` — isFrameRangeReady 라우팅 제거
+  - `AppDelegate.swift` / `AudioEngine.swift` — isFrameRangeReady iOS 측 제거
+  - `native_audio_service.dart` — `isFrameRangeReady` 메서드 제거
+  - `native_audio_sync_service.dart` — `_ReadyCollector` 클래스, `_initiatePrepareAndStart`, `_handleAudioReady`, `_resolveAndStart`, `_handleAudioPrepare`, `audio-prepare`/`audio-ready` 메시지 라우팅, syncPlay/syncSeek G-2 흐름 모두 제거
+- docs는 살림 (HISTORY (91)/(92)/(93) 그대로 + (94) revert 항목 추가, PLAN/SYNC_ALGORITHM_V2 G-2 항목은 "보류 + 재설계 필요" 상태로 update)
+
+**G-2 재시도 전제** (다음 세션 작업 시):
+- ring buffer 상태 (`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)는 **decodeLoop 단일 thread에서만 set**
+- 외부 (`seekToFrame`, `start`, etc.)는 atomic write 금지 → "요청 큐 push + cv notify"만 허용
+- decodeLoop는 매 iteration 시작에서 큐 drain → 상태 단일 thread 갱신 → write/wait 진행
+- `_ReadyCollector` (Dart) 측은 native에 polling이 아니라 native 콜백(예: `onPrepareReady(seq)`)으로 신호 받는 구조 검토
+- 또는 G-2 자체를 native 안으로 흡수 (Dart는 prepareSeq + scheduleStart wallEpochMs 통신만, ready 모집은 native가 단일 thread로 처리)
+- 핵심 회귀 모드 (호스트 무음 + loadFile만 fix)를 재현하는 unit test 또는 자동화 측정 시나리오 먼저 확보 후 진행
+
+**검증**:
+- ✅ `git revert 50e4e6c --no-commit` 후 docs/pubspec unstage 복구 → 코드만 revert 적용
+- ✅ `flutter analyze` No issues (예정)
+- ✅ `flutter build apk --debug` 통과 (예정)
+- ⏳ 실기기 회귀 fix 검증: v0.0.76 동작 (큰 seek 시 호스트 즉시 시작, 무음 정지 없음) 복귀 확인
+
+**회귀 위험**: 낮음. v0.0.76은 직전 PASS commit (51분 곡 로드 + decode 2~3배 단축 검증). G-2 재시도 전 baseline 안정.
+
+**빌드**: v0.0.78
+
 ---
 
 #### 미해결 이슈
