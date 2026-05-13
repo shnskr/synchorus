@@ -411,12 +411,11 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 | `getVirtualFrame` | 없음 | `int64` | 현재 콘텐츠 위치 조회 |
 
 **네이티브 구현**:
-- Android: NDK AMediaCodec **스트리밍 디코딩** → int16 **ring buffer** → Oboe float 콜백 (`oboe_engine.cpp`, v0.0.76 §G-1)
+- Android: NDK AMediaCodec **스트리밍 디코딩** → int16 사전할당 버퍼 → Oboe float 콜백 (`oboe_engine.cpp`)
   - 최소 1초 디코드 후 loadFile 반환, 백그라운드 스레드에서 나머지 디코딩 계속
-  - **Ring buffer 60s sliding window** (`mRingHead`/`mRingTail` atomic + `mRingMutex`/`mRingCv`): behind 10s + ahead 50s 분배. modular index `contentFrame % capacityFrames`로 wrap-around write/read
-  - `isFrameDecoded(vf)` = `tail <= vf < head` 단일 윈도우 비교 (이전 2-range 추적 폐기)
-  - seek = 윈도우 안 즉시 (vf만 갱신) / 윈도우 밖 head/tail reset + decodeLoop 점프 트리거 + cv notify (이전 fillGaps 폐기)
-  - decodeLoop: ring 가득 차면 `mRingCv.wait_for(50ms)` → space 생기면 modular write (wrap-around 시 두 chunk 분할)
+  - 2-range 추적: `[0, seqEnd)` + `[seekStart, seekEnd)` → `isFrameDecoded()` 체크
+  - seek-in-decode (Method A): 미디코딩 영역 seek → 디코드 스레드 점프 → fillGaps
+  - ⚠️ **v0.0.76 §G-1에서 ring buffer 60s sliding window 시도, v0.0.79 revert 완료** (큰 seek 연타 race로 호스트/게스트 무음 회귀. HISTORY (95) + DECISIONS §G-1 row 참고). 재설계는 PoC 격리에서 진행 예정.
 - iOS: AVAudioPlayerNode + AVAudioFile 스트리밍 재생 (`AudioEngine.swift`) — 네이티브 스트리밍
 
 **파일 위치**:
@@ -424,10 +423,10 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 - Android: `android/app/src/main/cpp/oboe_engine.cpp` + `NativeAudio.kt` + `MainActivity.kt`
 - iOS: `ios/Runner/AudioEngine.swift` + `AppDelegate.swift`
 
-**제한** (v0.0.76 §G-1 ring buffer로 갱신):
-- Android: ring buffer 60s sliding window 사전할당 (`60s × sampleRate × ch × 2B` ≈ 11.5MB constant, 곡 길이 무관). `TOO_LONG` 14분 한도 제거 → 51분 곡 로드 검증 (HISTORY (92))
-- 스트리밍 디코드로 loadFile ~0.5s 반환 (v0.0.76 측정 ~2~3배 단축)
+**제한**:
+- Android: 사전할당 메모리 디코딩 (150MB 제한, `TOO_LONG` 14분 한도). 스트리밍 디코드로 loadFile ~0.5-0.7s 반환
 - sampleRate/virtualFrame은 파일 네이티브 샘플레이트 기준
+- ⚠️ v0.0.76 §G-1 ring buffer로 한도 제거 시도했으나 race 발견 → v0.0.79 revert. PoC 재설계 후 재도입 예정
 
 #### 5-2. 향후 확장 계획 (step 1-3+)
 

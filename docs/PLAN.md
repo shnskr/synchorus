@@ -105,11 +105,11 @@
 
 진행 상태:
 - ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
-- ✅ step 2-G1 (v0.0.76) — native ring buffer 단독 완료 (2026-05-11). 51분 곡 로드 검증, decode 시간 2~3배 단축
-- ❌ step 2-G2 (v0.0.77) — Dart prepare→ready→go 구현 후 실기기 회귀 발견 ("호스트 큰 seek 후 무음, 새 음원 로드해야 풀림"). v0.0.78 fix 시도(seekToFrame이 ring head/tail 안 건드림) 도 미해소. **v0.0.78에서 revert → G-1 baseline 복귀 (2026-05-12 (94))**. 재시도 시 `_ReadyCollector` ↔ `decodeLoop` ↔ `seekToFrame` 셋의 상태 전이를 atomic만이 아닌 mutex/cv로 단일 thread에서 갱신하도록 재설계 필요.
-- ⏳ step 2-G2 재설계 (보류) — decodeLoop stuck 원인 격리 + 동기화 재설계 후 재시도
-- ⏳ step 3 — G-3 측정 → EMA 활용 별도 commit
-- ⏳ 30분+ 측정 검증 (MID-7 자연 해소)
+- ❌ step 2-G1 (v0.0.76) — native ring buffer 단독. v0.0.79에서 추가 회귀 발견 → revert. 큰 seek 슬라이더 **연타** 시 호스트/게스트 둘 다 무음 (`virtualFrame`은 계속 흐름, PCM read만 무음). v0.0.75 비교 실험에서 ring buffer 없을 땐 무음 없음 → **G-1 ring buffer race 확정** (2026-05-12 HISTORY (95)). 4개 atomic (`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)으로는 단일 트랜잭션 안 보장.
+- ❌ step 2-G2 (v0.0.77) — Dart prepare→ready→go 구현 후 회귀 → v0.0.78에서 revert (HISTORY (94)). G-1 race도 같은 원인 계열.
+- ⏳ step 2-G1 재설계 (**PoC 격리 권장**) — `poc/` 하위에서 ring buffer mutex/cv 단일 thread 직렬화 재설계. 핵심 회귀 모드(큰 seek 연타 → 호스트/게스트 무음 + loadFile만 fix)를 자동화 시나리오로 재현 → fix 검증 → 본 앱 합치기. 재설계 후 G-2도 같은 큐 기반으로 합쳐 검토.
+- ⏳ step 3 — G-3 측정 → EMA 활용 (PoC 재설계 진행 후 데이터 합쳐 보강)
+- ⏳ 30분+ 측정 검증 (MID-7 — ring buffer 보류로 다시 14분 한도 부활, 직접 측정 어려움)
 - ⏳ iOS 회귀 검증
 
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.

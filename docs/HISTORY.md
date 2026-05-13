@@ -4888,6 +4888,50 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.78
 
+### 2026-05-12 (95) — v0.0.79 §G-1 ring buffer 추가 revert (race 확정)
+
+**배경**: v0.0.78 (94) revert 후 v0.0.76 기반 G-1 ring buffer 단독 검증 진행. 첫 음원 + 큰 seek 슬라이더 **연타** 시나리오에서 **호스트/게스트 둘 다 무음** 회귀. virtualFrame은 계속 흐름(재생 logic 살아있음, PCM read만 무음). 새 음원 loadFile 해야 풀림. 51분 곡 로드 시에도 같은 시나리오에서 재현.
+
+**진단 (v0.0.75 비교 실험)**:
+- v0.0.78 vs v0.0.76 native/dart 코드 diff = 0 (revert 깔끔). race는 v0.0.76부터 잠재했고 v0.0.78에서 적극적인 연타로 노출됨.
+- v0.0.75 (ring buffer 도입 전 = 사전할당 PCM + 2-range 추적 + fillGaps) `oboe_engine.cpp` 한 파일만 checkout 후 실기기 install → 같은 연타 시나리오에서 **무음 발생 안 함**.
+- **결론: G-1 ring buffer race 확정**. `mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts` 4개 atomic write가 여러 thread(외부 seekToFrame + decodeLoop)에서 동시 발화 시 일관성 깨짐.
+
+**가능한 race 시나리오** (확정 아님, 가설):
+- `seekToFrame` 첫 호출 → `mRingHead/mRingTail = target1` reset + `mDecodeSeekTarget = target1` set + cv notify
+- decodeLoop 깨어나기 전 → `seekToFrame` 두 번째 호출 (연타) → `mRingHead/mRingTail = target2` reset + `mDecodeSeekTarget = target2`
+- decodeLoop이 target1 처리 시작 → 첫 디코드 데이터 write → `mRingHead.store(writeFrame1)`
+- 외부 vf가 target2 위치인데 ring head가 target1 위치 → `isFrameDecoded(vf) == false` 영구 지속
+
+또는 비슷한 변형 race. 핵심은 4개 atomic으로는 "seek 요청 → ring reset → decodeLoop 응답" 단일 트랜잭션이 안 보장됨.
+
+**결정**: G-1 ring buffer 단독으로도 race가 있으므로 v0.0.79 = v0.0.75 native (`oboe_engine.cpp`) 복귀. G-2뿐 아니라 G-1도 보류. ring buffer 효과(51분 곡 + 메모리 ~11.5MB + decode 2~3배 단축) 다 잃지만 안정성 우선.
+
+**revert 범위 (v0.0.79)**:
+- `oboe_engine.cpp` 한 파일만 v0.0.75 코드로 checkout (다른 파일은 v0.0.75 == v0.0.78 동일)
+- pubspec version 0.0.78 → 0.0.79
+
+**유지** (v0.0.75에서 들어온 정상 변경):
+- csv `decode_load` 측정 인프라 (`sync_measurement_logger.dart`, `native_audio_sync_service.dart`의 `_handleDecodeLoadReport`/`_logDecodeLoad`)
+- Android `loadFile` Map 반환 통일
+
+**G-1 ring buffer 재시도 전제 (다음 세션 후보)**:
+- **PoC 격리에서 재설계** (`poc/` 하위) — 본 앱 회귀 위험 차단
+- ring buffer 상태(`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)는 **decodeLoop 단일 thread에서만 set**
+- 외부(`seekToFrame`/`start`)는 atomic write 금지 → "요청 큐 push + cv notify"만 허용
+- decodeLoop은 매 iteration 시작에서 큐 drain → 상태 단일 thread 갱신 → write/wait 진행
+- 핵심 회귀 모드(큰 seek 연타 → 호스트/게스트 무음 + loadFile만 fix)를 자동화 시나리오로 재현 → fix 검증
+- 재설계 후 G-2 Ready-then-Go (v0.0.77 디자인)도 같은 큐 기반으로 합쳐 검토
+
+**검증**:
+- ✅ v0.0.75 native checkout → 큰 seek 연타 시나리오 무음 없음 (실기기 S22 + A7)
+- ⏳ `flutter build apk --debug` 통과 (예정)
+- ⏳ 실기기 v0.0.79 회귀 fix 검증 (= v0.0.74 baseline 동작 복귀)
+
+**회귀 위험**: 매우 낮음. v0.0.75는 자체 검증된 baseline + 큰 seek 연타에서도 무음 없음 확인.
+
+**빌드**: v0.0.79
+
 ---
 
 #### 미해결 이슈
