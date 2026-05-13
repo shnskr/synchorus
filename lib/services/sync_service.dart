@@ -26,6 +26,8 @@ class _SyncSample {
 
   int get rttMs => t3 - t1;
   int get rawOffsetMs => t2 - ((t1 + t3) ~/ 2);
+  // v0.0.80: age limit용 sample 도착 시각. t3가 게스트 pong 수신 시각이므로 그대로 사용.
+  int get arrivalMs => t3;
 }
 
 // EMA 파라미터 (v0.0.74: fast phase 제거 — carry over로 출발점 안정 + §D-2 gap 보호)
@@ -36,10 +38,17 @@ const int _stableRequiredCount = 5; // 연속 안정 횟수
 
 // v0.0.74: 초기 핸드셰이크 early termination 조건
 // (single raw RTT ≤ _earlyTermRttThresholdMs) sample이 _earlyTermSampleCount개 모이면 즉시 종료.
-// 못 모으면 30개 cap fallback. 보수적: 우리 측정 분포에서 ≤10ms 비율 28%라 평균 36 ping
-// 필요 → 30 cap에 거의 항상 걸림. 좋은 LAN 환경에서만 단축 효과.
-const int _earlyTermRttThresholdMs = 10;
+// 못 모으면 30개 cap fallback. v0.0.80: 임계 10→20 완화 (jitter 환경에서도 early term 도달).
+const int _earlyTermRttThresholdMs = 20;
 const int _earlyTermSampleCount = 10;
+
+// v0.0.80: periodic sync outlier rejection.
+// raw RTT > _rejectThresholdMs sample은 window 추가 안 함. 이유: RTT 클수록 ping/pong
+// 비대칭 노이즈도 비례 증가 → rawOffset 부정확. 30ms 기준 = RTT/2 노이즈 최대 ±15ms
+// (청감 임계 ±20ms 안전 영역).
+const int _rejectThresholdMs = 30;
+// window 안 sample 60초 지나면 expire. stale offset 박힘 차단.
+const int _sampleAgeLimitMs = 60000;
 
 class SyncService {
   final P2PService _p2p;
@@ -95,8 +104,14 @@ class SyncService {
   double _prevFilteredOffset = 0.0;
   int _stableCount = 0;
 
+  /// isOffsetStable 토글 추적 (logging용)
+  bool _prevIsStable = false;
+
   /// offset이 안정화되었는지 여부. drift 보정은 이 값이 true일 때만 활성화.
-  bool get isOffsetStable => _stableCount >= _stableRequiredCount;
+  /// v0.0.80: window 크기 가드 추가 — outlier rejection으로 window 작아진 상태
+  /// (carry over 1개만 남는 등)에서 stale stable 판정 차단.
+  bool get isOffsetStable =>
+      _stableCount >= _stableRequiredCount && _recentWindow.length >= 3;
 
   SyncService(this._p2p);
 
@@ -180,6 +195,9 @@ class SyncService {
         _offsetMs = roundOffset;
         _bestRtt = roundBestRtt;
         _filteredOffsetMs = roundOffset.toDouble();
+        // v0.0.80: carry over 의도 완성 — _prevFilteredOffset도 같이 set.
+        // 안 하면 첫 periodic sample에서 delta=|filtered - 0|=큰 값 → stable=0 손해.
+        _prevFilteredOffset = roundOffset.toDouble();
         _synced = true;
         // v0.0.74 B: best 1개를 _recentWindow 맨 뒤에 carry over.
         // sliding window는 인덱스 0(가장 앞)에서 빠지므로 맨 뒤에 박으면 9개 새 sample이
@@ -228,6 +246,8 @@ class SyncService {
           _offsetMs = roundOffset;
           _bestRtt = roundBestRtt;
           _filteredOffsetMs = roundOffset.toDouble();
+          // v0.0.80: timeout 케이스도 carry over 의도 완성
+          _prevFilteredOffset = roundOffset.toDouble();
           _synced = true;
           // v0.0.74 B: timeout 케이스도 best 1개 carry over (부분 sample 받았으면)
           if (bestSample != null) {
@@ -273,10 +293,26 @@ class SyncService {
 
       final sample = _SyncSample(t1: t1, t2: t2, t3: t3);
 
+      // v0.0.80: outlier rejection — raw RTT 30ms 초과면 폐기.
+      // 비대칭 노이즈 비례 증가로 rawOffset 부정확. window/EMA/stable 모두 변화 0.
+      if (sample.rttMs > _rejectThresholdMs) {
+        debugPrint('Raw sample REJECTED: rttMs=${sample.rttMs}, rawOffset=${sample.rawOffsetMs.toStringAsFixed(1)}');
+        return;
+      }
+
       // sliding window 관리
       _recentWindow.add(sample);
       if (_recentWindow.length > _windowSize) {
         _recentWindow.removeAt(0);
+      }
+
+      // v0.0.80: age limit — 60초 지난 sample 제거. stale offset 박힘 차단.
+      // 방금 추가한 sample은 t3=nowMs라 expire 안 됨. 다만 안전상 isEmpty 가드.
+      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      _recentWindow.removeWhere((s) => nowMs - s.arrivalMs > _sampleAgeLimitMs);
+      if (_recentWindow.isEmpty) {
+        debugPrint('Raw sample: rttMs=${sample.rttMs}, rawOffset=${sample.rawOffsetMs.toStringAsFixed(1)} (window empty after age limit, filtered frozen)');
+        return;
       }
 
       // window 내 min-RTT 샘플의 offset을 EMA로 혼합
@@ -309,9 +345,18 @@ class SyncService {
         _stableCount = 0;
       }
 
+      debugPrint('Raw sample: rttMs=${sample.rttMs}, rawOffset=${sample.rawOffsetMs.toStringAsFixed(1)}');
       debugPrint('Periodic sync: offset=${_filteredOffsetMs.toStringAsFixed(1)}ms, '
           'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}, '
           'stable=$_stableCount');
+
+      // v0.0.80: isOffsetStable 토글 시점 명시
+      final isStableNow = isOffsetStable;
+      if (isStableNow != _prevIsStable) {
+        debugPrint('[STABLE TOGGLE] $_prevIsStable → $isStableNow '
+            '(stable=$_stableCount, window=${_recentWindow.length})');
+        _prevIsStable = isStableNow;
+      }
     });
 
     // 1초 주기 ping

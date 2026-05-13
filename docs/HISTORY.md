@@ -4932,6 +4932,122 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.79
 
+### 2026-05-14 (96) — v0.0.80 §B clock sync outlier rejection + age limit + stable window 가드
+
+**배경**: 사용자가 "최근 (v0.0.74 이후) 청감이 옛날(v0.0.72 등)에 비해 약간 어긋난 느낌"으로 보고. csv/logcat 깊은 분석 진행:
+
+**진단 흐름**:
+1. **WiFi 환경 정량 측정** (logcat `Periodic sync` + 별도 raw sample 로그 추가): 사용자 환경에서 raw RTT 분포 매우 흔들림. 60초간 측정:
+   - 14~20ms (좋음): 15%
+   - 45~110ms: 28%
+   - 111~250ms: 38%
+   - 251~499ms: 19%
+   - 즉 RTT > 30ms sample 비율 ~85% (extreme 환경)
+2. **알고리즘 동작 분석**: window best + EMA로 단발성 outlier는 흡수했으나 지속 흔들림 (좋은 RTT sample 한동안 안 들어옴) 시 `minSample`이 jitter sample로 갈리고 EMA가 천천히 표류 — 22초 동안 filtered offset이 -405 → -386.6 = **18ms 표류** 실측. 청감 임계 ±20ms 근접.
+3. **사용자 통찰** (사용자 직접 짚어줌, 매우 중요):
+   - "처음에 window 1개 넣고 시작하면 새로 들어온 값이 30ms 통과해도 첫 동기화 때 값보다 안 좋을 수 있으니 carry over 안전망 역할"
+   - "흔들리는 환경 수용하면 안 됨. wall clock 자체는 환경 무관이고 RTT만 환경 영향" → adaptive 임계 부정, **고정 strict 임계가 정답**
+   - "win=6일 때 isOffsetStable=true 되는 거지?" — 코드 검토 결과 첫 sample에서 `_prevFilteredOffset = 0`이라 stable=0 손해 → 사용자 추정 6은 `_prevFilteredOffset`도 carry over로 set한 경우. v0.0.74 carry over의 미세 누락 발견.
+   - "지금 fast phase도 제거했는데 진동 영향이 더 크다" — 정확. 사용자 데이터 표류 18ms 정확히 이 메커니즘
+4. **anchor 베이크인 잔재 별도 발견 (마지막 부분 청감 어긋남)**: 측정 마지막 부분에서 vfDiff -250ms 영구 잔재 (drift는 ±3ms로 매우 작음) → **sync 자체는 정확한데 anchor 박힌 시점의 outputLatency baked-in 매핑이 부정확**. HISTORY (42)/(45) 미해결 이슈 영역과 같음. 본 commit 범위 밖.
+
+**근거 기반 RTT 임계 선정 (`_rejectThresholdMs = 30`)**:
+- RTT > 30ms sample은 ping/pong 비대칭 노이즈 최악 ±15ms (RTT/2)
+- 청감 임계 ±20ms 대비 안전 영역 안
+- 우리 환경 통과율 ~15% 다만 carry over로 cold start 안전망 유지
+
+**근거 기반 age limit (`_sampleAgeLimitMs = 60_000`)**:
+- 60초 = 두 디바이스 wall clock 상대 drift 누적 ±6ms (±50ppm × 60초 × 2디바이스) 수준
+- 사용자가 짚은 "1시간 동안 30ms 이하 sample 안 들어오면 stale offset 박힘" 위험 차단
+- 일반 환경에선 1분에 RTT < 30ms sample 평균 9개 들어옴 (15%) → 거의 항상 sample 모임. 1단계 (옵션 A) 채택, fallback burst 재실행은 2단계로 보류
+
+**변경 사항 (`sync_service.dart`)**:
+
+1. **`_earlyTermRttThresholdMs` 10 → 20** (line 41) — 초기 핸드셰이크 early termination 임계 완화. jitter 환경에서도 5~10초 안에 좋은 sample 10개 모이도록.
+
+2. **`_rejectThresholdMs = 30` NEW** (line 49) — periodic sync outlier rejection 임계. raw RTT > 30ms sample은 window 추가 안 함, EMA/stable 영향 0.
+
+3. **`_sampleAgeLimitMs = 60000` NEW** (line 51) — window 안 sample 60초 지나면 자동 제거. stale offset 박힘 차단.
+
+4. **`_SyncSample.arrivalMs` getter NEW** (line 30) — `t3` (게스트 pong 수신 시각)을 sample 도착 시각으로 노출. age limit 비교용.
+
+5. **Periodic sync 새 흐름** (line 290~312):
+   ```
+   sample 도착
+     ↓
+   if (rttMs > 30): REJECTED 로그 + return (EMA/stable 변화 0)
+     ↓ 통과
+   _recentWindow.add(sample)
+   sliding window 사이즈 제한 (>10 oldest 제거)
+     ↓
+   age limit: 60초+ sample 모두 제거
+     ↓
+   if (window.isEmpty): filtered 동결 + return
+     ↓
+   minSample, EMA, stable count 처리
+   ```
+
+6. **`isOffsetStable` 가드 보강** (line 109~111):
+   ```dart
+   bool get isOffsetStable =>
+       _stableCount >= _stableRequiredCount && _recentWindow.length >= 3;
+   ```
+   carry over 1개만 남은 상태에서 anchor 박힘 trigger 차단.
+
+7. **`_prevFilteredOffset` carry over 같이 set** (line 197, 247) — v0.0.74 carry over의 미세 누락 보강. 사용자가 짚어준 부분. 첫 periodic sample에서 delta=|filtered - 0|=큰 값으로 stable=0 손해 없어짐. **isOffsetStable 도달 시간 6초 → 5초 단축**.
+
+8. **STABLE TOGGLE 로그** (line 320~325) — `_prevIsStable` 필드 추가, isOffsetStable 변경 시점에 로그 출력. 디버그/측정용. false→true / true→false 토글 시점 추적.
+
+9. **Raw sample 로그 확장** — 통과/REJECTED 구분 + arrival 시점 정확히 표시.
+
+**측정 검증** (실기기 S22 + A7 Lite):
+
+- **v0.0.79 baseline** (22초 측정):
+  - Raw RTT 분포: 좋음 15% / 흔들림 85%
+  - Filtered offset: -405 → -386.6 = **18ms 표류**
+  - 청감 어긋남 인지
+
+- **v0.0.80 (이 commit)** (28초 측정):
+  - Raw RTT 분포: 좋음 15% / 흔들림 85% (동일 환경)
+  - Filtered offset: -414.0 → -414.3 = **0.3ms 변동** ⭐
+  - **표류 60배 감소**
+  - REJECTED 로그로 outlier 차단 작동 확인 (28초 중 17개 sample reject)
+  - STABLE TOGGLE: 14초 만에 false→true, 그 후 영구 true 유지
+  - 사용자 청감: "대체적으로 다 좋았는데 마지막 부분만 약간 어긋남"
+
+- **마지막 어긋남 원인 별도 분석** (csv `v080_test.csv` seq 471~487):
+  - anchor_set @ seq=471 (drift -2.16, vfDiff 0)
+  - 그 직후 seq=472~487 동안 **vfDiff -230 ~ -270ms 영구 잔재**
+  - 그러나 **drift는 ±3ms로 매우 작음** (sync 자체는 정확)
+  - delta_anchored=13.30 영구 박힘, delta_current 10~17ms 변동
+  - → **anchor 박힌 시점의 outputLatency baked-in 매핑이 부정확**한 케이스. sync 자체 문제 아님.
+  - 사용자 큰 seek (seq=488)로 anchor reset → 재박힘 → vfDiff ±3ms 정상 회복 확인
+  - 이 영역은 HISTORY (42)/(45) 미해결 이슈 영역으로 별도 트랙 필요 (BT outputLatency 동적 보정 또는 anchor reset 임계 보강).
+
+**남은 1단계 한계**:
+- WiFi 흔들리는 환경에서 좋은 sample 0개로 60초 지속 → carry over expire → window 빈 상태 → filtered 동결 (1시간 drift 누적 위험)
+- 2단계로 burst sync 재실행 fallback 추가 가능 (window 1분 빈 상태 지속 시 30 ping burst 재실행)
+- 우리 환경에선 1분에 RTT < 30 sample 평균 9개 들어와 거의 발생 안 함
+
+**다음 작업 후보** (별도 트랙):
+- anchor 베이크인 outputLatency 부정확 fix (HISTORY (42)/(45) 영역)
+- 또는 anchor reset 트리거에 vfDiff 임계 추가 (drift 외)
+- v0.0.80 자동화 측정 N=2~3으로 청감 vs 정량 매칭 확정
+
+**검증**:
+- ✅ `flutter analyze` No issues
+- ✅ `flutter build apk --debug` 통과
+- ✅ 실기기 v0.0.80 청감 PASS ("대체적으로 다 좋음")
+- ✅ filtered 표류 60배 감소 정량 확정 (18ms → 0.3ms)
+- ✅ STABLE TOGGLE false→true 14초, false 토글 0회 (영구 안정)
+
+**회귀 위험**: 낮음.
+- 코드 변경 영역이 sync_service.dart 단일 파일
+- 새 가드 (reject, age limit, window>=3) 모두 보수적 (false positive 방지에 안전한 쪽)
+- carry over 의도 완성 (1초 단축)으로 좋은 환경에서도 개선
+
+**빌드**: v0.0.80
+
 ---
 
 #### 미해결 이슈

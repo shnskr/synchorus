@@ -375,12 +375,15 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 → **병목은 Wi-Fi clock 동기화**. 실제 floor는 3-5ms 범위. dead zone 20ms는 청각 임계와 정합 (사용자가 "어긋났다" 느끼는 한계).
 
 **clock sync 알고리즘** (`lib/services/sync_service.dart` + PoC §3):
-- **초기 핸드셰이크**: 30회 ping (100ms 간격, fire-and-forget). 30개 다 받으면 best RTT의 raw offset을 초기값. **v0.0.74 early termination**: single raw RTT ≤ 10ms sample 10개 모이면 즉시 종료(좋은 LAN 환경 한정 단축). 못 모으면 30개 cap fallback.
-- **carry over (v0.0.74)**: 30개 중 best 1개 sample을 `_recentWindow` 맨 뒤에 추가 후 주기 단계 시작. sliding window가 인덱스 0(가장 앞)에서 빠지므로 best 1개가 9초간 minSample 안전망 역할.
+- **초기 핸드셰이크**: 30회 ping (100ms 간격, fire-and-forget). 30개 다 받으면 best RTT의 raw offset을 초기값. **v0.0.74 early termination**: single raw RTT ≤ `_earlyTermRttThresholdMs` sample 10개 모이면 즉시 종료. **v0.0.80 임계 10 → 20** (jitter 환경에서도 도달 가능). 못 모으면 30개 cap fallback.
+- **carry over (v0.0.74 + v0.0.80 보강)**: 30개 중 best 1개 sample을 `_recentWindow` 맨 뒤에 추가. **v0.0.80**: `_prevFilteredOffset`도 best offset으로 같이 set (의도 완성, 첫 periodic sample stable=0 손해 제거 → isOffsetStable 도달 6→5초 단축).
 - **주기 단계**: 1s마다 ping, sliding window=10개 (v0.0.24 5→10 확장).
+  - **v0.0.80 outlier rejection**: raw RTT > `_rejectThresholdMs` (30ms) sample은 window 추가 안 함, EMA/stable 변화 0. 근거: RTT/2 = 15ms 최악 비대칭 노이즈 → 청감 임계 ±20ms 안전 영역.
+  - **v0.0.80 age limit**: window 안 sample `_sampleAgeLimitMs` (60초) 지나면 자동 제거. stale offset 박힘 차단.
+  - **v0.0.80 window empty 처리**: 모든 sample expire 시 filtered offset 동결 (EMA/stable skip).
   - 창 내 RTT 최소 샘플의 raw offset을 EMA new로
-  - `filtered = filtered * (1 - α) + winMinRaw * α` (α=0.1 단일, **v0.0.74 fast phase 제거** — carry over로 출발점 이미 안정 + §D-2 gap 보호 전제)
-- **stable 판정 (§D-2 v0.0.63 AND 조합)**: `delta < 2ms AND |filtered - winMinRaw| < 2ms` 5번 연속 만족 시 `isOffsetStable = true`. delta는 EMA step 변화(안정성), gap은 filtered가 진짜 값에 가까운지(정확도). v0.0.74는 stableRequiredCount=5 그대로 유지(보수적).
+  - `filtered = filtered * (1 - α) + winMinRaw * α` (α=0.1 단일, **v0.0.74 fast phase 제거**)
+- **stable 판정 (§D-2 v0.0.63 AND 조합)**: `delta < 2ms AND |filtered - winMinRaw| < 2ms` 5번 연속 만족 시 stable count 도달. **v0.0.80 추가 가드**: `_recentWindow.length >= 3` (carry over 1개만 남은 상태에서 false positive 차단).
 - **isOffsetStable의 의미**: anchor establish 진입 게이트. false 동안 fallback alignment(30ms 임계 거친 정렬). filteredOffsetMs는 stable 무관하게 항상 사용 — drift 계산/fallback 양쪽 모두에서.
 
 **호스트 seek 처리**: `seek-notify` 메시지(절대 `targetMs`)로 게스트에 직접 통보. delta는 비동기 중첩 시 누적 오차 → absolute는 멱등(idempotent). drift 계산은 framePos 기반이라 별도 영향 없음 — 콘텐츠 정렬만 변동.

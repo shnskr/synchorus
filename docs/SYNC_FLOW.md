@@ -1,4 +1,4 @@
-# Sync 알고리즘 흐름도 (v0.0.48 main 기준)
+# Sync 알고리즘 흐름도 (v0.0.80 main 기준, v0.0.48 baseline 흐름 유지)
 
 ## 핵심 개념
 
@@ -36,6 +36,15 @@
 | 변수명 | 한국어 풀이 |
 |---|---|
 | `_filteredOffsetMs` | "두 기기 시계 차이 — 게스트 시각 + offset = 호스트 시각" |
+| `_recentWindow` | "최근 ping/pong 결과 sliding window (최대 10개)" |
+| `_stableCount` | "offset 안정 연속 카운트 (5 도달 시 stable)" |
+| `isOffsetStable` | "anchor 박힘 게이트 — stable 5 + window>=3 (v0.0.80)" |
+
+**clock sync 핵심 흐름** (v0.0.80):
+- 초기 핸드셰이크: 100ms × 30 ping burst → best 1개 carry over (window=1로 periodic 시작)
+- Periodic sync: 1초 주기 ping → outlier rejection (RTT > 30ms reject) → age limit (60초+ sample 제거) → window 내 best RTT의 raw offset을 EMA(α=0.1)로 filtered 갱신
+- isOffsetStable 5초 도달 후 영구 true (jitter 환경에서도 toggle 0회 확인)
+- 측정 검증: filtered offset 표류 0.3ms (jitter 환경 28초 측정)
 
 ### Anchor 시스템 (정확한 정렬 baseline)
 

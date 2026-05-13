@@ -112,6 +112,15 @@
 - ⏳ 30분+ 측정 검증 (MID-7 — ring buffer 보류로 다시 14분 한도 부활, 직접 측정 어려움)
 - ⏳ iOS 회귀 검증
 
+**§B clock sync 추가 보강 (v0.0.80 후속)** — outlier rejection + age limit + stable window 가드 (HISTORY (96)) 완료. 남은 후속:
+
+- ⏳ **anchor 베이크인 outputLatency 부정확 fix** — v0.0.80 측정에서 sync 자체는 ±0.3ms로 매우 정확하나 anchor 박힌 후 vfDiff -250ms 영구 잔재 발견 (csv `v080_test.csv` seq 472~487). drift는 ±3ms로 작음. 즉 anchor 박힌 시점의 outputLatency baked-in 매핑이 부정확한 케이스. HISTORY (42)/(45) 미해결 이슈 영역과 같음. fix 방향 후보:
+  - (a) anchor establish 시점에 vfDiff 임계 검사 — 큰 vfDiff면 anchor 박지 않고 다음 obs 대기
+  - (b) anchor reset 트리거에 vfDiff 임계 추가 (현재는 drift 200ms만, vfDiff도 200ms+면 reset)
+  - (c) BT outputLatency 동적 보정 (HISTORY 미해결 이슈)
+- ⏳ **v0.0.80 자동화 N=2~3 측정** — outlier rejection 효과 정량 비교 (vfDiff signed mean/RMS, anchor reset 빈도, 청감 vs 정량 매칭)
+- ⏳ **2단계 burst sync 재실행 fallback** — window 1분 빈 상태 지속 시 30 ping burst 재실행. 우리 환경에선 거의 발생 안 함이라 후순위. 극심한 jitter 환경 (RTT >30 sample 0개 1시간)에서만 가치.
+
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 
 진행 결과:

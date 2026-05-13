@@ -247,6 +247,45 @@ v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win
 
 **Trade-off 인정**: 첫 anchor 시점이 5~15초 늦어질 가능성. fallback 단계 길어지지만 N=3 데이터 기준 청감 영향 작음. fix 후 N=3+ 측정으로 청감 분포 검증 필수.
 
+### v0.0.80 후속: outlier rejection + age limit + stable window 가드 (2026-05-14 HISTORY (96))
+
+**배경**: 사용자 청감 "최근 (v0.0.74 이후) 옛날(v0.0.72)에 비해 약간 어긋남". csv/logcat 깊은 분석:
+
+- 사용자 환경 WiFi raw RTT 분포: 14~20ms 15% / 45~110ms 28% / 111~250ms 38% / 251~499ms 19%
+- v0.0.79 EMA: 단발 outlier 흡수했지만 지속 흔들림 (좋은 sample 한동안 안 들어옴) 시 minSample이 jitter sample로 갈리고 EMA가 천천히 표류 → **22초 18ms 표류** 실측 (청감 임계 ±20ms 근접)
+
+**사용자 통찰** (매우 중요, 디자인 결정 핵심):
+> "흔들리는 환경 수용하면 안 됨. wall clock 자체는 환경 무관이고 RTT만 환경 영향" → adaptive 임계 부정, **고정 strict 30ms 임계** 채택
+
+**변경 사항 (`sync_service.dart`)**:
+
+1. **Periodic sync outlier rejection** (`_rejectThresholdMs = 30`):
+   - raw RTT > 30ms sample은 window 추가 안 함 (EMA/stable 변화 0)
+   - 30ms 근거: RTT/2 = 15ms 최악 비대칭 노이즈 → 청감 임계 ±20ms 안전 영역
+   - 우리 환경 통과율 ~15%
+2. **Sample age limit** (`_sampleAgeLimitMs = 60_000`):
+   - window 안 sample 60초 지나면 자동 제거
+   - 60초 근거: wall clock 상대 drift 누적 ±6ms 수준 (±50ppm × 60s × 2 device)
+   - stale offset 박힘 차단 (사용자 우려 "1시간 동안 sample 안 들어오면 stale" 방어)
+3. **`isOffsetStable` 가드 보강**: `_stableCount >= 5 && _recentWindow.length >= 3`
+   - carry over 1개만 남은 상태에서 false positive 차단
+4. **`_prevFilteredOffset` carry over 같이 set**: 첫 periodic sample stable=0 손해 제거
+   - v0.0.74 carry over 의도 완성
+   - isOffsetStable 도달 6→5초 단축
+5. **`_earlyTermRttThresholdMs` 10 → 20**: jitter 환경에서도 초기 핸드셰이크 early termination 도달 가능
+6. **진단 로그 추가**: `Raw sample` / `Raw sample REJECTED` / `[STABLE TOGGLE]`
+
+**측정 검증 (실기기 S22 + A7 Lite)**:
+- ✅ filtered offset 표류: 18ms (v0.0.79) → **0.3ms (v0.0.80)** = **60배 감소**
+- ✅ STABLE TOGGLE: false→true 14초, 그 후 false 토글 0회 (영구 안정)
+- ✅ 사용자 청감: "대체적으로 다 좋음"
+- ⚠️ 측정 마지막 부분 vfDiff -250ms 영구 잔재 발견 (drift는 ±3ms로 작음) — **sync 자체 정확하나 anchor 베이크인 outputLatency 매핑 부정확**. HISTORY (42)/(45) 미해결 이슈 영역과 같음. 본 commit 범위 밖.
+
+**1단계 한계**:
+- 1시간 jitter 환경에서 carry over expire → window 빈 상태 → filtered 동결
+- 우리 환경에선 1분에 RTT < 30 sample 평균 9개 들어와 거의 발생 안 함
+- 2단계 burst sync 재실행 fallback은 후순위 (PLAN HIGH 후속)
+
 ---
 
 ## E. 임계 정확 값
