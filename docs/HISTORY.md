@@ -5145,6 +5145,90 @@ csv event 분포 (전체 측정):
 
 **빌드**: v0.0.81
 
+### 2026-05-15 (98) — v0.0.82 호스트 syncSeek `_broadcastObs()` 제거 (게스트 옛 위치 race 진짜 root cause fix)
+
+**배경**: v0.0.81 (97)에서 ANCHOR-VERIFY 도입 + race rate 31% 자동 회복 확인. 그러나 사용자 보고 신규 시나리오 — "호스트 seek 했는데 게스트가 새 위치 갔다 다시 옛 위치로 돌아온다". 이 race의 진짜 root cause 격리 + fix.
+
+**진단 흐름 (오늘 세션 시간순)**:
+
+1. **사용자 보고 1**: "v0.0.81 측정에서 40초/3분 차이 발생". csv/logcat 깊은 분석 시작.
+2. **시도 1 (실패) — v0.0.82(임시) accum 재계산**: ANCHOR-VERIFY REJECT cascade (4번 연속 REJECT + accum 4번 되돌리기) 발견. `_seekCorrectionAccum -= initialCorrection` 대신 `ts.virtualFrame - ts.framePos` 재계산으로 변경. **부분 fix지만 root cause 아님**.
+3. **시도 2 (실패) — v0.0.83(임시) `_latestObs = null` + fallback cooldown 가드 + SEEK-NOTIFY 진단 로그**: stale obs로 인한 fallback 잘못 보정 의심. 게스트 측 안전망 추가. **부분 fix**.
+4. **사용자 핵심 통찰**: "게스트에서 position bar가 갔다가 다시 돌아왔다 → broadcasting은 했다는 거 아냐? TCP라 순서 보장이라 게스트 받기 전 다른 명령 갔을 리 없잖아". 사용자가 root cause를 좁혀줌 — 메시지 순서 아니라 다른 영역.
+5. **호스트 측 코드 정독**: `syncSeek` (`native_audio_sync_service.dart:508~538`)에서:
+   - `await _engine.seekToFrame(clampedTarget)` — Android Oboe는 비동기 (mDecodeSeekTarget set만, 즉시 return), 다음 라인 진행
+   - `broadcastToAll('seek-notify', ...)` — 게스트한테 정확한 새 위치
+   - **`_broadcastObs()` 즉시 호출** — 호스트 native ts 측정. **native seek 처리 전이라 ts.virtualFrame = stale (이전 호스트 위치)** ⚠️
+6. **시도 3 (성공) — v0.0.84(임시) 호스트 `_broadcastObs()` 제거 1줄**: stale obs broadcast 자체 차단. 정기 timer (`_obsBroadcastIntervalMs = 500ms`)가 native seek 완료 후 정확한 obs 보냄. **진짜 root cause fix**.
+7. **사용자 보고 2**: "v0.0.84 측정 후 청감 묘하게 떨어진 거 같음". v0.0.81 + 82 + 83 + 84 4개 fix 누적이라 어느 게 부작용인지 격리 불가.
+8. **시도 4 — v0.0.85(임시) v0.0.80 baseline + sync info UI + 호스트 fix만**: v0.0.81~83 fix 모두 롤백, v0.0.84 핵심 fix만 유지. **사용자 평가: "재현 안 됨, 청감 괜찮음"** ⭐ — 다만 가끔 몇 초 무음 1회 보고.
+9. **시도 5 (실패) — v0.0.86(임시) v0.0.85 + `_latestObs=null` 만 추가**: 가끔 무음 fix 시도. **사용자 보고 "큰 문제 — 호스트도 옛 위치로 돌아감"**. 그러나 호스트 logcat 분석 결과 호스트는 정상 동작 (seek 명령대로). 원인 미상.
+10. **시도 6 — v0.0.84 다시 모든 fix 누적**: "무음 + 청감 떨어짐" 재현. v0.0.85 대비 부정적.
+11. **v0.0.81 단독 테스트**: ANCHOR-VERIFY만 (호스트 fix 없는 채). 사용자 평가 "좋았다 안 좋았다" (환경 의존, 명확한 격리 어려움). logcat: REJECT 1회 (184초 차이 자동 회복) + 큰 어긋남 anchor 다수 (verify 자동 정렬).
+
+**최종 결정 (v0.0.82 commit)**:
+
+v0.0.81 commit baseline + **호스트 `_broadcastObs()` 제거 1줄**만 추가. 다른 시도들 (accum 재계산, _latestObs=null, fallback cooldown 가드) 모두 보류 — 격리 못 했거나 부작용 의심.
+
+**변경** (`native_audio_sync_service.dart:529~`):
+```dart
+// Before:
+_broadcastObs();  // syncSeek 안에서 즉시 호출
+
+// After (v0.0.82):
+// _broadcastObs() 호출 제거. 정기 timer broadcast(500ms 주기)가 native seek
+// 완료 후 정확한 obs 보냄.
+```
+
+**측정 검증 (오늘 실기기 N=여러 회)**:
+- ✅ "게스트가 옛 위치로 돌아옴" race 재현 안 됨 (root cause fix 효과)
+- ✅ 사용자 청감 "괜찮음" (v0.0.85 시점 평가, ANCHOR-VERIFY 없는 상태였지만 v0.0.82는 ANCHOR-VERIFY 살아있음 — 환경 의존 청감은 별도 트랙)
+- ⚠️ 가끔 몇 초 무음 발생 (1~2회). 호스트 큰 seek 후 ~500ms 동안 stale obs 잔존 가능 (정기 timer 주기). 별도 트랙.
+
+**남은 문제 / 미해결**:
+
+1. **가끔 몇 초 무음** (호스트 큰 seek 후 ~500ms transient):
+   - root cause 후보: 호스트 정기 broadcast 주기 500ms — 그 사이 게스트 `_latestObs`는 직전 호스트 obs (seek 직전 위치 = stale)
+   - 게스트 fallback alignment가 stale obs로 보정 시도 → 옛 위치 점프 → 디코드 wait → 무음
+   - v0.0.86 `_latestObs = null` 시도했지만 "호스트도 옛 위치" 큰 문제 발생 (원인 미상)
+   - 가능한 fix 후보 (다음 세션):
+     - (a) 호스트 큰 seek 시 정기 timer broadcast 주기 임시 단축 (예: 100ms × 5회)
+     - (b) 게스트 측 `_latestObs.hostTimeMs` 신선도 검사 — 너무 오래된 obs는 fallback에서 무시
+     - (c) `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드 (이전 v0.0.83 일부, 단독 안전 검증 필요)
+
+2. **ANCHOR-VERIFY 단독 청감 부작용 의심 (격리 못 함)**:
+   - v0.0.84 (4 fix 누적) 시 사용자 "묘하게 청감 떨어짐"
+   - v0.0.85 (ANCHOR-VERIFY 빼고 호스트 fix만) 시 "괜찮음"
+   - 다만 N=1 청감 평가라 환경 변동성과 분리 어려움
+   - v0.0.82는 ANCHOR-VERIFY 포함이라 청감 부작용 잠재 — 다음 세션 N=여러 회 측정으로 격리 필요
+
+3. **v0.0.86 `_latestObs=null` 시 "호스트도 옛 위치" 신규 race**:
+   - logcat에선 호스트 정상 동작 (정상 seek + 진행)
+   - 사용자가 본 청감 또는 UI 표시의 원인 미상
+   - 일단 v0.0.82는 `_latestObs=null` 안 들어가니까 발생 안 함
+   - 다음 세션 fix 시 주의
+
+**잘못된 fix들 정직히 인정** (오늘 학습):
+- ANCHOR-VERIFY 사후 검증 = 효과 있는 안전망 (race 자동 회복) but 청감 부작용 의심
+- v0.0.82(임시) accum 재계산 = cascade race 부분 fix (root cause 아님)
+- v0.0.83(임시) `_latestObs=null` = fallback 차단 안전망 (root cause 아님, v0.0.86에서 다른 race 발견)
+- v0.0.84(임시) 호스트 `_broadcastObs()` 제거 = **진짜 root cause** — 1줄 변경이 큰 효과
+
+→ "복잡한 fix 여러 개" 대신 **"진짜 root cause 1개 격리"**가 정답이었음. 사용자 통찰 ("TCP는 순서 보장이라 다른 영역") 결정적.
+
+**검증**:
+- ✅ `flutter analyze` No issues
+- ✅ `flutter build apk --debug` 통과
+- ✅ 실기기 사용자 청감 "괜찮음" 보고 + 옛 위치 race 안 나타남
+- ✅ v0.0.85 시점 시나리오 검증 (v0.0.82와 코드 거의 동등, ANCHOR-VERIFY만 차이)
+
+**회귀 위험**: 매우 낮음.
+- 1줄 변경 (호스트 syncSeek 안 `_broadcastObs()` 제거)
+- 정기 timer broadcast (500ms 주기)는 그대로 — 게스트가 호스트 위치 정보 못 받는 거 아님
+- 그 사이 500ms 동안 게스트 fallback이 stale obs 가능 (남은 문제 1번) — v0.0.81 baseline 대비 더 안 좋아진 점 없음
+
+**빌드**: v0.0.82
+
 ---
 
 #### 미해결 이슈

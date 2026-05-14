@@ -528,7 +528,11 @@ class NativeAudioSyncService {
       'data': {'targetMs': position.inMilliseconds},
     });
 
-    _broadcastObs();
+    // v0.0.82: _broadcastObs() 호출 제거. native seek 비동기(즉시 return)라 이 시점
+    // ts는 seek 처리 전 stale virtualFrame(이전 호스트 위치). 게스트가 그 stale obs
+    // 받으면 fallback이 게스트를 옛 위치로 잘못 seek (사용자 보고: "호스트 seek했는데
+    // 게스트가 새 위치 갔다 옛 위치로 돌아옴" + "vfDiff -250ms 영구 잔재"). 정기
+    // timer(500ms 주기) broadcast가 native seek 완료 후 정확한 obs 보냄.
 
     _logHostEvent(
       event: 'host_seek',

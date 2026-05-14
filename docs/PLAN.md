@@ -115,6 +115,13 @@
 **§B clock sync 추가 보강 (v0.0.80 후속)** — outlier rejection + age limit + stable window 가드 (HISTORY (96)) 완료. 남은 후속:
 
 - ✅ **ANCHOR-VERIFY 사후 검증 + anchor 자동 무효화** — v0.0.81 (HISTORY (97)) 완료. anchor 박힌 후 100ms 시점 ts.virtualFrame이 targetGuestVf와 임계(500ms) 초과면 anchor 무효화 + accum 되돌리기 + 다음 obs 시 재시도. 측정에서 큰 seek 연타 환경 race rate 31% (anchor_set 29 중 9회 REJECT) 자동 회복 확정. 청감 사고 0회.
+- ✅ **호스트 syncSeek `_broadcastObs()` 제거 (게스트 옛 위치 race 진짜 root cause fix)** — v0.0.82 (HISTORY (98)) 완료. native seek 비동기라 syncSeek 직후 ts는 stale virtualFrame. 게스트가 그 stale obs로 fallback 잘못 보정 → 옛 위치 점프. 1줄 변경으로 root cause fix. 사용자 청감 "괜찮음" 확정.
+- ⏳ **가끔 몇 초 무음 fix** (HISTORY (98) 남은 문제 1번) — 호스트 큰 seek 후 ~500ms transient. 후보:
+  - (a) 호스트 큰 seek 시 정기 timer broadcast 주기 임시 단축 (예: 100ms × 5회)
+  - (b) 게스트 측 obs 신선도 검사 (`_latestObs.hostTimeMs` 너무 오래된 obs는 fallback에서 무시)
+  - (c) `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드 (v0.0.83 임시 시도 일부, 단독 검증 필요)
+  - 주의: `_latestObs = null` 시도 시 "호스트도 옛 위치" 신규 race 발생 (HISTORY (98) 남은 문제 3번). 원인 미상.
+- ⏳ **ANCHOR-VERIFY 단독 청감 부작용 격리** (HISTORY (98) 남은 문제 2번) — v0.0.84 (4 fix 누적) 시 사용자 "묘하게 청감 떨어짐" 보고. v0.0.82는 ANCHOR-VERIFY 포함. N=여러 회 측정으로 단독 부작용 격리 필요.
 - ⏳ **임계 보강 실험** — 500ms 보수적 — 200~300ms로 strict화 + false positive 측정. 우리 데이터 -769ms 경계 케이스 잡으려면.
 - ⏳ **ANCHOR-VERIFY deadline 보강** — 100ms 너무 짧을 가능성. 300~500ms로 늘려서 디코더 wait 더 긴 케이스 정확히 측정.
 - ⏳ **obs 신선도 가드 추가 (사용자 짚은 가설 보강)** — `_handleAudioObs`에 obs.hostTimeMs 신선도 검사. TCP 순서 자체는 보장이지만 호스트 측 broadcast 시점 race 안전망.

@@ -325,6 +325,50 @@ v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win
 - ANCHOR-VERIFY deadline 100ms 너무 짧을 수 있음 — 디코더 wait 더 긴 케이스 정확 측정 위해 300~500ms 보강 가능.
 - obs 신선도 가드(`obs.hostTimeMs` 검사) 미적용 — TCP 순서는 OK이지만 호스트 측 broadcast 시점 race 안전망으로 추가 가능.
 
+### v0.0.82 후속: 호스트 syncSeek `_broadcastObs()` 제거 (2026-05-15 HISTORY (98))
+
+**배경**: v0.0.81 (97) ANCHOR-VERIFY 자동 회복 작동 확인 후, 사용자 보고 신규 시나리오 "호스트 seek 했는데 게스트가 새 위치 갔다 옛 위치로 돌아옴" + "vfDiff -250ms 영구 잔재". race 자체의 진짜 root cause 격리.
+
+**사용자 핵심 통찰** (진단 결정적):
+> "tcp라 모든 명령 순서대로 간다며 그럼 게스트가 받기전 다른 명령이 갔을리가 없잖아"
+
+→ 메시지 순서 race 아니라 **호스트 측 race**. 코드 정독으로 확정.
+
+**진짜 root cause** (`native_audio_sync_service.dart:syncSeek`):
+```dart
+await _engine.seekToFrame(clampedTarget);  // Android Oboe 비동기 (즉시 return)
+_p2p.broadcastToAll({'type': 'seek-notify', ...});
+_broadcastObs();  // ⚠️ native seek 처리 전 ts 측정 → stale virtualFrame broadcast
+```
+
+호스트가 seek-notify (정확한 새 위치) + audio-obs (stale 이전 위치) 두 메시지 보냄. 게스트:
+1. seek-notify 처리 → `seekToFrame(새 위치)` → 게스트 새 위치 점프 ✓
+2. audio-obs 처리 → `_latestObs = stale 이전 위치` ⚠️
+3. ts poll → fallback alignment: stale obs vs 게스트 새 위치 = 큰 drift → `seekToFrame(옛 위치)` → **게스트 옛 위치로 돌아감** ⚠️
+
+**Fix (v0.0.82, 1줄)**: 호스트 `syncSeek` 안 `_broadcastObs()` 호출 제거. 정기 timer broadcast (`_obsBroadcastIntervalMs = 500ms` 주기)가 native seek 완료 후 정확한 obs 보냄.
+
+**검증 (v0.0.85 임시 시점 실기기)**:
+- ✅ 옛 위치 race 재현 안 됨 (사용자 보고)
+- ✅ 사용자 청감 "괜찮음" 보고
+- ⚠️ 가끔 몇 초 무음 (호스트 큰 seek 후 ~500ms transient — 정기 timer 주기 안 stale obs 잔존)
+
+**오늘 학습 (잘못된 시도 정직히)**:
+
+| 시도 | 효과 | 평가 |
+|---|---|---|
+| ANCHOR-VERIFY accum 재계산 (v0.0.82 임시) | cascade race 부분 fix | surface symptom, root cause 아님 |
+| `_handleSeekNotify`의 `_latestObs = null` (v0.0.83 임시) | fallback 차단 안전망 | surface symptom, v0.0.86 시 호스트 옛 위치 신규 race 유발 |
+| `_fallbackAlignment`의 `_seekCooldownUntilMs` 가드 (v0.0.83 임시) | seek 직후 fallback skip | surface symptom |
+| **호스트 `_broadcastObs()` 제거 (v0.0.82, 1줄)** | **stale obs broadcast 자체 차단** | **진짜 root cause fix** |
+
+→ "복잡한 fix 여러 개" 대신 "진짜 root cause 1개 격리"가 정답. 사용자 통찰이 결정적.
+
+**남은 문제 (PLAN HIGH 후속)**:
+- 정기 timer broadcast 500ms 주기 — 그 사이 stale obs로 가끔 몇 초 무음 가능
+- ANCHOR-VERIFY 단독 청감 부작용 미격리 (N=1 평가 한계)
+- `_latestObs = null` 시도 시 "호스트도 옛 위치" 신규 race (원인 미상)
+
 ---
 
 ## E. 임계 정확 값

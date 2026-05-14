@@ -149,10 +149,10 @@
          ├─ _engine.seekToFrame(1323000)
          │  └ native 즉시 점프                                    ▶♪(30초)
          │
-         ├─ broadcastToAll('seek-notify', {targetMs=30000})
-         │  └ 게스트에게 "30초로 점프" 알림
-         │
-         └─ _broadcastObs()                                ←── obs도 갱신
+         └─ broadcastToAll('seek-notify', {targetMs=30000})
+            └ 게스트에게 "30초로 점프" 알림
+         (v0.0.82: _broadcastObs() 호출 제거. native seek 비동기라 stale obs 방지.
+          정기 timer broadcast (500ms 주기)가 native seek 완료 후 정확한 obs 보냄.)
 ─ TCP ──────[seek-notify ─ obs ─]──────
                   │       ~30~50ms lag                  ▶♪(5초) ── 점프 → ▶♪(30초)
                   ↓
