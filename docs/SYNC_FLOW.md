@@ -209,6 +209,9 @@
    ─ 게스트를 그 위치로 강제 seek
    ─ 출력 지연 비대칭(oG - oH)을 baseline에 베이크인
    ─ "이 시점 (호스트 framePos, 게스트 framePos) pair를 anchor로 저장"
+   ─ v0.0.81: 100ms 후 ANCHOR-VERIFY (target=targetGuestVf vs actual=ts.virtualFrame)
+       → diffMs > 500ms이면 anchor 무효화 + accum 되돌리기 + 다음 obs 시 재시도
+       (큰 seek 연타 race 자동 회복, 측정 race rate 31%)
    
 3. _recomputeDrift (anchor 잡힌 후 매 poll)
    ─ 호스트 framePos 변화량 (anchor 시점 → 현재) — 외삽

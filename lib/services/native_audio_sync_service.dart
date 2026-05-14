@@ -31,6 +31,13 @@ const double _obsBroadcastIntervalMs = 500.0;
 // 사용자 체감 "버튼 누르고 잠깐 후 재생"이지만 음악 동기 앱 특성상 무시 수준.
 const int _scheduleBufferMs = 200;
 
+// v0.0.81: ANCHOR-VERIFY 임계 — anchor 박힌 100ms 후 ts.virtualFrame이 targetGuestVf와
+// 이 임계 넘게 차이나면 anchor 무효화 + 다음 obs 도착 시 재시도. 큰 seek 직후 native가
+// 정확히 도달 못 한 경우(seek race / 디코드 wait 등) 영구 잔재 자동 회복.
+// 평소 100ms 후 측정값은 ~90ms (seek 도달까지 디코더 처리 시간) → 500ms이면 그 5배 안전 마진.
+// 사고 케이스(35초 잔재) 같은 큰 어긋남만 잡고 정상 동작은 영향 0.
+const double _anchorVerifyRejectThresholdMs = 500.0;
+
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
 /// 게스트: 파일 다운로드 + 네이티브 엔진 재생 + drift 계산 + seek 보정.
@@ -75,6 +82,13 @@ class NativeAudioSyncService {
   double _anchoredOutLatDeltaMs = 0;
   // 최신 drift
   double? _latestDriftMs;
+
+  // v0.0.81 ANCHOR-VERIFY: anchor establish 직후 다음 ts poll 시점에
+  // targetGuestVf vs ts.virtualFrame 비교 → 임계 초과 시 anchor 자동 무효화.
+  // _pendingAnchorVerifyInitialCorrection은 무효화 시 _seekCorrectionAccum 되돌리기용.
+  int? _pendingAnchorVerifyTarget;
+  int? _pendingAnchorVerifyDeadline;
+  int? _pendingAnchorVerifyInitialCorrection;
   // v0.0.24: 최근 drift 샘플 윈도우 (중앙값 기반 seek 판단용)
   final List<double> _driftSamples = [];
   // 누적 seek 보정 (HAL framePos는 seek 영향 없음 → accum으로 복원)
@@ -1245,6 +1259,45 @@ class NativeAudioSyncService {
         _tsFailCount = 0;
       }
 
+      // v0.0.81 ANCHOR-VERIFY: anchor establish 직후 첫 ts에서 seek 도달 정확도 측정
+      if (_pendingAnchorVerifyTarget != null) {
+        final target = _pendingAnchorVerifyTarget!;
+        final actual = ts.virtualFrame;
+        final diffFrames = actual - target;
+        final diffMs = (diffFrames * 1000.0 / ts.sampleRate);
+        debugPrint(
+          '[ANCHOR-VERIFY] target=$target actual=$actual '
+          'diffFrames=$diffFrames diffMs=${diffMs.toStringAsFixed(1)}ms',
+        );
+        // v0.0.81: 임계 초과 시 anchor 무효화 + accum 되돌리기
+        if (diffMs.abs() > _anchorVerifyRejectThresholdMs) {
+          debugPrint(
+            '[ANCHOR-VERIFY] REJECT — diffMs ${diffMs.toStringAsFixed(1)}ms > '
+            '${_anchorVerifyRejectThresholdMs}ms. anchor 무효화 + accum 되돌리기',
+          );
+          // 잘못 적용된 _seekCorrectionAccum 되돌리기 (원래 anchor establish에서 += 한 만큼)
+          if (_pendingAnchorVerifyInitialCorrection != null) {
+            _seekCorrectionAccum -= _pendingAnchorVerifyInitialCorrection!;
+          }
+          // anchor 무효화 (다음 obs 도착 시 _tryEstablishAnchor 재시도)
+          _anchorHostFrame = null;
+          _anchorGuestFrame = null;
+          _anchoredOutLatDeltaMs = 0;
+          _offsetAtAnchor = null;
+          _driftSamples.clear();
+          _logGuestEvent(event: 'anchor_reset_verify_fail');
+        }
+        _pendingAnchorVerifyTarget = null;
+        _pendingAnchorVerifyDeadline = null;
+        _pendingAnchorVerifyInitialCorrection = null;
+      } else if (_pendingAnchorVerifyDeadline != null &&
+          ts.wallMs > _pendingAnchorVerifyDeadline!) {
+        // deadline 지났는데 검증 못 함 (코너 케이스 안전망)
+        _pendingAnchorVerifyTarget = null;
+        _pendingAnchorVerifyDeadline = null;
+        _pendingAnchorVerifyInitialCorrection = null;
+      }
+
       // 게스트: drift 보정
       if (!_isHost && _playing) {
         if (!_sync.isOffsetStable) {
@@ -1392,6 +1445,12 @@ class NativeAudioSyncService {
     );
 
     _logGuestEvent(event: 'anchor_set');
+
+    // v0.0.81 ANCHOR-VERIFY: 다음 ts poll 시점에 seek 도달 정확도 측정 예약.
+    // _seekCooldown(보통 500ms) 안에 seek 완료 + ts emit 도달 가정.
+    _pendingAnchorVerifyTarget = targetGuestVf;
+    _pendingAnchorVerifyDeadline = ts.wallMs + _seekCooldown.inMilliseconds + 500;
+    _pendingAnchorVerifyInitialCorrection = initialCorrection;
   }
 
   /// 게스트 → 호스트로 drift report 전송 (500ms 주기).

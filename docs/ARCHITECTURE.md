@@ -385,6 +385,7 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
   - `filtered = filtered * (1 - α) + winMinRaw * α` (α=0.1 단일, **v0.0.74 fast phase 제거**)
 - **stable 판정 (§D-2 v0.0.63 AND 조합)**: `delta < 2ms AND |filtered - winMinRaw| < 2ms` 5번 연속 만족 시 stable count 도달. **v0.0.80 추가 가드**: `_recentWindow.length >= 3` (carry over 1개만 남은 상태에서 false positive 차단).
 - **isOffsetStable의 의미**: anchor establish 진입 게이트. false 동안 fallback alignment(30ms 임계 거친 정렬). filteredOffsetMs는 stable 무관하게 항상 사용 — drift 계산/fallback 양쪽 모두에서.
+- **v0.0.81 ANCHOR-VERIFY 사후 검증**: anchor 박힌 직후 100ms 시점에 ts.virtualFrame이 targetGuestVf와 임계(500ms) 초과 차이면 anchor 무효화 + `_seekCorrectionAccum` 되돌리기 + 다음 obs 시 재시도. 큰 seek 연타 race 자동 회복 (측정 race rate 31% 자동 흡수). HISTORY (97).
 
 **호스트 seek 처리**: `seek-notify` 메시지(절대 `targetMs`)로 게스트에 직접 통보. delta는 비동기 중첩 시 누적 오차 → absolute는 멱등(idempotent). drift 계산은 framePos 기반이라 별도 영향 없음 — 콘텐츠 정렬만 변동.
 

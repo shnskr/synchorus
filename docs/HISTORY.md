@@ -5048,6 +5048,103 @@ row 90~95 [fallback]          drift -66 → -21 → -14 → -1 → +7 (회복)
 
 **빌드**: v0.0.80
 
+### 2026-05-14 (97) — v0.0.81 ANCHOR-VERIFY 사후 검증 + anchor 자동 무효화 + sync info UI 실시간 갱신
+
+**배경**: v0.0.80 (96)에서 sync 자체는 매우 robust(filtered 표류 0.3ms) 도달. 그러나 측정 마지막 부분에 vfDiff -250ms 영구 잔재 1회 발견. 사용자 청감 "마지막 부분 약간 어긋남"으로 인지. 별도 트랙(PLAN HIGH §B 후속)으로 분리.
+
+**진단 흐름**:
+1. **player 화면 sync info 갱신 안 됨**: `_buildSyncInfo`가 한 번 read만 하고 끝 → drift / seek / offset / RTT 변경되어도 widget rebuild 안 됨. 사용자 보고로 발견.
+2. **ANCHOR-VERIFY 진단 추가** (`_tryEstablishAnchor` 직후 100ms 후 ts.virtualFrame이 targetGuestVf와 일치하는지 측정):
+   - anchor 박을 때 _pendingAnchorVerifyTarget 저장
+   - 다음 ts poll 시 actual vs target 비교 + diffMs logcat 출력
+3. **첫 측정 데이터로 사고 잡힘** (사용자 seek 연타 테스트):
+   - 평소 anchor: diffMs 50~100ms (seek 도달 디코더 wait, **정상**)
+   - **사고 케이스**: target=1549129 (35초) actual=6144 (0.13초) **diffMs=-34988ms** = 35초 영구 잔재
+4. **사용자 가설 검토** ("obs 순서 보장 안 돼서 다른 게 박힌 건가"):
+   - TCP socket이라 obs 순서 자체 보장 ✓
+   - `_handleAudioObs`가 단순 덮어쓰기 (`_latestObs = obs`), 신선도 검사 X
+   - 그러나 우리 사고의 root cause는 obs 순서가 아니라 **게스트 측 seek 명령 처리 race** (큰 seek 연타 중 native가 정확히 도달 못 함)
+5. **사후 검증 + 자동 무효화 디자인**: anchor 박힌 후 100ms 시점에 vfDiff > 임계(500ms)면 anchor 무효화 + `_seekCorrectionAccum` 되돌리기 + 다음 obs 도착 시 재시도
+
+**변경 사항**:
+
+`lib/services/native_audio_sync_service.dart`:
+1. **상수 NEW**: `_anchorVerifyRejectThresholdMs = 500.0`
+   - 평소 100ms 후 측정값 ~90ms (seek 도달 디코더 wait) → 500ms는 5배 안전 마진
+   - 사고 케이스(수십 초 잔재) 같은 큰 어긋남만 잡고 정상 동작 영향 0
+2. **필드 NEW**: `_pendingAnchorVerifyTarget` / `_pendingAnchorVerifyDeadline` / `_pendingAnchorVerifyInitialCorrection`
+3. **`_tryEstablishAnchor` 끝**에 _pendingAnchorVerify 3개 필드 예약
+4. **`_startTimestampWatch` listener**에서 다음 ts 시점에 검증:
+   - target vs actual 비교, diffMs 계산
+   - `[ANCHOR-VERIFY] target=X actual=Y diffFrames=Z diffMs=W` 로그
+   - **임계 초과 시**:
+     - `[ANCHOR-VERIFY] REJECT — diffMs ... > 500.0ms. anchor 무효화 + accum 되돌리기` 로그
+     - `_seekCorrectionAccum -= _pendingAnchorVerifyInitialCorrection` (잘못 적용된 보정 되돌리기)
+     - `_anchorHostFrame / _anchorGuestFrame / _anchoredOutLatDeltaMs / _offsetAtAnchor` 모두 무효화
+     - `_driftSamples.clear()` (이전 sample 폐기)
+     - `_logGuestEvent(event: 'anchor_reset_verify_fail')` (csv 기록)
+   - 다음 obs 도착 시 `_tryEstablishAnchor` 재시도 → 자동 회복
+
+`lib/screens/player_screen.dart`:
+- `_buildSyncInfo`를 `StreamBuilder<Duration>(stream: _audio.positionStream)`로 감쌈
+- positionStream(100ms 주기 native poll) 구독으로 매 100ms widget rebuild
+- drift / seekCount / offset / RTT 실시간 표시
+- **isOffsetStable 표시 추가** (`stable: ✓/✗`)
+
+**측정 검증 (실기기 S22 + A7 Lite, 대규모 seek 연타 시나리오)**:
+
+logcat 패턴 (사용자 1분간 적극 사용):
+- 평소 anchor diffMs **0~100ms 범위** (seek 도달 정상)
+- ANCHOR-VERIFY REJECT 발동 사례:
+  | diffMs | 의미 |
+  |---|---|
+  | -34988ms (35초) | 호스트 큰 seek 직후 게스트 미도달 |
+  | 178437ms (178초) | 곡 내 큰 점프 race |
+  | 125645ms (125초) | 비슷 |
+  | 30958ms (30초) | 비슷 |
+  | 11906ms (11초) | 비슷 |
+  | -8686ms (-8초) | 비슷 |
+  | -769ms (-0.7초) | 임계 근접 |
+  | -151300ms (-151초) | 큰 어긋남 |
+
+csv event 분포 (전체 측정):
+- host_seek **432회** (사용자 적극 seek 연타)
+- anchor_set 29회
+- **anchor_reset_verify_fail 9회** ⭐ (fix 자동 회복 9회)
+- **race rate = 9/29 = 31%** — 큰 seek 연타 환경에서 약 1/3 anchor가 race로 잘못 박힘
+- 모든 REJECT 직후 다음 anchor 정상 박힘 (자동 회복 작동)
+- **사용자 청감 사고 인지 0회** = fix가 백그라운드에서 정확히 처리
+
+**의미**:
+- HISTORY (96)에서 본 vfDiff -250ms 잔재의 진짜 root cause = 게스트 seek 명령 처리 race
+- fix 안 한 v0.0.80에선 31% race가 영구 잔재로 남아 청감 어긋남 유발
+- v0.0.81 사후 검증으로 자동 회복 → 청감 어긋남 0
+
+**1단계 한계 (인정)**:
+- 임계 500ms은 보수적 — 200~300ms 더 strict로 바꾸면 -769ms 같은 경계 케이스도 잡힘 (현재는 통과)
+- 다만 평소 100ms 차이와 너무 가까워 false positive 위험 있음 — 측정 데이터 더 모은 후 조정
+- ANCHOR-VERIFY 시점이 100ms (seek 도달 시간 변동) — 더 긴 deadline (300~500ms)로 보강 가능
+
+**다음 작업 후보** (별도 트랙):
+- 임계 200~300ms 실험 (false positive 측정)
+- ANCHOR-VERIFY deadline 300ms 같이 보강
+- obs 신선도 가드 추가 (사용자 짚은 가설 — TCP는 OK지만 안전망)
+
+**검증**:
+- ✅ `flutter analyze` No issues
+- ✅ `flutter build apk --debug` 통과 (9.7s)
+- ✅ 실기기 측정에서 9회 REJECT 자동 회복 정량 확정
+- ✅ 사용자 청감 사고 인지 0회 (fix 효과 청감 매칭)
+- ✅ player UI sync info 실시간 갱신 (100ms 주기)
+
+**회귀 위험**: 매우 낮음.
+- ANCHOR-VERIFY 검증은 anchor establish 직후 100ms 후 1회만 작동
+- 정상 anchor(diffMs < 500ms)는 영향 0
+- REJECT 시 _seekCorrectionAccum 정확히 되돌림 (initialCorrection 저장 → 빼기)
+- _seekCooldownUntilMs 자연 작동으로 즉시 재시도 폭주 방지
+
+**빌드**: v0.0.81
+
 ---
 
 #### 미해결 이슈

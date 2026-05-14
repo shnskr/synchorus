@@ -114,12 +114,12 @@
 
 **§B clock sync 추가 보강 (v0.0.80 후속)** — outlier rejection + age limit + stable window 가드 (HISTORY (96)) 완료. 남은 후속:
 
-- ⏳ **anchor 베이크인 outputLatency 부정확 fix** — v0.0.80 측정에서 sync 자체는 ±0.3ms로 매우 정확하나 anchor 박힌 후 vfDiff -250ms 영구 잔재 발견 (csv `v080_test.csv` seq 472~487). drift는 ±3ms로 작음. 즉 anchor 박힌 시점의 outputLatency baked-in 매핑이 부정확한 케이스. HISTORY (42)/(45) 미해결 이슈 영역과 같음. fix 방향 후보:
-  - (a) anchor establish 시점에 vfDiff 임계 검사 — 큰 vfDiff면 anchor 박지 않고 다음 obs 대기
-  - (b) anchor reset 트리거에 vfDiff 임계 추가 (현재는 drift 200ms만, vfDiff도 200ms+면 reset)
-  - (c) BT outputLatency 동적 보정 (HISTORY 미해결 이슈)
-- ⏳ **v0.0.80 자동화 N=2~3 측정** — outlier rejection 효과 정량 비교 (vfDiff signed mean/RMS, anchor reset 빈도, 청감 vs 정량 매칭)
-- ⏳ **2단계 burst sync 재실행 fallback** — window 1분 빈 상태 지속 시 30 ping burst 재실행. 우리 환경에선 거의 발생 안 함이라 후순위. 극심한 jitter 환경 (RTT >30 sample 0개 1시간)에서만 가치.
+- ✅ **ANCHOR-VERIFY 사후 검증 + anchor 자동 무효화** — v0.0.81 (HISTORY (97)) 완료. anchor 박힌 후 100ms 시점 ts.virtualFrame이 targetGuestVf와 임계(500ms) 초과면 anchor 무효화 + accum 되돌리기 + 다음 obs 시 재시도. 측정에서 큰 seek 연타 환경 race rate 31% (anchor_set 29 중 9회 REJECT) 자동 회복 확정. 청감 사고 0회.
+- ⏳ **임계 보강 실험** — 500ms 보수적 — 200~300ms로 strict화 + false positive 측정. 우리 데이터 -769ms 경계 케이스 잡으려면.
+- ⏳ **ANCHOR-VERIFY deadline 보강** — 100ms 너무 짧을 가능성. 300~500ms로 늘려서 디코더 wait 더 긴 케이스 정확히 측정.
+- ⏳ **obs 신선도 가드 추가 (사용자 짚은 가설 보강)** — `_handleAudioObs`에 obs.hostTimeMs 신선도 검사. TCP 순서 자체는 보장이지만 호스트 측 broadcast 시점 race 안전망.
+- ⏳ **v0.0.80/v0.0.81 자동화 N=2~3 측정** — race rate / 청감 vs 정량 매칭 정량 데이터 보강.
+- ⏳ **2단계 burst sync 재실행 fallback** — window 1분 빈 상태 지속 시 30 ping burst 재실행. 우리 환경에선 거의 발생 안 함이라 후순위.
 
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 

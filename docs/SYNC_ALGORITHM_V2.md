@@ -286,6 +286,45 @@ v0.0.56 진단 컬럼(`raw_offset_ms`/`win_min_raw_offset_ms`/`last_rtt_ms`/`win
 - 우리 환경에선 1분에 RTT < 30 sample 평균 9개 들어와 거의 발생 안 함
 - 2단계 burst sync 재실행 fallback은 후순위 (PLAN HIGH 후속)
 
+### v0.0.81 후속: ANCHOR-VERIFY 사후 검증 + 자동 무효화 (2026-05-14 HISTORY (97))
+
+**배경**: v0.0.80 (96) 측정 마지막 부분 vfDiff -250ms 영구 잔재 → 사용자 청감 어긋남. sync 자체는 정확하나 anchor 매핑 부정확. 사용자 가설 "obs 순서 보장 안 됨" 코드 검토 결과 TCP 순서 OK이지만 **게스트 측 seek 명령 처리 race**가 진짜 root cause (큰 seek 연타 시 native가 정확히 도달 못 함).
+
+**디자인 — 사후 검증 + 자동 무효화**:
+
+`_tryEstablishAnchor` 직후 100ms 시점에 게스트 ts.virtualFrame이 targetGuestVf와 임계 초과 차이면 anchor 자동 무효화 + 다음 obs 도착 시 재시도. 사고 자동 회복.
+
+```
+[anchor establish: target=X, _seekCorrectionAccum += initialCorrection]
+   ↓ 100ms 후 (다음 ts poll)
+[ANCHOR-VERIFY] target vs ts.virtualFrame 비교
+   ↓ diffMs > 500ms?
+[REJECT 시]:
+  - _seekCorrectionAccum -= initialCorrection (잘못 적용된 보정 되돌리기)
+  - _anchorHostFrame / _anchorGuestFrame / _anchoredOutLatDeltaMs 무효화
+  - _driftSamples.clear()
+  - csv event: anchor_reset_verify_fail
+  - 다음 obs 도착 시 _tryEstablishAnchor 재시도
+```
+
+**임계 500ms 근거**:
+- 평소 100ms 후 측정값 ~90ms (seek 도달 디코더 wait, 정상)
+- 500ms = 5배 안전 마진
+- 사고 케이스(수십 초~수백 초 잔재)만 잡고 정상 동작 영향 0
+
+**측정 검증 (실기기 큰 seek 연타 시나리오)**:
+- ✅ ANCHOR-VERIFY REJECT 9회 발동 (anchor_set 29회 중 31% race rate)
+- ✅ REJECT diffMs 사례: -34988 / 178437 / 125645 / 30958 / 11906 / -8686 / -769 / -151300 ms
+- ✅ 매 REJECT 직후 다음 anchor 정상 박힘 (자동 회복)
+- ✅ 사용자 청감 사고 인지 0회 = fix가 백그라운드 정확 처리
+- ✅ 정상 anchor diffMs 0~100ms 영향 0
+- player UI sync info도 100ms 주기 실시간 갱신 (`StreamBuilder<Duration>(stream: positionStream)`)
+
+**추가 정직성**:
+- 임계 500ms는 보수적 — 200~300ms strict화로 -769ms 같은 경계 케이스 잡을 수 있음. 다만 false positive 위험 → 측정 더 모은 후 조정 (PLAN HIGH 후속).
+- ANCHOR-VERIFY deadline 100ms 너무 짧을 수 있음 — 디코더 wait 더 긴 케이스 정확 측정 위해 300~500ms 보강 가능.
+- obs 신선도 가드(`obs.hostTimeMs` 검사) 미적용 — TCP 순서는 OK이지만 호스트 측 broadcast 시점 race 안전망으로 추가 가능.
+
 ---
 
 ## E. 임계 정확 값
