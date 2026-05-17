@@ -112,19 +112,7 @@
 - ⏳ 30분+ 측정 검증 (MID-7 — ring buffer 보류로 다시 14분 한도 부활, 직접 측정 어려움)
 - ⏳ iOS 회귀 검증
 
-**§B clock sync 추가 보강 (v0.0.80 후속)** — outlier rejection + age limit + stable window 가드 (HISTORY (96)) 완료. 남은 후속:
-
-- ✅ **ANCHOR-VERIFY 사후 검증 + anchor 자동 무효화** — v0.0.81 (HISTORY (97)) 완료. anchor 박힌 후 100ms 시점 ts.virtualFrame이 targetGuestVf와 임계(500ms) 초과면 anchor 무효화 + accum 되돌리기 + 다음 obs 시 재시도. 측정에서 큰 seek 연타 환경 race rate 31% (anchor_set 29 중 9회 REJECT) 자동 회복 확정. 청감 사고 0회.
-- ✅ **호스트 syncSeek `_broadcastObs()` 제거 (게스트 옛 위치 race 진짜 root cause fix)** — v0.0.82 (HISTORY (98)) 완료. native seek 비동기라 syncSeek 직후 ts는 stale virtualFrame. 게스트가 그 stale obs로 fallback 잘못 보정 → 옛 위치 점프. 1줄 변경으로 root cause fix. 사용자 청감 "괜찮음" 확정.
-- ✅ **가끔 몇 초 무음 fix** — v0.0.83 (HISTORY (99)) 완료. `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드 1줄 추가. seek-notify 직후 1초간 fallback skip → 정기 timer broadcast 새 obs 도달 후 정상 작동. 실기기 N=여러 회 측정에서 무음 안 나타남. `_tryEstablishAnchor`와 같은 cooldown 자료구조 일관성. 회귀 안전.
-- ⏳ **ANCHOR-VERIFY 단독 청감 부작용 격리** (HISTORY (98) 남은 문제 2번) — v0.0.84 (4 fix 누적) 시 사용자 "묘하게 청감 떨어짐" 보고. v0.0.82/v0.0.83은 ANCHOR-VERIFY 포함. N=여러 회 측정으로 단독 부작용 격리 필요.
-- ⏳ **v0.0.86 `_latestObs=null` 신규 race 원인 미상** (HISTORY (98) 남은 문제 3번) — v0.0.83은 영향 없음 (anchor 그대로 작동). 향후 fix 시 주의.
-- ⏳ **호스트 빠른 seek 연타 시 native 측 디코드 wait 무음** (HISTORY (99) 신규) — 매 seek 명령마다 native가 점프 + 디코드 wait. 사용자 의도적 연타 시나리오라 큰 영향 작음. fix 후보: seek 명령 디바운스, 또는 native 측 처리 개선.
-- ⏳ **임계 보강 실험** — 500ms 보수적 — 200~300ms로 strict화 + false positive 측정. 우리 데이터 -769ms 경계 케이스 잡으려면.
-- ⏳ **ANCHOR-VERIFY deadline 보강** — 100ms 너무 짧을 가능성. 300~500ms로 늘려서 디코더 wait 더 긴 케이스 정확히 측정.
-- ⏳ **obs 신선도 가드 추가 (사용자 짚은 가설 보강)** — `_handleAudioObs`에 obs.hostTimeMs 신선도 검사. TCP 순서 자체는 보장이지만 호스트 측 broadcast 시점 race 안전망.
-- ⏳ **v0.0.80/v0.0.81 자동화 N=2~3 측정** — race rate / 청감 vs 정량 매칭 정량 데이터 보강.
-- ⏳ **2단계 burst sync 재실행 fallback** — window 1분 빈 상태 지속 시 30 ping burst 재실행. 우리 환경에선 거의 발생 안 함이라 후순위.
+~~**§B clock sync 추가 보강 (v0.0.80~v0.0.83)**~~ — **2026-05-15 (99) 완료, 사상**. v0.0.80 outlier rejection + v0.0.81 ANCHOR-VERIFY + v0.0.82 호스트 `_broadcastObs()` 제거 + v0.0.83 fallback cooldown 가드. 청감 "괜찮음" 확정, 무음 0회. 잠재 후보(임계 보강 / deadline 보강 / obs 신선도 가드 / 호스트 빠른 seek 연타 무음 / 2단계 burst sync 재실행 / ANCHOR-VERIFY 단독 청감 부작용 측정 / v0.0.86 `_latestObs=null` race 메모) 모두 잔재 발견 시 HISTORY (96)~(99) 참고해 재기.
 
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 
