@@ -113,6 +113,17 @@
 
 ~~**§B clock sync 추가 보강 (v0.0.80~v0.0.83)**~~ — **2026-05-15 (99) 완료, 사상**. v0.0.80 outlier rejection + v0.0.81 ANCHOR-VERIFY + v0.0.82 호스트 `_broadcastObs()` 제거 + v0.0.83 fallback cooldown 가드. 청감 "괜찮음" 확정, 무음 0회. 잠재 후보(임계 보강 / deadline 보강 / obs 신선도 가드 / 호스트 빠른 seek 연타 무음 / 2단계 burst sync 재실행 / ANCHOR-VERIFY 단독 청감 부작용 측정 / v0.0.86 `_latestObs=null` race 메모) 모두 잔재 발견 시 HISTORY (96)~(99) 참고해 재기.
 
+**§B 후속 — 호스트 빠른 seek 연타 시 게스트 sync 누락** (2026-05-17 (100) 후속 측정 신규) — v0.0.84 측정에서 vfDiff -197초 영구 잔재 19초+ 지속 발견 (csv `sync_log_2026-05-17T17-44-45.csv` seq 324~). 사용자 청감 명확("호스트 4분대 vs 게스트 한참 앞"). drift는 ±5ms로 sync 정확, 게스트 syncSeek 자체가 발화 안 됨. ANCHOR-VERIFY는 anchor 박은 직후 100ms만 검증해 통과 후 호스트 큰 seek 폭증 케이스 못 잡음.
+
+진행 후보:
+- (a) 호스트 큰 seek 후 게스트 seek-notify 도달 검증 로그 추가 (msg send vs recv 매칭 진단)
+- (b) ANCHOR-VERIFY 임계 500ms → 200~300ms 좁힘 (HISTORY (98) 남은 문제와 동일 트랙)
+- (c) obs 안 호스트 vf 점프 감지 시 강제 reseek fallback — 게스트가 anchor 박은 후도 호스트 vf 큰 변화 감지하면 syncSeek 발화
+- (d) v0.0.82/v0.0.83 timing race 검토 — 정기 timer broadcast 500ms 주기 안 seek-notify와의 timing
+- (e) v0.0.84 큐 모델 fix와의 상호작용 — decodeLoop 처리 전 broadcast obs는 새 vf인데 ring은 옛 위치, 이게 호스트 측 obs 신뢰성에 영향 주는지 검증
+
+순서 권장: (a) 진단 로그 먼저 → root cause 좁힘 → (b)~(e) 중 직접 영향 영역만 fix.
+
 ~~**v0.0.74 cold start 측정 + 회귀 검증**~~ — **2026-05-10 (90) 완료, fix 통합 사상**.
 
 진행 결과:
