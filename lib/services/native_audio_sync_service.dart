@@ -1358,7 +1358,14 @@ class NativeAudioSyncService {
     }
 
     // v0.0.48 롤백: 30ms 이상 차이나면 보정, 쿨다운 1초. (v0.0.45 동작 회복)
+    // v0.0.83: _seekCooldownUntilMs도 같이 체크 — seek-notify 직후 1초간 fallback skip.
+    // 호스트 큰 seek 후 정기 timer broadcast(500ms 주기) 새 obs 도달 전까지 게스트
+    // _latestObs는 stale(이전 호스트 위치). 그 stale obs로 fallback이 게스트를 옛 위치로
+    // 잘못 seek (HISTORY (98) 남은 문제 1번). _tryEstablishAnchor가 이미 같은 cooldown
+    // 가드 사용 중(line 1322) — fallback도 일관성. seek-notify 후 1초간 fallback skip,
+    // 그 사이 호스트 새 obs 도달 후 정상 작동.
     if (ts.wallMs < _fallbackAlignCooldownMs) return;
+    if (ts.wallMs < _seekCooldownUntilMs) return;
     if (driftMs.abs() > 30) {
       final targetGuestVf = (expectedPositionMs * _framesPerMs).round();
       unawaited(_engine.seekToFrame(targetGuestVf));

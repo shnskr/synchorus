@@ -365,9 +365,36 @@ _broadcastObs();  // ⚠️ native seek 처리 전 ts 측정 → stale virtualFr
 → "복잡한 fix 여러 개" 대신 "진짜 root cause 1개 격리"가 정답. 사용자 통찰이 결정적.
 
 **남은 문제 (PLAN HIGH 후속)**:
-- 정기 timer broadcast 500ms 주기 — 그 사이 stale obs로 가끔 몇 초 무음 가능
-- ANCHOR-VERIFY 단독 청감 부작용 미격리 (N=1 평가 한계)
-- `_latestObs = null` 시도 시 "호스트도 옛 위치" 신규 race (원인 미상)
+- ✅ ~~정기 timer broadcast 500ms 주기 — 그 사이 stale obs로 가끔 몇 초 무음 가능~~ — v0.0.83 fix 완료
+- ⏳ ANCHOR-VERIFY 단독 청감 부작용 미격리 (N=1 평가 한계)
+- ⏳ `_latestObs = null` 시도 시 "호스트도 옛 위치" 신규 race (원인 미상)
+
+### v0.0.83 후속: `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드 (2026-05-15 HISTORY (99))
+
+**배경**: v0.0.82 (98) 호스트 syncSeek 즉시 stale obs broadcast 차단 후 남은 문제 — 정기 timer broadcast(500ms 주기) 안 잔존 stale obs로 가끔 몇 초 무음.
+
+**root cause**: 호스트 큰 seek 직후 ~500ms 동안 게스트 `_latestObs` stale → `_fallbackAlignment`가 stale obs로 옛 위치 잘못 seek → native PCM 디코드 wait → 무음.
+
+**일관성 발견**: `_handleSeekNotify`에서 `_seekCooldownUntilMs = now + 1000` set. `_tryEstablishAnchor`는 이미 사용(line 1322), 그러나 `_fallbackAlignment`는 무시.
+
+**Fix (1줄)** (`_fallbackAlignment`):
+```dart
+if (ts.wallMs < _fallbackAlignCooldownMs) return;
+if (ts.wallMs < _seekCooldownUntilMs) return;   // ← NEW
+if (driftMs.abs() > 30) { ... }
+```
+
+**효과 (실기기 N=여러 회)**:
+- ✅ 가끔 발생하던 무음 안 나타남
+- ✅ 부작용 없음 (anchor 그대로 작동, 호스트 측 영향 0)
+
+**v0.0.86 `_latestObs = null` 시도와 안전성 비교**:
+- v0.0.86: obs 객체 무효화 → fallback **및 anchor** 모두 skip → 호스트 영향 알 수 없는 신규 race
+- v0.0.83: fallback만 skip → anchor 그대로 → 안전
+
+**남은 문제**:
+- ANCHOR-VERIFY 단독 청감 부작용 격리 (N=여러 회 측정 필요)
+- 호스트 빠른 seek 연타 시 native 디코드 wait 무음 (별도 영역, v0.0.83 fix와 무관)
 
 ---
 

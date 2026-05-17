@@ -5229,6 +5229,74 @@ _broadcastObs();  // syncSeek 안에서 즉시 호출
 
 **빌드**: v0.0.82
 
+### 2026-05-15 (99) — v0.0.83 `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드 추가 (가끔 무음 fix)
+
+**배경**: v0.0.82 (98) 호스트 syncSeek `_broadcastObs()` 제거로 즉시 stale obs broadcast race fix. 그러나 정기 timer broadcast (500ms 주기) 안 잔존 stale obs로 인한 단발성 무음 가능 (HISTORY (98) 남은 문제 1번).
+
+**root cause 분석 (HISTORY (98) 남은 문제 1번)**:
+- 호스트 큰 seek 직후 ~500ms 동안 게스트 `_latestObs`는 직전 정기 timer broadcast로 받은 obs (호스트 seek 전 위치) = stale
+- 게스트 100ms ts poll → fallback alignment 작동:
+  - 게스트 vf = 새 위치 (seek-notify로 점프)
+  - `_latestObs.virtualFrame` = stale (이전 호스트 위치)
+  - drift = 큰 차이 → 30ms 임계 초과
+  - `seekToFrame(stale 위치)` 잘못 호출 → 게스트가 옛 위치로 점프
+- Native (Oboe + AMediaCodec 사전할당 PCM): 옛 위치 영역 디코드 안 됨 → PCM 버퍼 빈 상태 → **몇 초 무음**
+
+**일관성 발견**:
+- `_handleSeekNotify`에서 `_seekCooldownUntilMs = now + 1000` set (v0.0.81 baseline)
+- `_tryEstablishAnchor`는 이미 이 cooldown 가드 사용 (line 1322)
+- 그러나 **`_fallbackAlignment`는 이 cooldown 무시** → seek 직후 stale obs 사용 가능
+
+**Fix (1줄)** (`native_audio_sync_service.dart:_fallbackAlignment`):
+```dart
+// Before:
+if (ts.wallMs < _fallbackAlignCooldownMs) return;
+if (driftMs.abs() > 30) { ... }
+
+// After (v0.0.83):
+if (ts.wallMs < _fallbackAlignCooldownMs) return;
+if (ts.wallMs < _seekCooldownUntilMs) return;   // ← NEW (1줄)
+if (driftMs.abs() > 30) { ... }
+```
+
+즉 seek-notify 받은 후 1초간 fallback skip → 호스트 정기 timer 새 obs (500ms 후) 도달 후 정상 작동.
+
+**측정 검증 (실기기 N=여러 회)**:
+- ✅ 가끔 발생하던 몇 초 무음 안 나타남 (사용자 보고)
+- ✅ 다른 부작용 없음 (호스트 영향 0, 게스트만 fallback skip)
+- ✅ 정상 동작 (재생/정지/seek) 영향 0
+
+**왜 v0.0.86 `_latestObs = null` 시도와 다른가** (안전성 분석):
+- v0.0.86: `_handleSeekNotify`에서 `_latestObs = null` 무효화 → fallback **및 anchor** 모두 skip (obs 없음 가드)
+  - 결과: "호스트도 옛 위치" 신규 race 발생 (원인 미상)
+- v0.0.83: `_fallbackAlignment`에만 cooldown 가드 → **anchor는 그대로 작동**
+  - `_tryEstablishAnchor`도 이미 같은 cooldown 사용이라 anchor 박힘 영향 0
+  - 게스트 자체 보정만 skip — 호스트 측 영향 0
+
+**오늘 학습 추가**:
+- "같은 cooldown 자료구조를 일관되게 적용" = 안전한 fix 패턴
+- "obs 객체 자체 무효화 (`_latestObs = null`)" = 안전 검증 어려운 변경 (의도치 않은 부작용 위험 큼)
+- v0.0.82/v0.0.83 = 진단 명확 + 1줄 fix + 회귀 안전한 패턴
+
+**남은 문제 (PLAN HIGH 후속)**:
+1. ✅ ~~정기 timer 500ms 주기 안 stale obs로 가끔 무음~~ — v0.0.83 fix 완료
+2. ⏳ **ANCHOR-VERIFY 단독 청감 부작용 미격리** (HISTORY (98) 남은 문제 2번) — N=여러 회 측정 필요
+3. ⏳ **v0.0.86 `_latestObs=null` 신규 race 원인 미상** (HISTORY (98) 남은 문제 3번) — v0.0.83은 영향 없음, 다만 향후 fix 시 주의
+4. ⏳ **호스트 빠른 seek 연타 시 native 측 디코드 wait 무음** (HISTORY (99) 신규) — v0.0.83 fix와 무관. 매 seek 명령마다 native가 점프 + 디코드 wait. 사용자 의도적 연타 시나리오라 큰 영향 작음.
+
+**검증**:
+- ✅ `flutter analyze` No issues
+- ✅ `flutter build apk --debug` 통과
+- ✅ 실기기 N=여러 회 측정 — 무음 안 나타남 + 부작용 없음
+
+**회귀 위험**: 매우 낮음.
+- 1줄 변경 (`_fallbackAlignment`에 가드 추가)
+- 기존 `_tryEstablishAnchor`와 같은 cooldown 자료구조 (일관성)
+- seek 직후 1초간 fallback skip — 그 사이 anchor 박힘은 그대로 진행 (별도 가드 이미 적용)
+- 회귀 발견 시 1줄 revert로 즉시 baseline 복귀
+
+**빌드**: v0.0.83
+
 ---
 
 #### 미해결 이슈
