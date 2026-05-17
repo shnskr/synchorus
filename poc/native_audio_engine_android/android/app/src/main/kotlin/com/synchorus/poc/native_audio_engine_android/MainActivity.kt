@@ -37,6 +37,38 @@ class MainActivity : FlutterActivity() {
                     "getVirtualFrame" -> {
                         result.success(NativeAudio.nativeGetVirtualFrame())
                     }
+                    // §G G-1 RingBufferEngine
+                    "ringStart" -> result.success(NativeAudio.nativeRingStart())
+                    "ringStop" -> result.success(NativeAudio.nativeRingStop())
+                    "ringSeek" -> {
+                        val newFrame = (call.arguments as? Number)?.toLong()
+                        if (newFrame == null) {
+                            result.error("ARG", "newFrame must be a Number", null)
+                        } else {
+                            result.success(NativeAudio.nativeRingSeek(newFrame))
+                        }
+                    }
+                    "ringGetStats" -> {
+                        val arr = NativeAudio.nativeRingGetStats()
+                        result.success(
+                            mapOf(
+                                "vf" to arr[0],
+                                "ringHead" to arr[1],
+                                "ringTail" to arr[2],
+                                "silentCount" to arr[3],
+                                "decodedCount" to arr[4],
+                                "seekCount" to arr[5],
+                            )
+                        )
+                    }
+                    "ringSetQueueFix" -> {
+                        val enabled = (call.arguments as? Boolean) ?: true
+                        NativeAudio.nativeRingSetQueueFix(enabled)
+                        result.success(null)
+                    }
+                    "ringGetQueueFix" -> {
+                        result.success(NativeAudio.nativeRingGetQueueFix())
+                    }
                     else -> result.notImplemented()
                 }
             }

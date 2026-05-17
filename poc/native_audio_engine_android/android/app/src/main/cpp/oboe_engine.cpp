@@ -9,15 +9,24 @@
 //   - getTimestamp는 그대로 Oboe HAL에서 오는 (framePos=DAC로 나간 프레임 수,
 //     timeNs=그 순간의 CLOCK_MONOTONIC) 반환. getVirtualFrame은 내부 카운터
 //     스냅샷 반환. 두 값 차이 ≈ HAL 버퍼 레이턴시.
+//
+// §G G-1 RingBufferEngine (2026-05-17): 본 앱 v0.0.76 ring buffer race 격리
+// 검증용 별도 엔진. 기존 OboeEngine과 독립. mp3 디코더는 sine wave generator로
+// 대체 (race 원인은 디코더가 아니라 ring buffer 동기화). 파일 끝 RingBufferEngine
+// 클래스 + JNI 참조.
 
 #include <oboe/Oboe.h>
 #include <jni.h>
 #include <android/log.h>
 #include <time.h>
 #include <atomic>
+#include <chrono>
 #include <cmath>
+#include <condition_variable>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <vector>
 
 #define LOG_TAG "OboeEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
@@ -287,6 +296,455 @@ JNIEXPORT jlong JNICALL
 Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeGetVirtualFrame(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return static_cast<jlong>(engine().getVirtualFrame());
+}
+
+}
+
+// ============================================================================
+// §G G-1 RingBufferEngine: 본 앱 v0.0.76 ring buffer race 격리 검증용
+// ============================================================================
+//
+// 본 앱 commit f7e4dfa(v0.0.76)의 ring buffer 구조를 mp3 디코더 빼고 sine wave
+// generator로 옮긴 것. race 시나리오를 PoC 환경에서 재현하기 위함.
+//
+// v0.0.76 race (HISTORY (95) 확정):
+//   외부 thread A: seekToFrame(target1) → head/tail/seekTarget 3 atomic store + notify
+//   외부 thread B: 0.3초 후 seekToFrame(target2) → 3 atomic store + notify (연타)
+//   decodeLoop:    깨어남, seekTarget.exchange → 처리 도중 외부 write 또 들어옴
+//   결과: head/tail invariant 깨짐 → isFrameDecoded(vf) 영구 false → 무음
+//
+// 큐 모델 fix는 step 6 (PoC ring buffer를 큐 모델로 재설계)에서 적용.
+// 현 코드는 race 있는 v0.0.76 그대로.
+
+namespace ringpoc {
+
+constexpr int kRingSampleRate = 48000;
+constexpr int kRingChannels = 2;
+constexpr int kRingSeconds = 60;
+constexpr int kRingBehindSeconds = 10;
+constexpr int kRingAheadSeconds = 50;
+static_assert(kRingBehindSeconds + kRingAheadSeconds == kRingSeconds, "ring 분배");
+
+// Sine generator: 도레미파솔라시도 1초 주기 (기존 PoC와 동일 패턴).
+// chunk = 4096 frame → 재생 분량 ~85ms/chunk. 디코더 sleep 40ms → 디코더가
+// 재생보다 ~2배 빠름 (ring buffer 자연 채움). race window = 40ms (chunk decode
+// wall time)로 자동 test 50ms 주기에 첫 chunk 처리 중 두 번째 seek 도착 가능.
+// chunk 1024 + sleep 40ms로 했더니 디코더가 realtime의 0.53배 속도라 vf > ringHead
+// 영구 starvation (1차 시도 fail).
+constexpr int kRingChunkFrames = 4096;
+constexpr int kRingDecodeChunkSleepUs = 40000;
+// 가상 곡 길이 (RingBufferEngine 시작 시 설정). 30분 정도.
+constexpr int64_t kRingTotalFrames =
+    static_cast<int64_t>(kRingSampleRate) * 60 * 30;
+
+constexpr float kRingAmplitude = 0.3f;
+constexpr float kRingNotes[] = {
+    261.63f, 293.66f, 329.63f, 349.23f,
+    392.00f, 440.00f, 493.88f, 523.25f,
+};
+constexpr int kRingNumNotes = sizeof(kRingNotes) / sizeof(kRingNotes[0]);
+constexpr float kRingBeepPeriodSec = 1.0f;
+constexpr float kRingBeepDurationSec = 0.1f;
+constexpr float kRingBeepFadeSec = 0.005f;
+
+class RingBufferEngine : public oboe::AudioStreamDataCallback {
+public:
+    ~RingBufferEngine() {
+        stop();
+    }
+
+    // 시작: stream open + decoder thread 시작.
+    bool start() {
+        std::lock_guard<std::mutex> lock(mLock);
+        if (mStream) {
+            return true;
+        }
+
+        // ring buffer 사전 할당 (60s × 48k × 2ch × int16 ≈ 11.5MB)
+        mRingCapacityFrames = static_cast<int64_t>(kRingSampleRate) * kRingSeconds;
+        const int64_t samples = mRingCapacityFrames * kRingChannels;
+        mDecodedData.assign(static_cast<size_t>(samples), int16_t(0));
+
+        mVirtualFrame.store(0, std::memory_order_relaxed);
+        mRingHead.store(0, std::memory_order_relaxed);
+        mRingTail.store(0, std::memory_order_relaxed);
+        mDecodeSeekTarget.store(-1, std::memory_order_relaxed);
+        mDecodeAbort.store(false, std::memory_order_relaxed);
+        mPcmReadSilentCount.store(0, std::memory_order_relaxed);
+        mPcmReadDecodedCount.store(0, std::memory_order_relaxed);
+        mSeekCallCount.store(0, std::memory_order_relaxed);
+
+        // ---- Oboe stream open ----
+        oboe::AudioStreamBuilder builder;
+        oboe::Result result = builder
+            .setDirection(oboe::Direction::Output)
+            ->setPerformanceMode(oboe::PerformanceMode::LowLatency)
+            ->setSharingMode(oboe::SharingMode::Exclusive)
+            ->setFormat(oboe::AudioFormat::Float)
+            ->setChannelCount(oboe::ChannelCount::Stereo)
+            ->setSampleRate(kRingSampleRate)
+            ->setDataCallback(this)
+            ->openStream(mStream);
+        if (result != oboe::Result::OK) {
+            LOGE("Ring start openStream: %s", oboe::convertToText(result));
+            mStream.reset();
+            return false;
+        }
+        mStreamSampleRate = mStream->getSampleRate();
+
+        // ---- decoder thread 시작 ----
+        mDecoding.store(true, std::memory_order_release);
+        mDecodeThread = std::thread(&RingBufferEngine::decodeLoop, this);
+
+        // ---- 최소 1초 분량 채워질 때까지 wait ----
+        {
+            std::unique_lock<std::mutex> lk(mMinBufMutex);
+            mMinBufCv.wait_for(lk, std::chrono::seconds(3), [&] {
+                return mRingHead.load(std::memory_order_relaxed) >= kRingSampleRate
+                    || mDecodeAbort.load(std::memory_order_relaxed);
+            });
+        }
+
+        result = mStream->requestStart();
+        if (result != oboe::Result::OK) {
+            LOGE("Ring start requestStart: %s", oboe::convertToText(result));
+            mStream->close();
+            mStream.reset();
+            stopDecodeThread();
+            return false;
+        }
+        LOGI("Ring start OK: sr=%d cap=%lld", mStreamSampleRate,
+             static_cast<long long>(mRingCapacityFrames));
+        return true;
+    }
+
+    bool stop() {
+        stopDecodeThread();
+        std::lock_guard<std::mutex> lock(mLock);
+        if (mStream) {
+            mStream->requestStop();
+            mStream->close();
+            mStream.reset();
+        }
+        mDecodedData.clear();
+        mDecodedData.shrink_to_fit();
+        return true;
+    }
+
+    // 큐 모델 fix (2026-05-17): 외부는 mPendingSeekTarget만 set, ring head/tail은
+    // decodeLoop 단일 thread에서만 갱신. v0.0.76 race의 root cause인 "외부 thread와
+    // decodeLoop이 동시에 ring head/tail 갱신" 자체를 차단.
+    //
+    // 기존 race 코드 (v0.0.76, 위에 history): seekToFrame에서 직접 ring head/tail
+    // store + seekTarget set. 연타 시 invariant 깨짐.
+    //
+    // mUseQueueFix = false 일 때만 race 모델로 폴백 (비교 측정용, 기본 false면 fix 활성).
+    bool seekToFrame(int64_t newFrame) {
+        if (!mDecoding.load(std::memory_order_relaxed)) return false;
+        int64_t clamped = std::max(int64_t(0), std::min(newFrame, kRingTotalFrames));
+        mVirtualFrame.store(clamped, std::memory_order_relaxed);
+        mSeekCallCount.fetch_add(1, std::memory_order_relaxed);
+
+        // 윈도우 안 = 즉시 (작은 seek). 밖 = decode 점프 요청만 보냄.
+        if (!isFrameDecoded(clamped)) {
+            if (mUseQueueFix.load(std::memory_order_relaxed)) {
+                // FIX: ring head/tail 안 건드림, decodeLoop이 처리.
+                mDecodeSeekTarget.store(clamped, std::memory_order_release);
+                std::lock_guard<std::mutex> lk(mRingMutex);
+                mRingCv.notify_all();
+            } else {
+                // RACE (v0.0.76 baseline): 외부에서 직접 갱신.
+                mRingHead.store(clamped, std::memory_order_release);   // (a)
+                mRingTail.store(clamped, std::memory_order_release);   // (b)
+                mDecodeSeekTarget.store(clamped, std::memory_order_release); // (c)
+                std::lock_guard<std::mutex> lk(mRingMutex);
+                mRingCv.notify_all();
+            }
+        }
+        return true;
+    }
+
+    void setQueueFix(bool enabled) {
+        mUseQueueFix.store(enabled, std::memory_order_relaxed);
+        LOGI("Ring setQueueFix: %s", enabled ? "ON" : "OFF");
+    }
+
+    bool getQueueFix() const {
+        return mUseQueueFix.load(std::memory_order_relaxed);
+    }
+
+    // 진단용 stats. Dart 폴링.
+    void getStats(int64_t* outVf, int64_t* outRingHead, int64_t* outRingTail,
+                  int64_t* outSilent, int64_t* outDecoded, int64_t* outSeekCount) {
+        *outVf = mVirtualFrame.load(std::memory_order_relaxed);
+        *outRingHead = mRingHead.load(std::memory_order_relaxed);
+        *outRingTail = mRingTail.load(std::memory_order_relaxed);
+        *outSilent = mPcmReadSilentCount.load(std::memory_order_relaxed);
+        *outDecoded = mPcmReadDecodedCount.load(std::memory_order_relaxed);
+        *outSeekCount = mSeekCallCount.load(std::memory_order_relaxed);
+    }
+
+    // v0.0.76 onAudioReady와 동일 — ring buffer 안이면 modular read, 밖이면 무음.
+    oboe::DataCallbackResult onAudioReady(
+        oboe::AudioStream* stream,
+        void* audioData,
+        int32_t numFrames) override {
+        auto* output = static_cast<float*>(audioData);
+        const int outCh = stream->getChannelCount();
+
+        int64_t vf = mVirtualFrame.load(std::memory_order_relaxed);
+        const int64_t ringHead = mRingHead.load(std::memory_order_acquire);
+        const int64_t ringTail = mRingTail.load(std::memory_order_acquire);
+        const int64_t capFrames = mRingCapacityFrames;
+        const int64_t totalFrames = kRingTotalFrames;
+
+        int64_t silentInThisCallback = 0;
+        int64_t decodedInThisCallback = 0;
+        for (int i = 0; i < numFrames; ++i) {
+            const bool decoded = vf >= ringTail && vf < ringHead;
+            if (decoded) ++decodedInThisCallback;
+            else ++silentInThisCallback;
+
+            for (int ch = 0; ch < outCh; ++ch) {
+                float sample = 0.0f;
+                if (decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
+                    int srcCh = std::min(ch, kRingChannels - 1);
+                    int64_t bufFrame = vf % capFrames;
+                    int64_t idx = bufFrame * kRingChannels + srcCh;
+                    sample = static_cast<float>(mDecodedData[idx]) / 32768.0f;
+                }
+                *output++ = sample;
+            }
+            ++vf;
+        }
+        mVirtualFrame.store(vf, std::memory_order_relaxed);
+
+        mPcmReadSilentCount.fetch_add(silentInThisCallback, std::memory_order_relaxed);
+        mPcmReadDecodedCount.fetch_add(decodedInThisCallback, std::memory_order_relaxed);
+
+        // tail advance (v0.0.76 동일): behind 한도 유지. atomic 갱신.
+        if (capFrames > 0) {
+            const int64_t behindFrames =
+                static_cast<int64_t>(kRingSampleRate) * kRingBehindSeconds;
+            const int64_t newTail = std::max<int64_t>(0, vf - behindFrames);
+            if (newTail > ringTail) {
+                mRingTail.store(newTail, std::memory_order_release);
+            }
+        }
+        return oboe::DataCallbackResult::Continue;
+    }
+
+private:
+    inline bool isFrameDecoded(int64_t frame) const {
+        const int64_t tail = mRingTail.load(std::memory_order_acquire);
+        const int64_t head = mRingHead.load(std::memory_order_acquire);
+        return frame >= tail && frame < head;
+    }
+
+    void stopDecodeThread() {
+        mDecodeAbort.store(true, std::memory_order_relaxed);
+        {
+            std::lock_guard<std::mutex> lk(mRingMutex);
+            mRingCv.notify_all();
+        }
+        {
+            std::lock_guard<std::mutex> lk(mMinBufMutex);
+            mMinBufCv.notify_all();
+        }
+        if (mDecodeThread.joinable()) {
+            mDecodeThread.join();
+        }
+        mDecoding.store(false, std::memory_order_relaxed);
+    }
+
+    // v0.0.76 decodeLoop: ring 가득 차면 wait, seek 요청 처리, sine chunk write.
+    void decodeLoop() {
+        int64_t writeFrame = 0;
+        while (!mDecodeAbort.load(std::memory_order_relaxed)) {
+            // ---- seek 요청 확인 (exchange로 한 번에 가져옴) ----
+            int64_t seekTarget = mDecodeSeekTarget.exchange(
+                -1, std::memory_order_acquire);
+            if (seekTarget >= 0) {
+                // FIX 모드: ring head/tail을 여기서 단일 thread로 갱신.
+                // RACE 모드 (v0.0.76): seekToFrame()에서 이미 set됨, 여기선 writeFrame만 갱신.
+                if (mUseQueueFix.load(std::memory_order_relaxed)) {
+                    mRingHead.store(seekTarget, std::memory_order_release);
+                    mRingTail.store(seekTarget, std::memory_order_release);
+                }
+                writeFrame = seekTarget;
+                LOGI("Ring decode [%s]: seek to frame %lld",
+                     mUseQueueFix.load() ? "FIX" : "RACE",
+                     static_cast<long long>(seekTarget));
+            }
+
+            // ---- ring 가득 차면 wait ----
+            {
+                std::unique_lock<std::mutex> lk(mRingMutex);
+                mRingCv.wait_for(lk, std::chrono::milliseconds(50), [&] {
+                    if (mDecodeAbort.load(std::memory_order_relaxed)) return true;
+                    if (mDecodeSeekTarget.load(std::memory_order_relaxed) >= 0)
+                        return true;
+                    const int64_t head = mRingHead.load(std::memory_order_relaxed);
+                    const int64_t tail = mRingTail.load(std::memory_order_relaxed);
+                    return (head - tail) < mRingCapacityFrames;
+                });
+                if (mDecodeAbort.load(std::memory_order_relaxed)) break;
+                if (mDecodeSeekTarget.load(std::memory_order_relaxed) >= 0)
+                    continue;
+            }
+
+            // ---- sine chunk generate + write (mp3 디코더 흉내) ----
+            std::this_thread::sleep_for(
+                std::chrono::microseconds(kRingDecodeChunkSleepUs));
+
+            const int64_t numFrames = kRingChunkFrames;
+            const int64_t capFrames = mRingCapacityFrames;
+            const int64_t startBufFrame = writeFrame % capFrames;
+            const int64_t framesToBufEnd = capFrames - startBufFrame;
+
+            std::vector<int16_t> chunk(numFrames * kRingChannels);
+            for (int64_t i = 0; i < numFrames; ++i) {
+                int64_t cf = writeFrame + i;
+                // 도레미파솔라시도 1초 주기 sine
+                const int64_t beepPeriodFrames =
+                    static_cast<int64_t>(kRingBeepPeriodSec * kRingSampleRate);
+                const int64_t beepDurationFrames =
+                    static_cast<int64_t>(kRingBeepDurationSec * kRingSampleRate);
+                const int64_t beepFadeFrames =
+                    static_cast<int64_t>(kRingBeepFadeSec * kRingSampleRate);
+                int64_t mod = cf % beepPeriodFrames;
+                if (mod < 0) mod += beepPeriodFrames;
+                int16_t sample = 0;
+                if (mod < beepDurationFrames) {
+                    const int64_t beatIndex = (cf - mod) / beepPeriodFrames;
+                    const int noteIdx = static_cast<int>(
+                        ((beatIndex % kRingNumNotes) + kRingNumNotes) % kRingNumNotes);
+                    const double freq = static_cast<double>(kRingNotes[noteIdx]);
+                    const double phase = 2.0 * M_PI * freq
+                        * static_cast<double>(mod) / kRingSampleRate;
+                    float env = 1.0f;
+                    if (mod < beepFadeFrames) {
+                        env = static_cast<float>(mod)
+                            / static_cast<float>(beepFadeFrames);
+                    } else if (mod >= beepDurationFrames - beepFadeFrames) {
+                        const int64_t remaining = beepDurationFrames - mod;
+                        env = static_cast<float>(remaining)
+                            / static_cast<float>(beepFadeFrames);
+                    }
+                    const float v = static_cast<float>(std::sin(phase)) * kRingAmplitude * env;
+                    sample = static_cast<int16_t>(v * 32767.0f);
+                }
+                chunk[i * kRingChannels + 0] = sample;
+                chunk[i * kRingChannels + 1] = sample;
+            }
+
+            // ring write (modular index, wrap-around 시 분할) — v0.0.76 동일
+            if (numFrames <= framesToBufEnd) {
+                std::copy(chunk.begin(), chunk.end(),
+                          mDecodedData.data() + startBufFrame * kRingChannels);
+            } else {
+                const int64_t firstSamples = framesToBufEnd * kRingChannels;
+                std::copy(chunk.begin(), chunk.begin() + firstSamples,
+                          mDecodedData.data() + startBufFrame * kRingChannels);
+                std::copy(chunk.begin() + firstSamples, chunk.end(),
+                          mDecodedData.data());
+            }
+            writeFrame += numFrames;
+            mRingHead.store(writeFrame, std::memory_order_release);
+
+            // 최소 버퍼 대기 해제
+            {
+                std::lock_guard<std::mutex> lk(mMinBufMutex);
+                mMinBufCv.notify_one();
+            }
+
+            if (writeFrame >= kRingTotalFrames) break;
+        }
+        mDecoding.store(false, std::memory_order_release);
+        LOGI("Ring decode thread done: writeFrame=%lld",
+             static_cast<long long>(writeFrame));
+    }
+
+    std::shared_ptr<oboe::AudioStream> mStream;
+    int32_t mStreamSampleRate = 0;
+    std::mutex mLock;
+
+    std::vector<int16_t> mDecodedData;
+    int64_t mRingCapacityFrames = 0;
+
+    std::atomic<int64_t> mVirtualFrame{0};
+    std::atomic<int64_t> mRingHead{0};
+    std::atomic<int64_t> mRingTail{0};
+    std::atomic<int64_t> mDecodeSeekTarget{-1};
+
+    std::thread mDecodeThread;
+    std::atomic<bool> mDecoding{false};
+    std::atomic<bool> mDecodeAbort{false};
+
+    std::mutex mRingMutex;
+    std::condition_variable mRingCv;
+    std::mutex mMinBufMutex;
+    std::condition_variable mMinBufCv;
+
+    // 진단: PCM read마다 silent/decoded 누적. Dart 폴링.
+    std::atomic<int64_t> mPcmReadSilentCount{0};
+    std::atomic<int64_t> mPcmReadDecodedCount{0};
+    std::atomic<int64_t> mSeekCallCount{0};
+
+    // race 모델 vs 큐 모델 fix 토글. 기본 fix=true.
+    std::atomic<bool> mUseQueueFix{true};
+};
+
+RingBufferEngine& ringEngine() {
+    static RingBufferEngine instance;
+    return instance;
+}
+
+} // namespace ringpoc
+
+extern "C" {
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingStart(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return ringpoc::ringEngine().start() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingStop(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return ringpoc::ringEngine().stop() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingSeek(
+    JNIEnv* /*env*/, jobject /*thiz*/, jlong newFrame) {
+    return ringpoc::ringEngine().seekToFrame(static_cast<int64_t>(newFrame))
+        ? JNI_TRUE : JNI_FALSE;
+}
+
+// 반환 LongArray: [vf, ringHead, ringTail, silentCount, decodedCount, seekCount]
+JNIEXPORT jlongArray JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingGetStats(
+    JNIEnv* env, jobject /*thiz*/) {
+    int64_t vf = 0, head = 0, tail = 0, silent = 0, decoded = 0, seekCount = 0;
+    ringpoc::ringEngine().getStats(&vf, &head, &tail, &silent, &decoded, &seekCount);
+    jlongArray arr = env->NewLongArray(6);
+    const jlong values[6] = {vf, head, tail, silent, decoded, seekCount};
+    env->SetLongArrayRegion(arr, 0, 6, values);
+    return arr;
+}
+
+JNIEXPORT void JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingSetQueueFix(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean enabled) {
+    ringpoc::ringEngine().setQueueFix(enabled == JNI_TRUE);
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_poc_native_1audio_1engine_1android_NativeAudio_nativeRingGetQueueFix(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return ringpoc::ringEngine().getQueueFix() ? JNI_TRUE : JNI_FALSE;
 }
 
 }

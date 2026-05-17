@@ -46,6 +46,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -147,10 +148,23 @@ class RoleSelectionPage extends StatelessWidget {
                 child: Text('게스트로 연결', style: TextStyle(fontSize: 18)),
               ),
             ),
+            const SizedBox(height: 16),
+            OutlinedButton.icon(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(builder: (_) => const RingRaceTestPage()),
+              ),
+              icon: const Icon(Icons.bug_report),
+              label: const Padding(
+                padding: EdgeInsets.symmetric(vertical: 16),
+                child: Text('Ring Buffer Race Test',
+                    style: TextStyle(fontSize: 18)),
+              ),
+            ),
             const SizedBox(height: 32),
             Text(
               '호스트는 오디오 재생 + audio-obs 브로드캐스트.\n'
-              '게스트는 호스트 IP 입력 후 수신 로그 기록.',
+              '게스트는 호스트 IP 입력 후 수신 로그 기록.\n'
+              'Ring Buffer Race Test = §G G-1 race 격리 검증.',
               style: t.textTheme.bodySmall,
               textAlign: TextAlign.center,
             ),
@@ -1818,4 +1832,405 @@ class _Stats {
     this.frameMonotonic = true,
     this.timeMonotonic = true,
   });
+}
+
+// ======================================================================
+// §G G-1 Ring Buffer Race Test (2026-05-17)
+// ======================================================================
+//
+// 본 앱 v0.0.76 ring buffer race를 PoC 격리에서 재현 + fix 검증용 페이지.
+// native RingBufferEngine은 race 있는 v0.0.76 모델 그대로 (head/tail/seekTarget
+// 3 atomic store + decodeLoop 동시 갱신). 큐 모델 fix는 step 6에서 적용.
+//
+// 회귀 시나리오 (HISTORY (95)): 큰 seek 슬라이더 연타 → 호스트/게스트 무음, virtualFrame
+// 흐르지만 PCM read만 무음. 자동화 검증: 5초간 500ms 주기 random seek 10회 발화 +
+// 종료 후 3초 모니터링 → silent ratio > 50% 면 race 발견.
+
+class RingRaceTestPage extends StatefulWidget {
+  const RingRaceTestPage({super.key});
+
+  @override
+  State<RingRaceTestPage> createState() => _RingRaceTestPageState();
+}
+
+class _RingRaceTestPageState extends State<RingRaceTestPage> {
+  static const int _sampleRate = 48000;
+  static const int _totalFrames = _sampleRate * 60 * 30; // 30분
+  static const Duration _statsPoll = Duration(milliseconds: 200);
+
+  bool _running = false;
+  bool _autoTestActive = false;
+  Timer? _statsTimer;
+  Timer? _autoTestTimer;
+
+  // 최신 stats
+  int _vf = 0;
+  int _ringHead = 0;
+  int _ringTail = 0;
+  int _silentTotal = 0;
+  int _decodedTotal = 0;
+  int _seekCount = 0;
+  // 최근 1초 silent ratio 계산용
+  int _prevSilent = 0;
+  int _prevDecoded = 0;
+  double _recentSilentRatio = 0.0;
+
+  // Auto test 결과
+  String _autoTestResult = '';
+  int _autoTestPhase = 0; // 0=idle, 1=seek 연타 중, 2=모니터링 중
+
+  // Manual seek
+  double _seekTargetSec = 0.0;
+
+  // Race vs Queue Fix 토글 (true=fix, false=race)
+  bool _queueFix = true;
+
+  final Random _rand = Random();
+
+  @override
+  void dispose() {
+    _statsTimer?.cancel();
+    _autoTestTimer?.cancel();
+    if (_running) {
+      _nativeChannel.invokeMethod('ringStop');
+    }
+    super.dispose();
+  }
+
+  Future<void> _startEngine() async {
+    // 현재 토글 상태를 native에 전달 (start 전에 set해두면 decodeLoop 첫 iter부터 반영)
+    await _nativeChannel.invokeMethod('ringSetQueueFix', _queueFix);
+    final ok = await _nativeChannel.invokeMethod<bool>('ringStart') ?? false;
+    if (!ok) {
+      _showSnack('ringStart 실패');
+      return;
+    }
+    setState(() {
+      _running = true;
+      _silentTotal = 0;
+      _decodedTotal = 0;
+      _prevSilent = 0;
+      _prevDecoded = 0;
+      _recentSilentRatio = 0.0;
+      _autoTestResult = '';
+    });
+    _statsTimer?.cancel();
+    _statsTimer = Timer.periodic(_statsPoll, (_) => _pollStats());
+  }
+
+  Future<void> _stopEngine() async {
+    _statsTimer?.cancel();
+    _autoTestTimer?.cancel();
+    await _nativeChannel.invokeMethod('ringStop');
+    if (mounted) {
+      setState(() {
+        _running = false;
+        _autoTestActive = false;
+        _autoTestPhase = 0;
+      });
+    }
+  }
+
+  Future<void> _pollStats() async {
+    try {
+      final res = await _nativeChannel.invokeMethod('ringGetStats');
+      if (res is Map) {
+        final vf = (res['vf'] as num?)?.toInt() ?? 0;
+        final ringHead = (res['ringHead'] as num?)?.toInt() ?? 0;
+        final ringTail = (res['ringTail'] as num?)?.toInt() ?? 0;
+        final silent = (res['silentCount'] as num?)?.toInt() ?? 0;
+        final decoded = (res['decodedCount'] as num?)?.toInt() ?? 0;
+        final seekCount = (res['seekCount'] as num?)?.toInt() ?? 0;
+
+        final dSilent = silent - _prevSilent;
+        final dDecoded = decoded - _prevDecoded;
+        final dTotal = dSilent + dDecoded;
+        final ratio = dTotal > 0 ? dSilent / dTotal : 0.0;
+
+        if (mounted) {
+          setState(() {
+            _vf = vf;
+            _ringHead = ringHead;
+            _ringTail = ringTail;
+            _silentTotal = silent;
+            _decodedTotal = decoded;
+            _seekCount = seekCount;
+            _recentSilentRatio = ratio;
+            _prevSilent = silent;
+            _prevDecoded = decoded;
+            if (_running) {
+              _seekTargetSec = vf / _sampleRate.toDouble();
+            }
+          });
+        }
+      }
+    } catch (e) {
+      // ignore
+    }
+  }
+
+  Future<void> _manualSeek() async {
+    final targetFrame = (_seekTargetSec * _sampleRate).toInt();
+    await _nativeChannel.invokeMethod('ringSeek', targetFrame);
+  }
+
+  // 자동 race test: 3초간 50ms 주기로 random 큰 seek 60회 + 3초 모니터링.
+  Future<void> _runAutoRaceTest() async {
+    if (!_running || _autoTestActive) return;
+    setState(() {
+      _autoTestActive = true;
+      _autoTestPhase = 1;
+      _autoTestResult = 'seek 연타 중...';
+    });
+
+    final mode = _queueFix ? 'FIX' : 'RACE';
+    // ignore: avoid_print
+    print('AUTO_TEST_START mode=$mode');
+
+    // 종료 후 silent 누적 비교용 baseline.
+    int seekCountStart = _seekCount;
+    int silentStart = _silentTotal;
+    int decodedStart = _decodedTotal;
+
+    int seekIdx = 0;
+    const totalSeeks = 60;
+    _autoTestTimer = Timer.periodic(
+        const Duration(milliseconds: 50), (timer) async {
+      if (!_running) {
+        timer.cancel();
+        return;
+      }
+      // 5분 ~ 25분 사이 random target (윈도우 밖 큰 seek)
+      final minFrame = _sampleRate * 60 * 5;
+      final maxFrame = _sampleRate * 60 * 25;
+      final target = minFrame + _rand.nextInt(maxFrame - minFrame);
+      await _nativeChannel.invokeMethod('ringSeek', target);
+      seekIdx++;
+      if (seekIdx >= totalSeeks) {
+        timer.cancel();
+        // 3초 모니터링 단계로 전환
+        if (mounted) {
+          setState(() {
+            _autoTestPhase = 2;
+            _autoTestResult = '모니터링 중 (3초)...';
+          });
+        }
+        // 모니터링 시작 시점 baseline
+        final monStart = DateTime.now();
+        final monSilentStart = _silentTotal;
+        final monDecodedStart = _decodedTotal;
+        Timer(const Duration(seconds: 3), () {
+          if (!mounted || !_running) return;
+          final monSilent = _silentTotal - monSilentStart;
+          final monDecoded = _decodedTotal - monDecodedStart;
+          final monTotal = monSilent + monDecoded;
+          final ratio = monTotal > 0 ? monSilent / monTotal : 0.0;
+          final elapsed = DateTime.now().difference(monStart).inMilliseconds;
+          final raceFound = ratio > 0.5;
+          // logcat에 결과 print — flutter logs / adb logcat | grep AUTO_TEST_RESULT
+          // ignore: avoid_print
+          print('AUTO_TEST_RESULT mode=$mode race=$raceFound '
+              'silent_ratio_pct=${(ratio * 100).toStringAsFixed(1)} '
+              'silent=$monSilent decoded=$monDecoded total=$monTotal '
+              'seek_count=${_seekCount - seekCountStart} '
+              'monitor_ms=$elapsed');
+          setState(() {
+            _autoTestActive = false;
+            _autoTestPhase = 0;
+            _autoTestResult = raceFound
+                ? '🔴 RACE 발견! [$mode] 모니터링 ${elapsed}ms silent ratio='
+                    '${(ratio * 100).toStringAsFixed(1)}%'
+                    ' (silent=$monSilent / total=$monTotal)\n'
+                    'seek 총 ${_seekCount - seekCountStart}회'
+                : '✅ 정상 [$mode]. silent ratio=${(ratio * 100).toStringAsFixed(1)}%'
+                    ' (silent=$monSilent / total=$monTotal)\n'
+                    'seek 총 ${_seekCount - seekCountStart}회';
+          });
+        });
+      }
+    });
+    // silentStart/decodedStart 미사용 경고 회피 (디버그 출력 등 향후 활용 여지)
+    (() => [silentStart, decodedStart])();
+  }
+
+  void _showSnack(String msg) {
+    ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  String _msFromFrames(int f) {
+    final ms = (f * 1000) ~/ _sampleRate;
+    final s = ms ~/ 1000;
+    final m = s ~/ 60;
+    final sr = s % 60;
+    return '$m:${sr.toString().padLeft(2, '0')}.${(ms % 1000).toString().padLeft(3, '0')}';
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final t = Theme.of(context);
+    final raceWarn = _autoTestPhase == 0 &&
+        _autoTestResult.startsWith('🔴');
+    return Scaffold(
+      appBar: AppBar(title: const Text('Ring Buffer Race Test')),
+      body: Padding(
+        padding: const EdgeInsets.all(16),
+        child: ListView(
+          children: [
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('엔진 상태', style: t.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Row(
+                      children: [
+                        if (!_running)
+                          FilledButton.icon(
+                            onPressed: _startEngine,
+                            icon: const Icon(Icons.play_arrow),
+                            label: const Text('재생 시작'),
+                          )
+                        else
+                          OutlinedButton.icon(
+                            onPressed: _stopEngine,
+                            icon: const Icon(Icons.stop),
+                            label: const Text('정지'),
+                          ),
+                      ],
+                    ),
+                    const SizedBox(height: 12),
+                    SwitchListTile(
+                      contentPadding: EdgeInsets.zero,
+                      title: Text(_queueFix
+                          ? '큐 모델 (FIX) — race 차단'
+                          : 'v0.0.76 모델 (RACE) — race 재현용'),
+                      subtitle: Text(_queueFix
+                          ? '외부 thread는 큐 push만, ring head/tail은 decodeLoop 단일 thread'
+                          : '외부 thread도 ring head/tail 직접 set (race 발생 가능)'),
+                      value: _queueFix,
+                      onChanged: _running
+                          ? null
+                          : (v) async {
+                              setState(() => _queueFix = v);
+                              await _nativeChannel.invokeMethod(
+                                  'ringSetQueueFix', v);
+                            },
+                    ),
+                    Text(
+                      _running
+                          ? '재생 중엔 토글 잠김 (정지 후 변경)'
+                          : '토글 후 재생 시작',
+                      style: t.textTheme.bodySmall?.copyWith(
+                          color: Colors.grey),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('실시간 stats', style: t.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    _statRow('vf (재생 head)', '$_vf  (${_msFromFrames(_vf)})'),
+                    _statRow('ringHead', '$_ringHead  (${_msFromFrames(_ringHead)})'),
+                    _statRow('ringTail', '$_ringTail  (${_msFromFrames(_ringTail)})'),
+                    _statRow('seek 호출 누적', '$_seekCount'),
+                    _statRow('PCM read silent 누적', '$_silentTotal frames'),
+                    _statRow('PCM read decoded 누적', '$_decodedTotal frames'),
+                    _statRow('최근 silent ratio',
+                        '${(_recentSilentRatio * 100).toStringAsFixed(1)}%'),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('수동 seek', style: t.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Slider(
+                      min: 0,
+                      max: (_totalFrames / _sampleRate).toDouble(),
+                      value: _seekTargetSec.clamp(
+                          0, (_totalFrames / _sampleRate).toDouble()),
+                      label: '${_seekTargetSec.toStringAsFixed(1)}s',
+                      onChanged: _running
+                          ? (v) => setState(() => _seekTargetSec = v)
+                          : null,
+                      onChangeEnd: _running ? (_) => _manualSeek() : null,
+                    ),
+                    Text(
+                      '슬라이더 끝 시 ringSeek 호출. '
+                      '사용자 연타 시나리오는 슬라이더를 빠르게 여러 번 흔들기.',
+                      style: t.textTheme.bodySmall,
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 12),
+            Card(
+              color: raceWarn ? Colors.red.shade50 : null,
+              child: Padding(
+                padding: const EdgeInsets.all(12),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text('자동 Race Test', style: t.textTheme.titleMedium),
+                    const SizedBox(height: 8),
+                    Text(
+                      '3초간 50ms 주기로 random 큰 seek 60회 발화 → 3초 모니터링 → '
+                      'silent ratio > 50% 면 race 발견.',
+                      style: t.textTheme.bodySmall,
+                    ),
+                    const SizedBox(height: 12),
+                    FilledButton.icon(
+                      onPressed: (_running && !_autoTestActive)
+                          ? _runAutoRaceTest
+                          : null,
+                      icon: const Icon(Icons.flash_on),
+                      label: Text(_autoTestActive
+                          ? '진행 중 (phase $_autoTestPhase)...'
+                          : '자동 race test 실행'),
+                    ),
+                    if (_autoTestResult.isNotEmpty) ...[
+                      const SizedBox(height: 12),
+                      Text(_autoTestResult,
+                          style: t.textTheme.bodyMedium?.copyWith(
+                            fontWeight: FontWeight.bold,
+                            color: raceWarn ? Colors.red.shade900 : null,
+                          )),
+                    ],
+                  ],
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _statRow(String label, String value) {
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 2),
+      child: Row(
+        children: [
+          SizedBox(width: 180, child: Text(label)),
+          Expanded(child: Text(value, style: const TextStyle(fontFamily: 'monospace'))),
+        ],
+      ),
+    );
+  }
 }

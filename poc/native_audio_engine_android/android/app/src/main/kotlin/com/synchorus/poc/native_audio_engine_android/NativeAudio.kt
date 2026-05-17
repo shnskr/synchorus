@@ -25,4 +25,27 @@ object NativeAudio {
 
     /** Phase 4: 현재 virtual playhead 값 (= "다음 콜백이 만들 프레임 번호"). */
     external fun nativeGetVirtualFrame(): Long
+
+    // ─────────── §G G-1 RingBufferEngine (race 격리 검증용) ───────────
+    /** Ring buffer 엔진 시작 (별도 stream, 기존 OboeEngine과 독립). */
+    external fun nativeRingStart(): Boolean
+
+    /** Ring buffer 엔진 정지 + decode thread join. */
+    external fun nativeRingStop(): Boolean
+
+    /** Ring buffer seek. v0.0.76 race 모델 그대로 (큐 모델 fix 전). */
+    external fun nativeRingSeek(newFrame: Long): Boolean
+
+    /**
+     * Ring buffer 진단 stats.
+     * [0]=vf, [1]=ringHead, [2]=ringTail, [3]=silentCount, [4]=decodedCount, [5]=seekCount
+     * silent/decoded = onAudioReady에서 매 frame read마다 누적. ratio로 무음 비율 판정.
+     */
+    external fun nativeRingGetStats(): LongArray
+
+    /** Race(v0.0.76) vs 큐 모델 fix 토글. true=fix, false=race. */
+    external fun nativeRingSetQueueFix(enabled: Boolean)
+
+    /** 현재 큐 모델 fix 활성화 여부 반환. */
+    external fun nativeRingGetQueueFix(): Boolean
 }
