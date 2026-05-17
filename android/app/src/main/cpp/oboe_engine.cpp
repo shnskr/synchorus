@@ -549,16 +549,17 @@ public:
             int64_t(0), std::min(newFrame, mDecodedTotalFrames));
         mVirtualFrame.store(clamped, std::memory_order_relaxed);
 
-        // §G G-1 ring buffer seek 분기:
+        // §G G-1 ring buffer seek 분기 (2026-05-17 큐 모델 fix):
         // - 윈도우 안 (drift 보정 등 작은 seek): vf만 갱신 → 즉시 (디코드 wait 0)
-        // - 윈도우 밖 (사용자 슬라이더 큰 seek): head/tail reset + 디코드 점프
+        // - 윈도우 밖 (사용자 슬라이더 큰 seek): decode 점프 요청만 보냄
+        //
+        // v0.0.76 race fix: 외부 thread가 ring head/tail 직접 store하면 decodeLoop의
+        // chunk write 후 ringHead.store와 인터리브 → invariant 깨짐 → 무음 영구 (HISTORY (95)).
+        // PoC 격리에서 RACE 25% 발현 → 큐 모델로 0% 차단 확인 (S22 25회 측정).
+        // 외부는 mDecodeSeekTarget만 set, ring head/tail은 decodeLoop이 단일 thread로 처리.
         if (!isFrameDecoded(clamped)) {
-            // 윈도우 밖 → ring 리셋 후 새 위치부터 디코드 시작
-            mRingHead.store(clamped, std::memory_order_release);
-            mRingTail.store(clamped, std::memory_order_release);
             if (mDecoding.load(std::memory_order_relaxed)) {
                 mDecodeSeekTarget.store(clamped, std::memory_order_release);
-                // decodeLoop가 wait 중일 수 있음 → 깨움
                 std::lock_guard<std::mutex> lock(mRingMutex);
                 mRingCv.notify_all();
             }
@@ -796,14 +797,25 @@ private:
         bool inputEos = false;
         bool outputEos = false;
         bool needsPtsReset = false;
+        bool eosReported = false;
 
-        while (!outputEos && !mDecodeAbort.load(std::memory_order_relaxed)) {
+        // ring buffer 모델은 EOS 후에도 종료 안 함 — 사용자가 seek로 되돌리면
+        // 다시 디코드해야 함 (사전할당 PCM과 달리 ring에서 그 위치 없음).
+        // EOS 시 outputEos=true로 디코드 wait, seek 도착 또는 abort까지 살아있음.
+        // 변경 전 (v0.0.76 원본): EOS 시 thread 종료 → seek 후 재시작 못 함 →
+        //   재생 끝까지 간 후 무음 영구 (2026-05-17 실측).
+        while (!mDecodeAbort.load(std::memory_order_relaxed)) {
             // ---- seek 요청 확인 ----
             int64_t seekTarget = mDecodeSeekTarget.exchange(
                 -1, std::memory_order_acquire);
             if (seekTarget >= 0) {
                 LOGI("decode: ring seek to frame %lld",
                      static_cast<long long>(seekTarget));
+                // 큐 모델 fix (2026-05-17): ring head/tail은 decodeLoop 단일 thread에서
+                // 만 갱신. seekToFrame()은 mDecodeSeekTarget만 set, 외부 ring write 0.
+                // 다음 needsPtsReset 분기에서 codec 정확 PTS로 한 번 더 보정.
+                mRingHead.store(seekTarget, std::memory_order_release);
+                mRingTail.store(seekTarget, std::memory_order_release);
                 AMediaCodec_flush(codec);
                 int64_t seekUs =
                     (seekTarget * 1000000LL) / sampleRate;
@@ -811,10 +823,20 @@ private:
                     extractor, seekUs,
                     AMEDIAEXTRACTOR_SEEK_CLOSEST_SYNC);
                 inputEos = false;
-                outputEos = false;
+                outputEos = false;  // EOS 였어도 seek로 재개
                 needsPtsReset = true;
                 writeFrame = seekTarget; // PTS로 보정 예정
-                // head/tail은 seekToFrame()에서 이미 reset됨.
+            }
+
+            // ---- EOS 후 seek 대기 모드 ----
+            // 곡 끝 도달 후엔 디코드할 게 없음. seek 또는 abort 까지 wait.
+            if (outputEos) {
+                std::unique_lock<std::mutex> lock(mRingMutex);
+                mRingCv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+                    return mDecodeAbort.load(std::memory_order_relaxed)
+                        || mDecodeSeekTarget.load(std::memory_order_relaxed) >= 0;
+                });
+                continue;  // 다음 iter 시작에서 seek 처리 또는 다시 wait
             }
 
             // ---- ring 가득 차면 wait (head - tail >= capacity) ----
@@ -926,6 +948,21 @@ private:
 
                 if (info.flags & AMEDIACODEC_BUFFER_FLAG_END_OF_STREAM) {
                     outputEos = true;
+                    // EOS 첫 도달 시 totalFrames 보정 + 로그 (한 번만).
+                    // 이후 seek 도착하면 다시 디코드 → totalFrames는 정확값 유지.
+                    if (!eosReported) {
+                        eosReported = true;
+                        if (writeFrame > 0 && writeFrame != mDecodedTotalFrames) {
+                            LOGI("decode: actual frames %lld vs est %lld",
+                                 static_cast<long long>(writeFrame),
+                                 static_cast<long long>(mDecodedTotalFrames));
+                            if (writeFrame < mDecodedTotalFrames) {
+                                mDecodedTotalFrames = writeFrame;
+                            }
+                        }
+                        LOGI("decode: EOS reached at frame %lld, waiting for seek",
+                             static_cast<long long>(writeFrame));
+                    }
                 }
                 AMediaCodec_releaseOutputBuffer(
                     codec, static_cast<size_t>(outIdx), false);
@@ -942,8 +979,10 @@ private:
         }
 
         // ring buffer는 sliding window라 fillGaps 불필요 (seek 후 그 위치부터 채움).
-        // 전체 디코드 완료 시 totalFrames 보정만.
+        // totalFrames 보정은 EOS 첫 도달 시 인라인 (eosReported flag).
+        // 여기 도달 = mDecodeAbort=true (stopDecodeThread / 새 loadFile).
         if (!mDecodeAbort.load(std::memory_order_relaxed)) {
+            // 이론상 도달 불가 (while 조건이 !abort). 안전망으로 보정만 한 번 더.
             if (writeFrame > 0 && writeFrame != mDecodedTotalFrames) {
                 LOGI("decode: actual frames %lld vs est %lld",
                      static_cast<long long>(writeFrame),

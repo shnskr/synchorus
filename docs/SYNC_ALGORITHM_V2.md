@@ -466,7 +466,10 @@ v0.0.51 debounce / v0.0.59 마지막-이김 / v0.0.47 NTP 모두 race로 회귀.
   - ✅ **Pre-fill (재생 시작 임계) = 1초 분량** — mp3 디코드 빠르니 안전 마진 1초
   - ✅ **`TOO_LONG` 한도 완전 제거** (`oboe_engine.cpp:143-148` 삭제) — streaming이라 의미 없음
   - ✅ **G-1과 G-2 분리 commit (2026-05-11)** — 원안 단일 commit에서 변경. 이유: native 변경 + Dart 상태머신 묶음이 회귀 추적 어려움. G-1 단독 검증으로 ring buffer 정상 동작 격리 검증 후 G-2 별도 commit (race 격리). G-1 단독은 큰 seek 시 v0.0.74 fallback 패턴 그대로 유지.
-  - ⚠️ **G-1 v0.0.76 도입 후 race 발견 → v0.0.79 revert (2026-05-12 HISTORY (95))**. 큰 seek 슬라이더 연타 시나리오에서 호스트/게스트 둘 다 무음 (`virtualFrame`은 계속 흐름). v0.0.75 비교 실험 PASS로 ring buffer race 확정. 4개 atomic (`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)으로는 "seek 요청 → ring reset → decodeLoop 응답" 단일 트랜잭션이 안 보장. v0.0.79에서 `oboe_engine.cpp` 한 파일만 v0.0.75 코드로 복귀 (사전할당 PCM + 2-range 추적 + fillGaps). **재설계 전제**: ring buffer 상태는 decodeLoop 단일 thread에서만 set, 외부는 요청 큐 push + cv notify. **PoC 격리로 재설계 권장** — 자동화 연타 시나리오 + 회귀 재현 → fix 검증 → 본 앱 합치기.
+  - ⚠️ **G-1 v0.0.76 도입 후 race 발견 → v0.0.79 revert (2026-05-12 HISTORY (95))**. 큰 seek 슬라이더 연타 시나리오에서 호스트/게스트 둘 다 무음 (`virtualFrame`은 계속 흐름). v0.0.75 비교 실험 PASS로 ring buffer race 확정. 4개 atomic (`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)으로는 "seek 요청 → ring reset → decodeLoop 응답" 단일 트랜잭션이 안 보장.
+  - ✅ **G-1 v0.0.84 재도입 — 큐 모델 fix + EOS wait fix (2026-05-17 HISTORY (100))**. PoC 격리(`poc/native_audio_engine_android`)에서 sine generator + ring buffer로 race 재현 + fix 검증 25회(RACE 25% 발현, FIX 0% 차단) 후 본 앱 합치기. 핵심:
+    - **큐 모델 fix**: 외부 `seekToFrame`은 `mDecodeSeekTarget`만 store + cv notify, ring head/tail은 안 건드림. `decodeLoop`이 단일 thread로 ring head/tail 갱신 + codec flush + extractor seekTo 처리. → 외부 thread와 인터리브 race 자체 차단.
+    - **EOS wait fix**: v0.0.76 누락 — `while (!outputEos && !mDecodeAbort)` 조건은 곡 끝 도달 시 decode thread 종료. ring buffer 60s sliding window라 thread 종료 후 seek 불가 → 영구 무음 (5분 곡에선 vf 4분 10초 도달 시 자연 발화, behind 10s + ahead 50s 분배 산식). 변경: `while (!mDecodeAbort)` + EOS 시 cv wait → seek 도착 시 `outputEos=false` 재개.
 
 ### G-2. 시작 / 큰 seek 패턴 — Ready-then-Go 하이브리드
 

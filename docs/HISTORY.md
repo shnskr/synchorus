@@ -5299,6 +5299,132 @@ if (driftMs.abs() > 30) { ... }
 
 ---
 
+### 2026-05-17 (100) — v0.0.84 §G G-1 ring buffer 재도입 (큐 모델 fix + EOS wait fix)
+
+**배경**: HISTORY (95) v0.0.79에서 §G G-1 ring buffer 회귀(큰 seek 슬라이더 연타 시 호스트/게스트 무음, `virtualFrame`은 흐름) 발견 후 revert. PoC 격리 환경에서 race 재현 → 큐 모델 fix 검증 → 본 앱 합치는 단계.
+
+**Step 1: PoC 격리 (race 재현 + fix 검증)** (`poc/native_audio_engine_android`):
+
+`oboe_engine.cpp`에 `RingBufferEngine` 클래스 추가 — sine wave generator + 60s ring buffer + v0.0.76 race 모델 + 큐 모델 fix toggle. mp3 디코더 빼고 sine으로 격리 (race 원인은 디코더가 아니라 ring buffer 동기화). `main.dart`에 "Ring Buffer Race Test" 페이지 신설 — 토글 스위치(RACE/FIX) + 수동 seek + 자동 race test (3초간 50ms 주기 random 큰 seek 60회 + 3초 모니터링 → silent ratio > 50%면 race 판정) + logcat print (`AUTO_TEST_RESULT mode=X race=Y silent_ratio_pct=...`).
+
+**Race window 튜닝**:
+- 1차 시도 chunk decode sleep 5ms → race 안 잡힘 (window 너무 짧음, mp3 디코더 chunk wall time 비슷 안 만듦)
+- 2차 시도 sleep 40ms + chunk 1024 frames → 디코더가 realtime의 0.53배 → 영구 underrun (호스트 단순 재생도 무음)
+- 3차 (확정) chunk 4096 frames (85ms 재생) + sleep 40ms → 디코더가 재생의 ~2배 빠름 (정상 동작) + race window 40ms (자동 test 50ms 주기에 첫 chunk 처리 도중 두 번째 seek 도착 가능)
+
+**PoC 측정 (S22 25회 logcat 캡처)**:
+
+| 모드 | 시도 | race=true | race rate | silent ratio range |
+|---|---|---|---|---|
+| **RACE** (v0.0.76 baseline) | 8 | 2 | **25%** | 정상 3~8% / race 시 **96.9%, 98.3%** (영구 무음) |
+| **FIX** (큐 모델) | 17 | 0 | **0%** | 3.0 ~ 10.0% (mean ~6.6%) |
+
+→ **큐 모델 fix가 race 100% 차단 확인**. silent ratio 96.9% = 본 앱 (95) "loadFile 해야 풀림" 영구 무음 패턴과 일치.
+
+**Step 2: 본 앱 v0.0.84 적용** (`android/app/src/main/cpp/oboe_engine.cpp`):
+
+`git checkout f7e4dfa -- oboe_engine.cpp`로 v0.0.76 ring buffer 베이스 복원 후 큐 모델 fix + EOS wait fix 두 가지 적용. 그 외 파일(`sync_service.dart` 등 v0.0.80~v0.0.83 변경)은 그대로 살림.
+
+**Fix 1 (큐 모델, race 차단)**:
+
+```cpp
+// seekToFrame (외부 thread) — head/tail 직접 store 제거
+if (!isFrameDecoded(clamped)) {
+    if (mDecoding.load(std::memory_order_relaxed)) {
+        mDecodeSeekTarget.store(clamped, std::memory_order_release);  // 요청만
+        std::lock_guard<std::mutex> lock(mRingMutex);
+        mRingCv.notify_all();
+    }
+}
+
+// decodeLoop (단일 thread)
+if (seekTarget >= 0) {
+    mRingHead.store(seekTarget, std::memory_order_release);  // 단일 thread set
+    mRingTail.store(seekTarget, std::memory_order_release);
+    AMediaCodec_flush(codec);
+    AMediaExtractor_seekTo(extractor, seekUs, ...);
+    inputEos = false;
+    outputEos = false;
+    needsPtsReset = true;
+    writeFrame = seekTarget;
+}
+```
+
+→ ring head/tail write가 decodeLoop 단일 thread로 일원화 → 외부 thread와 인터리브 race 자체가 사라짐.
+
+**Fix 2 (EOS wait, v0.0.76 누락된 디자인)**:
+
+v0.0.76 ring buffer는 `while (!outputEos && !mDecodeAbort)` → 곡 끝 도달 시 thread 종료. ring buffer는 60s sliding window라 thread 종료 후 ring head 고정 → 그 후 seek 시도해도 디코드 재시작 불가 → 영구 무음. v0.0.75 사전할당 PCM에선 곡 전체 메모리에 있어 무관했음. **이번 v0.0.84 실측 logcat에서 `decode thread done: 11894998 frames decoded`(곡 4분 35초) 후 무음 영구 잔재로 발견**.
+
+```cpp
+// 변경 전: while (!outputEos && !mDecodeAbort)
+// 변경 후:
+while (!mDecodeAbort.load(std::memory_order_relaxed)) {
+    // seek 요청 처리
+    int64_t seekTarget = mDecodeSeekTarget.exchange(-1, ...);
+    if (seekTarget >= 0) {
+        ...
+        inputEos = false;
+        outputEos = false;  // EOS 였어도 seek로 재개
+        ...
+    }
+
+    // EOS 후 seek 대기 모드
+    if (outputEos) {
+        std::unique_lock<std::mutex> lock(mRingMutex);
+        mRingCv.wait_for(lock, std::chrono::milliseconds(200), [&] {
+            return mDecodeAbort || mDecodeSeekTarget.load() >= 0;
+        });
+        continue;
+    }
+
+    // 일반 디코드 진행 ...
+}
+```
+
+이론상 5분 곡(behind 10s + ahead 50s 분배 = 윈도우 60s)에서 자연 재생만 해도 vf 4분 10초 시점에 ringHead가 곡 끝(5분) 도달 → 기존엔 thread 종료 → 그 후 seek 무효. 큰 seek 연타로 끝쪽 점프 시 더 빠르게 도달. v0.0.84 fix는 EOS 도달해도 thread 살아있고 seek 대기 → 어디든 다시 디코드 가능.
+
+**측정 검증 (본 앱, S22 5분 측정)**:
+
+- `host_seek` 330회 (사용자 슬라이더 빠르게 흔들기) — drift 0.00ms 매번 깔끔 → **race fix 작동 확정**
+- RTT 분포: min 6 / p50 18 / p90 26 / **max 30ms** — v0.0.80 outlier rejection 통과율 100% (사용자 환경 WiFi 안정)
+- 사용자 청감: 5분 측정 동안 **무음 영구 잔재 0회**
+
+**남은 잔재 1건 발견 (본 fix와 무관, 별도 트랙)**:
+
+seq 265~278 영역 (csv 58~65초, 13초 지속):
+- vfDiff -319 ~ -346ms (청감 인지 가능)
+- drift_ms -1 ~ -4ms (sync 자체는 정확)
+- `out_lat_delta_anchored = 13.09ms` 영구 박힘 (anchor 베이크인 outputLatency 부정확)
+- 13초 후 사용자 seek (seq 279)로 anchor reset → 0ms 정상 복귀
+- → HISTORY (42)/(45)/(98) 영역 = anchor 베이크인 outputLatency 부정확 미해결 이슈. PLAN HIGH §B v0.0.81 ANCHOR-VERIFY 임계 200~300ms로 좁히기 후속에 이미 있음.
+
+**부작용 1건 (영구 무음 아님, 별도 트랙)**:
+
+호스트 PlayerScreen 첫 진입 시 모든 버튼(재생/정지/seek/mute) 비활성화 케이스 1회 발생. 방 나갔다 다시 만들기 2~3회로 복구. `widget.isHost` 또는 `currentFileName` 일시 false 추정. v0.0.83에서 못 본 증상이라 v0.0.84 회귀 의심이나 oboe_engine.cpp 변경(native engine 측)이 Dart UI 상태에 영향 줄 흐름 모호. 재현 패턴 모이면 root cause 추적.
+
+**왜 PoC 격리가 성공적이었나**:
+
+직전 시도 (v0.0.76 단독 → v0.0.77 → v0.0.78/v0.0.79 revert)는 본 앱 회귀 위험으로 race 격리 검증 부족했음. PoC 격리에서 sine generator + mp3 디코더 제거로 변수 1개(ring buffer 동기화)만 남기고, 자동화 race test + logcat print로 25회 정량 측정 → **race window 튜닝 + fix 작동 모두 객관 수치로 검증**. 본 앱 합치기는 v0.0.76 베이스 복원 + 2곳 한정 fix로 회귀 면적 최소화.
+
+**검증**:
+- ✅ PoC `flutter analyze` No issues, `flutter build apk --debug` 통과 (NDK 12.2s)
+- ✅ PoC 자동 race test 25회 (RACE 8회 + FIX 17회) logcat 수치 캡처
+- ✅ 본 앱 `flutter analyze` No issues, `flutter build apk --debug` 통과 (NDK 8.3s)
+- ✅ 본 앱 S22 5분 측정: host_seek 330회 drift 0.00ms, fallback 27회 모두 정상 회복
+- ⏳ A7 Lite 본 앱 측정 (디바이스 분리/재연결 반복으로 본 commit 시점 미수행)
+- ⏳ iOS 회귀 검증 (다음 세션)
+
+**회귀 위험**: 낮음.
+- `oboe_engine.cpp` 단일 파일 변경 (다른 파일 v0.0.80~v0.0.83 그대로)
+- v0.0.76 베이스(검증된 ring buffer) + 두 곳 한정 fix
+- 큐 모델 fix는 PoC 격리에서 25회 측정으로 race 0% 확정
+- EOS wait fix는 native 측 mDecodeAbort 시 정리 그대로 (loadFile 새 호출 시 안전 종료)
+
+**빌드**: v0.0.84
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -5321,6 +5447,8 @@ if (driftMs.abs() > 30) { ... }
 - [x] ~~**iOS 26.4.1 + macOS 26.3 환경 빌드 install hung**~~ — **회피 표준화 완료 (v0.0.71 (85) 후속)**. CLAUDE.md "실기기 빌드/설치" + "iOS debug 빌드 디버거 attach 필요" 섹션 갱신. CLI hung 시 잔재 프로세스 정리 + IntelliJ/Xcode IDE 권장. 근본 fix는 Apple/Flutter toolchain 측이라 운영 차원에선 표준 우회로 마감.
 - [ ] **Tab A7 Lite oboe pause/resume xrun** (2026-04-26 (43) 신규, low priority). v0.0.46 oboe stop을 `requestPause`로 변경 후 Tab A7 Lite에서 pause→resume 사이클마다 xrun + getTimestamp ErrorInvalidState 50~360ms 동반. S22는 정상. 저가형 HAL 한계로 추정. 회피 — pause 모델 대신 close + reset 사용 분기. 또는 NTP 정공법으로 우회.
 - [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52) name+IP fix → v0.0.73 (88) 영속 deviceId(UUID) fix로 단순화 완료**. 같은 모델 2대 환경 검증 부담 자체 해소(코드상 충돌 1/2^128). 갤럭시 3대(모델 무관) + 비행기 모드 검증으로 충분.
+- [ ] **호스트 PlayerScreen 첫 진입 시 모든 버튼 비활성화** (2026-05-17 (100) v0.0.84 신규, 1회 재현). 재생/정지/5초 skip/mute/seekbar 모두 비활성화 상태. 방 나갔다 다시 만들기 2~3회 시 복구. `widget.isHost` 또는 `currentFileName` 일시 false로 평가됨 추정. v0.0.84의 oboe_engine.cpp 변경(native engine)이 Dart UI 상태에 영향 줄 흐름 모호. 영구 무음 아니라 critical 아님. 재현 패턴 모이면 root cause 추적 — 의심 후보: PlayerScreen build 순서 race, native engine init time 변경 영향, install 직후 fresh state 이슈.
+- [ ] **anchor 베이크인 outputLatency 부정확 (vfDiff -319ms 잔재)** (2026-05-17 (100) 신규 관찰, HISTORY (42)/(45)/(98) 동일 영역). v0.0.84 5분 측정 중 1회 13초 지속 — `out_lat_delta_anchored = 13.09ms` 영구 박힘 + drift_ms ±4ms (sync 자체 정확) + vfDiff -319 ~ -346ms (청감 인지). 사용자 seek로 anchor reset 시 0ms 복귀. 본 commit 무관. PLAN HIGH §B v0.0.81 ANCHOR-VERIFY 임계 200~300ms로 좁히는 후속에 이미 분류.
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

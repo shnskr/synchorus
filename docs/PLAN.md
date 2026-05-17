@@ -105,11 +105,10 @@
 
 진행 상태:
 - ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
-- ❌ step 2-G1 (v0.0.76) — native ring buffer 단독. v0.0.79에서 추가 회귀 발견 → revert. 큰 seek 슬라이더 **연타** 시 호스트/게스트 둘 다 무음 (`virtualFrame`은 계속 흐름, PCM read만 무음). v0.0.75 비교 실험에서 ring buffer 없을 땐 무음 없음 → **G-1 ring buffer race 확정** (2026-05-12 HISTORY (95)). 4개 atomic (`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)으로는 단일 트랜잭션 안 보장.
-- ❌ step 2-G2 (v0.0.77) — Dart prepare→ready→go 구현 후 회귀 → v0.0.78에서 revert (HISTORY (94)). G-1 race도 같은 원인 계열.
-- ⏳ step 2-G1 재설계 (**PoC 격리 권장**) — `poc/` 하위에서 ring buffer mutex/cv 단일 thread 직렬화 재설계. 핵심 회귀 모드(큰 seek 연타 → 호스트/게스트 무음 + loadFile만 fix)를 자동화 시나리오로 재현 → fix 검증 → 본 앱 합치기. 재설계 후 G-2도 같은 큐 기반으로 합쳐 검토.
-- ⏳ step 3 — G-3 측정 → EMA 활용 (PoC 재설계 진행 후 데이터 합쳐 보강)
-- ⏳ 30분+ 측정 검증 (MID-7 — ring buffer 보류로 다시 14분 한도 부활, 직접 측정 어려움)
+- ✅ **step 2-G1 재도입 (v0.0.84, 2026-05-17)** — PoC 격리에서 race 재현(8회 중 2회=25%) + 큐 모델 fix 검증(17회 중 0회=0%) 후 본 앱 합치기. 큐 모델: 외부는 `mDecodeSeekTarget`만 set, ring head/tail은 decodeLoop 단일 thread에서만 갱신. 추가로 EOS wait fix(v0.0.76 누락) — 곡 끝 도달해도 decode thread 살아있게 seek 대기. HISTORY (100) 참조.
+- ⏳ **step 2-G2 (Dart Ready-then-Go 하이브리드)** — v0.0.77 시도 후 revert (HISTORY (94)). G-1 race가 fix됐으니 G-2 재시도 가능. 다음 작업 후보 (큐 모델 기반 재설계).
+- ⏳ step 3 — G-3 측정 → EMA 활용 (G-2 재도입 후)
+- ⏳ 30분+ 측정 검증 (MID-7 자연 해소 가능 — ring buffer 14분 한도 제거됨)
 - ⏳ iOS 회귀 검증
 
 ~~**§B clock sync 추가 보강 (v0.0.80~v0.0.83)**~~ — **2026-05-15 (99) 완료, 사상**. v0.0.80 outlier rejection + v0.0.81 ANCHOR-VERIFY + v0.0.82 호스트 `_broadcastObs()` 제거 + v0.0.83 fallback cooldown 가드. 청감 "괜찮음" 확정, 무음 0회. 잠재 후보(임계 보강 / deadline 보강 / obs 신선도 가드 / 호스트 빠른 seek 연타 무음 / 2단계 burst sync 재실행 / ANCHOR-VERIFY 단독 청감 부작용 측정 / v0.0.86 `_latestObs=null` race 메모) 모두 잔재 발견 시 HISTORY (96)~(99) 참고해 재기.
