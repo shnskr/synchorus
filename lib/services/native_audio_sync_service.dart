@@ -61,6 +61,10 @@ class NativeAudioSyncService {
   String? _storedSafeName;
   String? _currentUrl;
   int _obsBroadcastSeq = 0;
+  // v0.0.85 진단 (2026-05-17 (100) 후속): 호스트 syncSeek마다 ++. seek-notify
+  // p2p 메시지에 'msgSeq' 동봉 → 게스트 anchor_reset_seek_notify event csv row에
+  // 같은 값 기록해 송수신 1:1 매칭. 메시지 손실 vs handler 발화 누락 분리용.
+  int _hostSeekMsgSeq = 0;
 
   /// 게스트: 현재 다운로드 세션 ID. 새 audio-url마다 증가, 이전 다운로드 무효화용.
   int _downloadSessionId = 0;
@@ -523,9 +527,14 @@ class NativeAudioSyncService {
 
     // v0.0.48 롤백: 재생 중/정지 모두 seekToFrame 직접 (NTP schedule 사용 안 함).
     await _engine.seekToFrame(clampedTarget);
+    // v0.0.85: msgSeq 동봉 — 게스트 csv 매칭으로 메시지 손실 검증.
+    final msgSeq = ++_hostSeekMsgSeq;
     _p2p.broadcastToAll({
       'type': 'seek-notify',
-      'data': {'targetMs': position.inMilliseconds},
+      'data': {
+        'targetMs': position.inMilliseconds,
+        'msgSeq': msgSeq,
+      },
     });
 
     // v0.0.82: _broadcastObs() 호출 제거. native seek 비동기(즉시 return)라 이 시점
@@ -538,6 +547,7 @@ class NativeAudioSyncService {
       event: 'host_seek',
       hostVf: clampedTarget,
       targetMs: position.inMilliseconds,
+      seekMsgSeq: msgSeq,
     );
   }
 
@@ -701,6 +711,7 @@ class NativeAudioSyncService {
     required String event,
     int hostVf = 0,
     int targetMs = 0,
+    int seekMsgSeq = 0,
   }) {
     if (!_isHost) return;
     final ts = _engine.latest;
@@ -715,9 +726,10 @@ class NativeAudioSyncService {
       hostVf: hostVf != 0 ? hostVf : (ts?.virtualFrame ?? 0),
       guestVf: targetMs,
       seekCount: 0,
+      seekMsgSeq: seekMsgSeq,
       event: event,
     );
-    debugPrint('[HOST-EVENT] $event vf=${hostVf != 0 ? hostVf : ts?.virtualFrame} targetMs=$targetMs');
+    debugPrint('[HOST-EVENT] $event vf=${hostVf != 0 ? hostVf : ts?.virtualFrame} targetMs=$targetMs${seekMsgSeq != 0 ? " msgSeq=$seekMsgSeq" : ""}');
   }
 
   void _handleDriftReport(Map<String, dynamic> message) {
@@ -741,6 +753,9 @@ class NativeAudioSyncService {
     final winMinRawOffsetMs = (data['winMinRawOffsetMs'] as num?)?.toDouble() ?? 0;
     final lastRttMs = (data['lastRttMs'] as num?)?.toInt() ?? 0;
     final winMinRttMs = (data['winMinRttMs'] as num?)?.toInt() ?? 0;
+    // v0.0.85 진단 컬럼: anchor_reset_seek_notify event row에 호스트 host_seek
+    // msgSeq를 동봉해 받음 → csv에서 1:1 매칭으로 메시지 손실 검증.
+    final seekMsgSeq = (data['seekMsgSeq'] as num?)?.toInt() ?? 0;
 
     // wall_ms는 호스트 받은 시점으로 통일 (단조 증가 보장).
     // guest_wall은 게스트가 보낸 원본 wallMs — TCP lag + clock offset 분석용.
@@ -765,6 +780,7 @@ class NativeAudioSyncService {
       winMinRawOffsetMs: winMinRawOffsetMs,
       lastRttMs: lastRttMs,
       winMinRttMs: winMinRttMs,
+      seekMsgSeq: seekMsgSeq,
       event: event,
     );
     // 실시간 관측용 logcat 출력 (v0.0.24+)
@@ -1140,8 +1156,14 @@ class NativeAudioSyncService {
   void _handleSeekNotify(Map<String, dynamic> message) {
     final targetMs = (message['data']?['targetMs'] as num?)?.toDouble();
     if (targetMs == null || !_audioReady) return;
+    // v0.0.85 진단: 호스트가 동봉한 msgSeq (구버전 호스트 호환 위해 0 fallback).
+    final msgSeq = (message['data']?['msgSeq'] as num?)?.toInt() ?? 0;
     // 절대 위치 → 게스트 frame 변환. 몇 번 와도 같은 위치 (멱등)
     final targetGuestVf = (targetMs * _framesPerMs).round();
+    debugPrint(
+      '[SEEK-NOTIFY] recv msgSeq=$msgSeq targetMs=${targetMs.toStringAsFixed(0)} '
+      '→ guestVf=$targetGuestVf',
+    );
     unawaited(_engine.seekToFrame(targetGuestVf));
     // UI 즉시 반영. 재생 중이 아니면 폴링이 이전 위치를 계속 emit하므로
     // override로 덮어야 "처음 재생" 시 끝 위치(4:55) 잔상이 사라짐.
@@ -1156,7 +1178,30 @@ class NativeAudioSyncService {
     _anchorHostFrame = null;
     _anchorGuestFrame = null;
     _seekCooldownUntilMs = DateTime.now().millisecondsSinceEpoch + 1000;
-    _logGuestEvent(event: 'anchor_reset_seek_notify');
+    _logGuestEvent(event: 'anchor_reset_seek_notify', seekMsgSeq: msgSeq);
+    // v0.0.85: 200ms 후 ts.virtualFrame이 target 근처 도달했는지 검증.
+    // 큐 모델 fix 후 외부 seekToFrame은 mDecodeSeekTarget만 set → ts.virtualFrame
+    // 자체가 즉시 점프하는지 / decodeLoop 실제 처리되는지 따로 확인.
+    // ±100ms 범위 밖이면 logcat warning — handler는 발화했는데 native 처리 누락.
+    Timer(const Duration(milliseconds: 200), () {
+      final ts = _engine.latest;
+      if (ts == null) return;
+      final actual = ts.virtualFrame;
+      final diffFrames = actual - targetGuestVf;
+      final fpms = ts.sampleRate > 0 ? ts.sampleRate / 1000.0 : _framesPerMs;
+      final diffMs = diffFrames / fpms;
+      if (diffMs.abs() > 100.0) {
+        debugPrint(
+          '[SEEK-NOTIFY] WARN msgSeq=$msgSeq target=$targetGuestVf '
+          'actual=$actual diffMs=${diffMs.toStringAsFixed(1)}ms (>100ms after 200ms)',
+        );
+      } else {
+        debugPrint(
+          '[SEEK-NOTIFY] OK msgSeq=$msgSeq target=$targetGuestVf '
+          'actual=$actual diffMs=${diffMs.toStringAsFixed(1)}ms',
+        );
+      }
+    });
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1190,7 +1235,9 @@ class NativeAudioSyncService {
   /// 게스트 측 이벤트(start/stop/anchor_set/anchor_reset)를 호스트로 보내
   /// csv에 별도 row로 기록. drift_ms/vf_diff_ms는 그 시점 마지막 값(있으면)
   /// 또는 0. anchor 관련 이벤트엔 _latestObs 신선도 추적 위해 hostObsWall 채움.
-  void _logGuestEvent({required String event}) {
+  /// v0.0.85 [seekMsgSeq]: anchor_reset_seek_notify 이벤트일 때 호스트의 host_seek
+  /// row와 매칭하기 위한 카운터.
+  void _logGuestEvent({required String event, int seekMsgSeq = 0}) {
     if (_isHost) return;
     final ts = _engine.latest;
     _sendDriftReport(
@@ -1202,6 +1249,7 @@ class NativeAudioSyncService {
       hostVf: _latestObs?.virtualFrame ?? 0,
       guestVf: ts?.virtualFrame ?? 0,
       event: event,
+      seekMsgSeq: seekMsgSeq,
     );
   }
 
@@ -1468,6 +1516,8 @@ class NativeAudioSyncService {
   /// [vfDiffMs] 외삽 + outputLatency 보정 후 콘텐츠 절대 위치 차이.
   /// [hostObsWall] 이 보고가 사용한 호스트 obs의 측정 시각 (외삽 신선도 추적).
   /// v0.0.52 진단 컬럼: outLat* 4개 추가 옵셔널.
+  /// v0.0.85 [seekMsgSeq]: anchor_reset_seek_notify event에서만 채움. 호스트
+  /// host_seek event row와 1:1 매칭해 seek-notify 메시지 손실 검증.
   void _sendDriftReport({
     required int wallMs,
     required double driftMs,
@@ -1481,6 +1531,7 @@ class NativeAudioSyncService {
     double outLatGuestRaw = 0,
     double outLatDeltaCurrent = 0,
     double outLatDeltaAnchored = 0,
+    int seekMsgSeq = 0,
   }) {
     // v0.0.56 진단: raw offset/RTT 매번 sync_service에서 가져와 첨부.
     // 호출부마다 따로 추가하지 않고 여기서 일괄 — _sync는 게스트만 의미 있는 값.
@@ -1504,6 +1555,7 @@ class NativeAudioSyncService {
         'winMinRawOffsetMs': _sync.winMinRawOffsetMs,
         'lastRttMs': _sync.lastRttMs,
         'winMinRttMs': _sync.winMinRttMs,
+        'seekMsgSeq': seekMsgSeq,
       },
     });
   }

@@ -5425,6 +5425,94 @@ seq 265~278 영역 (csv 58~65초, 13초 지속):
 
 ---
 
+### 2026-05-17 (101) — v0.0.85 §B 후속 진단 로그 추가 (호스트 빠른 seek 연타 시 게스트 sync 누락 root cause 좁힘)
+
+**배경**: HISTORY (100) v0.0.84 후속 측정에서 csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342 영역에 vfDiff -197초 영구 잔재 19초+ 지속 발견. drift_ms ±5ms로 sync 자체는 정확하나 게스트 syncSeek가 발화 안 됨. ANCHOR-VERIFY는 anchor 박은 직후 100ms만 검증 → 통과 후 호스트 큰 seek 폭증 케이스 못 잡음. PLAN HIGH §B 후속 진행 후보 (a) "호스트 큰 seek 후 게스트 seek-notify 도달 검증 로그 추가" 실행.
+
+**의심 가설 분리** (어느 단계에서 끊겼나):
+1. (가설 1) p2p `broadcastToAll`로 보낸 seek-notify 메시지가 게스트 TCP에 도달 안 함 (네트워크 손실 / 호스트 send buffer 폭증)
+2. (가설 2) 게스트가 메시지 수신했는데 `_handleSeekNotify` 발화 누락 (이벤트 디스패치)
+3. (가설 3) `_handleSeekNotify` 발화 → `_engine.seekToFrame` 호출했는데 v0.0.84 큐 모델로 외부 호출이 `mDecodeSeekTarget`만 set → ts.virtualFrame 자체가 즉시 점프 안 되거나 decodeLoop 처리 누락
+
+**변경 (3곳)**:
+
+1. **`sync_measurement_logger.dart`** — csv 헤더에 `seek_msg_seq` 컬럼 1개 추가 (마지막, event 직전). `log()` 시그니처에 `int seekMsgSeq = 0` optional 파라미터.
+
+2. **`native_audio_sync_service.dart`** — 호스트 측 단조 카운터 `_hostSeekMsgSeq` 멤버 추가.
+   - `syncSeek()` (line 508~): `++_hostSeekMsgSeq` 후 p2p `seek-notify` 메시지 data에 `'msgSeq': msgSeq` 동봉 + `_logHostEvent`에 `seekMsgSeq: msgSeq` 전달 → csv host_seek row에 기록.
+   - `_handleSeekNotify()` (line 1140~): 메시지에서 `msgSeq` 추출 (구버전 호스트 호환 0 fallback). logcat `[SEEK-NOTIFY] recv msgSeq=X targetMs=Y → guestVf=Z` 출력. `_logGuestEvent('anchor_reset_seek_notify', seekMsgSeq: msgSeq)` 호출 → csv guest row에 같은 값.
+   - `_handleSeekNotify` 200ms 후 timer: `ts.virtualFrame`이 `targetGuestVf` ±100ms 안 도달했는지 검증. 벗어나면 `[SEEK-NOTIFY] WARN msgSeq=X target=Y actual=Z diffMs=N` 출력, OK면 `[SEEK-NOTIFY] OK ...` 출력. 가설 3 검증용 (handler는 발화했는데 native 처리 누락).
+   - `_logGuestEvent`, `_sendDriftReport`, `_handleDriftReport` 시그니처 모두 `seekMsgSeq` optional 추가 + p2p 메시지/csv 끝까지 전달.
+
+**다음 측정 시 root cause 좁히기 흐름**:
+- csv에서 host_seek row의 `seek_msg_seq` 모두 추출 → 게스트 `anchor_reset_seek_notify` row의 같은 값 매칭.
+- 매칭 누락 = 가설 1 또는 2 (메시지 손실 / 발화 누락 — logcat `[SEEK-NOTIFY] recv` 유무로 1/2 분리).
+- 매칭 OK인데 logcat `[SEEK-NOTIFY] WARN` 발생 = 가설 3 (큐 모델 영향).
+- 매칭 OK + `[SEEK-NOTIFY] OK`인데도 vfDiff 잔재 = 다른 경로 (예: anchor 단계 fallback 부정확) → ANCHOR-VERIFY 임계 좁힘 (PLAN 후속 b) 트랙.
+
+**검증**:
+- ✅ `flutter analyze` No issues (4.8s)
+- ⏳ 실기기 측정 — 사용자 시나리오 (호스트 빠른 seek 연타) 재현 후 csv + logcat 같이 캡처
+
+**회귀 위험**: 매우 낮음.
+- 신규 컬럼은 마지막 위치 추가 (기존 컬럼 인덱스 무영향)
+- p2p 메시지에 새 필드 `msgSeq` 추가 (구버전 호스트 호환 0 fallback)
+- 200ms timer는 logcat만 — 동작 영향 0
+- v0.0.84 행동 그대로, 진단 로그만 추가
+
+**빌드**: v0.0.85
+
+---
+
+### 2026-05-25 (102) — v0.0.85 진단 측정 결과: 가설 3가지 모두 부정, HISTORY (100) 잔재 재현 실패
+
+**환경**: 카페 공용 WiFi의 client isolation으로 일반 LAN 불가 → **맥북 macOS 26.3 Internet Sharing으로 WiFi AP 우회**. 카페 WiFi가 유일한 활성 source인데 macOS는 WiFi→WiFi 공유 차단(같은 인터페이스 source/target 동시 사용 불가)이라 [zhuhuilin gist](https://gist.github.com/zhuhuilin/01656866b3e73a677a434c21183b40d2)의 트릭 적용:
+
+```bash
+sudo networksetup -createnetworkservice "AdHoc" lo0
+sudo networksetup -setmanual "AdHoc" 10.10.10.1 255.255.255.255
+```
+
+→ lo0(loopback)에 가짜 IP를 가진 "AdHoc" 네트워크 서비스 생성 → macOS가 활성 source로 인식 → Internet Sharing 메뉴에서 source=AdHoc, target=Wi-Fi 선택 가능 → 맥북이 WiFi AP가 됨. S22 + A7 Lite를 그 AP에 연결. **macOS 26.3 (Tahoe)에서도 정상 작동 확인** (gist는 13~15까지만 검증돼 있었음).
+
+**시나리오**: 호스트(S22) PlayerScreen에서 슬라이더 빠르게 흔들기 6초간 — 1초당 ~8.6회, 총 256회 seek 발생 (인간 수동이지만 Flutter Slider onChanged 폭증).
+
+**측정 데이터 (csv `sync_log_2026-05-25T17-26-08.csv`, 1095 row)**:
+
+| 가설 | 결과 | 근거 |
+|---|---|---|
+| (1) seek-notify 메시지 손실 | ❌ **부정** | host_seek **256회** ↔ anchor_reset_seek_notify **256회** = 1:1 완전 매칭 |
+| (2) 게스트 handler 발화 누락 | ❌ **부정** | logcat `[SEEK-NOTIFY] recv msgSeq=207~256` 모두 도착, 빠짐 없음 |
+| (3) v0.0.84 큐 모델 native 처리 누락 | ❌ **부정** | 각 seek 클러스터의 마지막 msgSeq는 항상 `OK` (target = actual) |
+
+**WARN 발생 패턴은 false positive**: 200ms 검증 timer가 발화할 때 이미 후속 seek이 새 target으로 덮어쓴 상태. 큐 모델 `mDecodeSeekTarget.exchange(-1)`로 옛 target 떨궈진 정상 동작. 예시 — msgSeq=212/213/214 모두 WARN, 그 직후 msgSeq=215는 OK (vf=7955328 = 모두 같은 actual).
+
+**vfDiff 영구 잔재 0건**: csv drift row 중 |vf_diff_ms| ≥ 500ms 0건. 마지막 30개 drift row의 vfDiff 최대 -52.71ms (청감 인지 어려운 수준). anchor_set 13회 정상 발생. drift_ms ±5ms 이내. **사용자 청감 OK**.
+
+**해석**:
+
+(100) 잔재 재현 실패의 가능한 원인:
+- (a) **race 의존성** — 매번 재현되지 않는 확률적 잔재
+- (b) **환경 의존성** — 맥북 핫스팟의 낮은 latency(LAN 직결, RTT < 5ms 추정)가 race window 좁혀서 (100)의 카페 WiFi 환경과 다름
+- (c) 사용자 시나리오 차이 — (100)은 일반 카페 WiFi + 일정 시간 사용 후, 본 측정은 핫스팟 + 첫 진입 직후
+
+**진단 인프라는 유지**: `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 v0.0.85 그대로. 자연 재발 시 root cause 분리 가능. (b)~(e) 영역 fix는 잔재 직접 재현 후로 보류.
+
+**부가 발견**:
+- **macOS Internet Sharing AdHoc 트릭이 측정 인프라로 유용** — 카페/외부 환경에서 WiFi AP 없이 측정 가능. 단 호스트 connectivity 가드(`room_lifecycle_coordinator.dart:215~248`)가 잘 작동했는데, S22가 맥북 핫스팟에 정상 WiFi로 연결됐기 때문 (connectivity_plus가 `wifi`로 보고). task #7 코드 패치 불필요.
+- **빠른 seek 연타의 정상 동작 범위 확인**: 1초당 ~8.6회 (총 256회/6초)까지 256:256 매칭 성공. 더 빠른 연타에서 어디서 깨지는지는 미측정.
+
+**검증**:
+- ✅ macOS 26.3에서 AdHoc 인터넷 공유 동작 확인 (S22 + A7 Lite WiFi 연결)
+- ✅ 256회 빠른 seek 연타 (6초 동안) 모두 정상 처리
+- ✅ 사용자 청감 OK
+- ⏳ 일반 WiFi 환경 재측정 (환경 의존성 검증)
+- ⏳ (100) 잔재 자연 재발 진단 대기
+
+**다음 세션 후보**: (a) 일반 WiFi 환경에서 동일 시나리오 측정 → 환경 의존성 확인. (b) 자연 재발 trigger 발견 시 진단 인프라로 root cause 분리. (c) (100) 잔재 영영 못 잡으면 PLAN HIGH §B 후속 사상.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -5449,7 +5537,7 @@ seq 265~278 영역 (csv 58~65초, 13초 지속):
 - [x] ~~**게스트 3명 입장 불가 (이름 충돌 핑퐁)**~~ — **v0.0.54 (52) name+IP fix → v0.0.73 (88) 영속 deviceId(UUID) fix로 단순화 완료**. 같은 모델 2대 환경 검증 부담 자체 해소(코드상 충돌 1/2^128). 갤럭시 3대(모델 무관) + 비행기 모드 검증으로 충분.
 - [ ] **호스트 PlayerScreen 첫 진입 시 모든 버튼 비활성화** (2026-05-17 (100) v0.0.84 신규, 1회 재현). 재생/정지/5초 skip/mute/seekbar 모두 비활성화 상태. 방 나갔다 다시 만들기 2~3회 시 복구. `widget.isHost` 또는 `currentFileName` 일시 false로 평가됨 추정. v0.0.84의 oboe_engine.cpp 변경(native engine)이 Dart UI 상태에 영향 줄 흐름 모호. 영구 무음 아니라 critical 아님. 재현 패턴 모이면 root cause 추적 — 의심 후보: PlayerScreen build 순서 race, native engine init time 변경 영향, install 직후 fresh state 이슈.
 - [ ] **anchor 베이크인 outputLatency 부정확 (vfDiff -319ms 잔재)** (2026-05-17 (100) 신규 관찰, HISTORY (42)/(45)/(98) 동일 영역). v0.0.84 5분 측정 중 1회 13초 지속 — `out_lat_delta_anchored = 13.09ms` 영구 박힘 + drift_ms ±4ms (sync 자체 정확) + vfDiff -319 ~ -346ms (청감 인지). 사용자 seek로 anchor reset 시 0ms 복귀. 본 commit 무관. PLAN HIGH §B v0.0.81 ANCHOR-VERIFY 임계 200~300ms로 좁히는 후속에 이미 분류.
-- [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견, csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342). 사용자 청감: "호스트 4분대 재생인데 게스트는 한참 앞 재생". 시퀀스: seq 322 anchor_set 정상(vfDiff -21ms) → seq 324 갑자기 host_vf=10444494(217초) / guest_vf=1739181(36초) → vfDiff -197687ms 19초+ 지속. drift_ms ±5ms 매번 정확(clock sync OK). 게스트 자기 vf는 자연 진행만 함 = **호스트 큰 seek 후 게스트 syncSeek 발화 누락**. ANCHOR-VERIFY는 anchor 박은 직후 100ms만 검증 → seq 322 시점 정상으로 통과 후 호스트 점프로 폭증 케이스를 못 잡음. 의심: (1) 사용자 빠른 슬라이더 연타 도중 호스트 seek-notify 메시지 누락, (2) v0.0.82 호스트 `_broadcastObs()` 제거 + v0.0.83 fallback cooldown 가드 결합에 빠른 seek 시 정기 timer broadcast 사이 timing race, (3) v0.0.84 큐 모델 fix로 외부 seekToFrame이 mDecodeSeekTarget만 set → decodeLoop 처리 전 broadcast obs는 새 vf인데 ring head/tail은 옛 위치로 timing mismatch. **진단 후보**: 호스트 큰 seek 후 게스트 seek-notify 도달 검증 로그 추가 (msg send vs recv 매칭) + obs 안 호스트 vf 점프 감지 시 강제 reseek fallback. ANCHOR-VERIFY 임계 좁히기와 함께 PLAN HIGH §B 후속에 합쳐 분류.
+- [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

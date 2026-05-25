@@ -54,8 +54,13 @@ class SyncMeasurementLogger {
     // decode_total_frames: loadFile 직후 totalFrames (없으면 0)
     // decode_throughput_fpms: decode_total_frames / decode_load_ms (frames per ms)
     // event='decode_load' row만 의미, 다른 row는 모두 0.
+    // v0.0.85 진단 컬럼 (2026-05-17 (100) 후속): 호스트 빠른 seek 연타 시 게스트 sync
+    // 누락 root cause 좁힘용. host_seek event에서 ++한 단조 카운터를 seek-notify
+    // p2p 메시지에 동봉 → 게스트 anchor_reset_seek_notify event row에 같은 값 기록.
+    // csv 안에서 송수신 1:1 매칭으로 메시지 손실 vs handler 자체 발화 누락 분리.
+    // host_seek 이외 row는 0.
     _sink!.writeln(
-      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,decode_load_ms,decode_total_frames,decode_throughput_fpms,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,decode_load_ms,decode_total_frames,decode_throughput_fpms,seek_msg_seq,event',
     );
     _nextSeq = 0;
     _isActive = true;
@@ -84,12 +89,13 @@ class SyncMeasurementLogger {
     int decodeLoadMs = 0,
     int decodeTotalFrames = 0,
     double decodeThroughputFpms = 0,
+    int seekMsgSeq = 0,
     String event = 'drift',
   }) {
     if (!_isActive) return;
     final seq = _nextSeq++;
     _sink?.writeln(
-      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$decodeLoadMs,$decodeTotalFrames,${decodeThroughputFpms.toStringAsFixed(2)},$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$decodeLoadMs,$decodeTotalFrames,${decodeThroughputFpms.toStringAsFixed(2)},$seekMsgSeq,$event',
     );
   }
 
