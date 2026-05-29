@@ -5513,6 +5513,25 @@ sudo networksetup -setmanual "AdHoc" 10.10.10.1 255.255.255.255
 
 ---
 
+### 2026-05-29 (103) — v0.0.86 UI 정리: `NativeTestScreen` 제거
+
+**배경**: `lib/screens/native_test_screen.dart`는 v3 PoC 단계(commit c4bfd5c "v3 step 1-2: 네이티브 엔진 테스트 UI + S22 검증 완료")에서 만든 임시 화면. 코드/주석 모두 `[임시]` / `(임시)` 명시. PoC §6-3 단계별 진행은 모두 ✅ 완료(PLAN.md), 본 구현 단계 1-1 ~ 2도 모두 ✅. 더 이상 진입 경로 없는 dead UI라 제거.
+
+**변경**:
+1. `lib/screens/native_test_screen.dart` 삭제 (225 lines)
+2. `lib/screens/home_screen.dart` import 제거 (line 14)
+3. `lib/screens/home_screen.dart` "Native Engine Test" `OutlinedButton` + 주석 + 인접 `SizedBox(height: 16)` 제거 (방 만들기 버튼 위 13줄)
+
+**검증**:
+- ✅ `flutter analyze` No issues (3.6s)
+- ⏳ 실기기 동작 확인 (다음 세션)
+
+**회귀 위험**: 매우 낮음. UI 한 화면 + 진입 버튼 제거. 본체 동기화 로직/네이티브 엔진 무영향.
+
+**빌드**: v0.0.86
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
