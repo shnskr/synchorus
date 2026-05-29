@@ -5532,6 +5532,31 @@ sudo networksetup -setmanual "AdHoc" 10.10.10.1 255.255.255.255
 
 ---
 
+### 2026-05-29 (104) — v0.0.87 첫 화면 = PlayerScreen (단독 호스트 모드)
+
+**배경**: 사용자 요청 — 누군가 방을 만들거나 참가하지 않는 한 앱을 단독 플레이어로 사용. 첫 화면이 `PlayerScreen`이 되어야 함. 방 만들기/참가 동선의 정확한 UI 위치는 사용자가 추후 결정.
+
+**변경**:
+1. `lib/main.dart` — `home: const HomeScreen()` → `home: const PlayerScreen(isHost: true)`. import 교체.
+2. `lib/screens/player_screen.dart` — `initState`에서 `audio.startListening(isHost: isHost)` + `handler.attachSyncService(audio, isHost: isHost)` 호출 추가. 기존 RoomScreen 경유 진입에선 이미 호출되지만 재호출 안전(`startListening`은 `_messageSub` 재구독, `attachSyncService`는 detach 선행). 단독 진입 경로에서도 audio_handler 및 message listener 활성 보장.
+3. `lib/screens/player_screen.dart` — `AppBar.actions`에 `Icons.group_add` IconButton 추가, 누르면 기존 `HomeScreen` push. **[임시]** 주석 명시 — 사용자가 위치 정해주면 인라인 통합 예정.
+
+**동작 검증 흐름**:
+- P2P 미연결 상태에서 `syncPlay`/`syncSeek`/`syncPause` 호출 → `_p2p.broadcastToAll`은 빈 `_peers` 순회로 no-op (`p2p_service.dart:407`), `_engine.start/stop/seekToFrame`만 실행. 단독 재생 정상.
+- `_broadcastObs` Timer(500ms)도 빈 list no-op. CPU 영향 무시 가능.
+- 누군가 임시 진입점 통해 `HomeScreen` → `_createRoom` → `RoomScreen(isHost: true)` 진입 시 기존 흐름 그대로. `RoomScreen` → `PlayerScreen(isHost: true)` push 시 `initState` 재호출 + `startListening`/`attach` 재호출 안전.
+
+**검증**:
+- ✅ `flutter analyze` No issues (3.5s)
+- ⏳ 실기기 단독 모드 재생/seek/5초 스킵/mute 동작
+- ⏳ 실기기 임시 진입점 → 방 만들기 → 게스트 입장 → 동기화 회귀 없음
+
+**회귀 위험**: 낮음~중간. `initState`의 `startListening` 재호출이 RoomScreen 경유 진입 후 PlayerScreen `initState`에서 한 번 더 실행되는 경로 추가 — `_messageSub` cancel+re-subscribe만 일어나며 동작 무영향. `attachSyncService`는 내부 `detachSyncService` 선행이라 stream 누수 없음. 단독 모드에서 `_logger.start()`가 호출돼 csv 파일 1개 더 생성됨 (자원 영향 미미, 측정 인프라 분리는 별도 작업).
+
+**빌드**: v0.0.87
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

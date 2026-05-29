@@ -5,7 +5,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'measurement/auto_measure_screen.dart';
 import 'providers/app_providers.dart';
-import 'screens/home_screen.dart';
+import 'screens/player_screen.dart';
 import 'services/audio_handler.dart';
 
 // 측정 자동화 모드 — `--dart-define=AUTO_MEASURE_MODE=host|guest` 빌드 시 활성화.
@@ -55,7 +55,7 @@ class SynchorusApp extends StatelessWidget {
               mode: _autoMeasureMode,
               durationSec: _autoMeasureDurationSec,
             )
-          : const HomeScreen(),
+          : const PlayerScreen(isHost: true),
     );
   }
 }

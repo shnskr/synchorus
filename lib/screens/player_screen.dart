@@ -6,6 +6,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/app_providers.dart';
 import '../services/native_audio_sync_service.dart';
+import 'home_screen.dart';
 
 class PlayerScreen extends ConsumerStatefulWidget {
   final bool isHost;
@@ -23,6 +24,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   NativeAudioSyncService get _audio =>
       ref.read(nativeAudioSyncServiceProvider);
+
+  @override
+  void initState() {
+    super.initState();
+    // 단독 진입(main → PlayerScreen) 경로에서도 audio listen / handler attach 보장.
+    // RoomScreen 경유 진입 시엔 이미 호출됐지만 재호출 안전(startListening은
+    // _messageSub 재구독, attachSyncService는 detach 먼저).
+    final audio = ref.read(nativeAudioSyncServiceProvider);
+    final handler = ref.read(audioHandlerProvider);
+    audio.startListening(isHost: widget.isHost);
+    handler.attachSyncService(audio, isHost: widget.isHost);
+  }
 
   @override
   void dispose() {
@@ -92,6 +105,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return Scaffold(
       appBar: AppBar(
         title: const Text('플레이어'),
+        actions: [
+          // [임시] 방 만들기/참가 동선. 사용자가 UI 위치 정해줄 때까지 AppBar에 둠.
+          IconButton(
+            tooltip: '방 만들기 / 참가',
+            icon: const Icon(Icons.group_add),
+            onPressed: () => Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const HomeScreen()),
+            ),
+          ),
+        ],
       ),
       body: SafeArea(
         child: Padding(
