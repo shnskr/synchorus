@@ -377,14 +377,10 @@ class NativeAudioSyncService {
       await file.copy(stableFile.path);
     }
 
-    // HTTP 서버 시작
+    // HTTP 서버 시작. WiFi 미연결(단독 모드) 시 null — 게스트에 URL 전파 불가하지만
+    // 단독 재생은 native engine에 로컬 파일 path 직접 전달이라 가능. P2P 사용 시
+    // 사용자가 WiFi 켠 뒤 파일 재선택 또는 방 만들기 누르는 흐름 전제.
     final httpUrl = await _startFileServer(tempDir.path, safeName);
-    if (httpUrl == null) {
-      _isLoading = false;
-      _loadingController.add(false);
-      _errorController.add('WiFi IP를 가져올 수 없습니다');
-      return;
-    }
 
     // 네이티브 엔진에 로드
     LoadResult loadResult;
@@ -423,9 +419,9 @@ class NativeAudioSyncService {
 
     _storedSafeName = safeName;
     _currentFileName = originalName;
-    final urlWithCacheBust =
-        '$httpUrl?v=${DateTime.now().millisecondsSinceEpoch}';
-    _currentUrl = urlWithCacheBust;
+    _currentUrl = httpUrl != null
+        ? '$httpUrl?v=${DateTime.now().millisecondsSinceEpoch}'
+        : null;
     _audioReady = true;
     _isLoading = false;
     _loadingController.add(false);
@@ -436,14 +432,16 @@ class NativeAudioSyncService {
     // 이 동안 audio-url의 hostPlaying=_playing(이전 파일 재생 중이면 true)을 게스트가
     // 그대로 신뢰하면 호스트 무음 + 게스트만 단독 재생 발생(HISTORY (81)).
     // 호스트 syncPlay 누르면 obs broadcast로 playing=true가 게스트에 도달 → 시작.
-    _p2p.broadcastToAll({
-      'type': 'audio-url',
-      'data': {
-        'url': urlWithCacheBust,
-        'playing': false,
-        'fileName': originalName,
-      },
-    });
+    if (_currentUrl != null) {
+      _p2p.broadcastToAll({
+        'type': 'audio-url',
+        'data': {
+          'url': _currentUrl,
+          'playing': false,
+          'fileName': originalName,
+        },
+      });
+    }
 
     // 엔진 폴링 시작 (UI position 업데이트용)
     _engine.startPolling();

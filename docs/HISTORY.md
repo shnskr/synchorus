@@ -5557,6 +5557,40 @@ sudo networksetup -setmanual "AdHoc" 10.10.10.1 255.255.255.255
 
 ---
 
+### 2026-05-29 (105) — v0.0.88 단독 모드 loadFile WiFi IP 가드 완화 + Android 16 16KB 호환성 관찰
+
+**배경**: v0.0.87 단독 모드(첫 화면 PlayerScreen, P2P 미연결) 실기기 검증 중 발견 — 파일 선택 후 로드/재생/duration 표시 모두 실패. Root cause: `loadFile`이 `_startFileServer` → `_getLocalIP()` null(WiFi 미연결, 모바일 데이터만) 시 "WiFi IP를 가져올 수 없습니다" 에러 + 즉시 return → native engine 로드 자체가 안 됨. 단독 재생엔 HTTP 서버 불필요(native engine은 로컬 path 직접 받음)이므로 가드 완화.
+
+**변경 (`lib/services/native_audio_sync_service.dart`)**:
+1. `_startFileServer`가 null 반환해도 loadFile abort 안 함 — native engine 로드 진행.
+2. `_currentUrl = httpUrl != null ? '$httpUrl?v=...' : null` — URL 없으면 null 보존.
+3. `_p2p.broadcastToAll(audio-url)` 호출을 `if (_currentUrl != null)` 가드 안으로 이동. (단독 모드는 `_peers` 빈 list라 어차피 no-op이지만 명시적 의미 표현.)
+
+**P2P 사용 시 흐름 메모**: 단독 모드에서 파일 로드 후 사용자가 방 만들기 누른 시점에 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 사용자가 WiFi 켠 뒤 파일 재선택 또는 (향후 fix) 방 만들기 시점에 `_startFileServer` 재시도 후 audio-url broadcast 트리거. 별도 트랙 — 사용자 합의 후 처리.
+
+**검증 (SM S947N, Android 16 API 36, WiFi 미연결 + 5G 모바일 통신)**:
+- ✅ `flutter analyze` No issues (4.4s)
+- ✅ debug 빌드 + install 성공 (gradle 9.1s + install 5.6s)
+- ✅ 파일 선택 → 로드 → 재생 → seek → duration 표시 모두 동작 (사용자 확인)
+
+**별도 관찰 — Android 16 16KB page size 호환성 경고**:
+
+SM S947N(Android 16 API 36) 첫 실행 시 다이얼로그 "이 앱은 16KB와 호환되지 않습니다. ELF 정렬 검사에 실패했습니다." 미정렬 라이브러리 목록:
+- `liboboe.so`, `liboboe_engine.so` (우리 native engine)
+- `libflutter.so`
+- `libc++_shared.so`
+- `libdartjni.so`
+- `libdatastore_shared_counter.so`
+- `libVkLayer_khronos_validation.so`
+
+Android 16부터 16KB page size 디바이스에서 .so 라이브러리가 16KB 정렬 필수. 출시(Google Play 등록) 전 반드시 fix 필요. 별도 트랙 — NDK r27+ 업그레이드 + Flutter SDK 16KB 빌드 플래그 검토. 현재는 "다시 표시 안 함" 누르고 사용 가능, 동작 영향 0.
+
+**회귀 위험**: 낮음. P2P 호스트 모드(WiFi O + 게스트 입장 흐름)에선 기존 동작과 동일 — `httpUrl != null` 분기 들어가 audio-url broadcast 정상. 단독 모드 + WiFi 없는 경우만 새 경로(native engine 로드 진행 + broadcast 건너뜀).
+
+**빌드**: v0.0.88
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -5582,6 +5616,8 @@ sudo networksetup -setmanual "AdHoc" 10.10.10.1 255.255.255.255
 - [ ] **호스트 PlayerScreen 첫 진입 시 모든 버튼 비활성화** (2026-05-17 (100) v0.0.84 신규, 1회 재현). 재생/정지/5초 skip/mute/seekbar 모두 비활성화 상태. 방 나갔다 다시 만들기 2~3회 시 복구. `widget.isHost` 또는 `currentFileName` 일시 false로 평가됨 추정. v0.0.84의 oboe_engine.cpp 변경(native engine)이 Dart UI 상태에 영향 줄 흐름 모호. 영구 무음 아니라 critical 아님. 재현 패턴 모이면 root cause 추적 — 의심 후보: PlayerScreen build 순서 race, native engine init time 변경 영향, install 직후 fresh state 이슈.
 - [ ] **anchor 베이크인 outputLatency 부정확 (vfDiff -319ms 잔재)** (2026-05-17 (100) 신규 관찰, HISTORY (42)/(45)/(98) 동일 영역). v0.0.84 5분 측정 중 1회 13초 지속 — `out_lat_delta_anchored = 13.09ms` 영구 박힘 + drift_ms ±4ms (sync 자체 정확) + vfDiff -319 ~ -346ms (청감 인지). 사용자 seek로 anchor reset 시 0ms 복귀. 본 commit 무관. PLAN HIGH §B v0.0.81 ANCHOR-VERIFY 임계 200~300ms로 좁히는 후속에 이미 분류.
 - [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
+- [ ] **단독 모드 → P2P 전환 시 audio-url 미전파** (2026-05-29 (105) v0.0.88 신규). 단독 모드(WiFi 없음)에서 파일 로드 후 사용자가 WiFi 켜고 방 만들기 누르면 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 해결안: 방 만들기 시점에 `_startFileServer` 재시도 + audio-url broadcast 트리거. 사용자 합의 후 처리.
+- [ ] **Android 16 16KB page size 정렬 미준수** (2026-05-29 (105) v0.0.88 신규, **출시 차단 이슈**). SM S947N (Android 16 API 36) 첫 실행 시 호환성 다이얼로그 표시. 미정렬 라이브러리: `liboboe.so`, `liboboe_engine.so`(우리 native engine), `libflutter.so`, `libc++_shared.so`, `libdartjni.so`, `libdatastore_shared_counter.so`, `libVkLayer_khronos_validation.so`. 동작 영향 0 (다시 표시 안 함 가능)이나 Google Play 등록 전 반드시 fix. NDK r27+ 업그레이드 + Flutter SDK 16KB 빌드 플래그(`--target-platform android-arm64` + 정렬 옵션) 검토. 별도 트랙.
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
