@@ -6,4 +6,9 @@ object NativeTranspose {
     }
 
     external fun nativeInit()
+    external fun nativeStart(): Boolean
+    external fun nativeStop(): Boolean
+    external fun nativeSetCents(cents: Int)
+    external fun nativeGetCents(): Int
+    external fun nativeGetUnderrunCount(): Int
 }

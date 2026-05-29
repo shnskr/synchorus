@@ -15,6 +15,15 @@ class MainActivity : FlutterActivity() {
                         NativeTranspose.nativeInit()
                         result.success(null)
                     }
+                    "start" -> result.success(NativeTranspose.nativeStart())
+                    "stop" -> result.success(NativeTranspose.nativeStop())
+                    "setCents" -> {
+                        val cents = (call.arguments as? Number)?.toInt() ?: 0
+                        NativeTranspose.nativeSetCents(cents)
+                        result.success(null)
+                    }
+                    "getCents" -> result.success(NativeTranspose.nativeGetCents())
+                    "getUnderrunCount" -> result.success(NativeTranspose.nativeGetUnderrunCount())
                     else -> result.notImplemented()
                 }
             }
