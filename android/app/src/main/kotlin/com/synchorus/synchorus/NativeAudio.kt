@@ -19,4 +19,6 @@ object NativeAudio {
     external fun nativeSetMuted(muted: Boolean)
     external fun nativeIsMuted(): Boolean
     external fun nativeUnload(): Boolean
+    external fun nativeSetSemitoneCents(cents: Int)
+    external fun nativeGetSemitoneCents(): Int
 }

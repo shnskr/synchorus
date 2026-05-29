@@ -7,6 +7,11 @@ class AudioEngine {
     private var playerNode: AVAudioPlayerNode?
     private var audioFile: AVAudioFile?
 
+    // §H Transpose 노드. node → timePitch → mainMixer.
+    private let timePitch = AVAudioUnitTimePitch()
+    private var timePitchAttached = false
+    private var pitchCents: Int = 0
+
     private var sampleRate: Double = 48000
     private var seekFrameOffset: Int64 = 0
     private var isEngineRunning = false
@@ -99,7 +104,12 @@ class AudioEngine {
             let node = AVAudioPlayerNode()
             playerNode = node
             engine.attach(node)
-            engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
+            if !timePitchAttached {
+                engine.attach(timePitch)
+                timePitchAttached = true
+            }
+            engine.connect(node, to: timePitch, format: file.processingFormat)
+            engine.connect(timePitch, to: engine.mainMixerNode, format: file.processingFormat)
             try engine.start()
             isEngineRunning = true
             scheduleAndPlay(from: seekFrameOffset)
@@ -173,7 +183,12 @@ class AudioEngine {
                 let node = AVAudioPlayerNode()
                 playerNode = node
                 engine.attach(node)
-                engine.connect(node, to: engine.mainMixerNode, format: file.processingFormat)
+                if !timePitchAttached {
+                    engine.attach(timePitch)
+                    timePitchAttached = true
+                }
+                engine.connect(node, to: timePitch, format: file.processingFormat)
+                engine.connect(timePitch, to: engine.mainMixerNode, format: file.processingFormat)
                 try engine.start()
                 isEngineRunning = true
             }
@@ -325,6 +340,17 @@ class AudioEngine {
             "totalLatencyMs": totalLatency * 1000,
             "ioBufferDurationMs": ioBufDuration * 1000,
         ]
+    }
+
+    /// §H Transpose: cents 단위 pitch shift. ±2400 cents 범위.
+    func setSemitoneCents(_ cents: Int) {
+        let clamped = max(-2400, min(2400, cents))
+        pitchCents = clamped
+        timePitch.pitch = Float(clamped)
+    }
+
+    func getSemitoneCents() -> Int {
+        return pitchCents
     }
 
     func setMuted(_ muted: Bool) {

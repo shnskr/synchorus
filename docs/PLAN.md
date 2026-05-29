@@ -113,15 +113,19 @@
 
 **🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
 
-H-1 첫 시도(v0.0.91, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV + SoundTouch callback 안 직접 처리 시 silence padding buzz + timing drift. **공통 root cause**: 음악용 transpose 라이브러리 모두 batch processing 알고리즘인데 우리 oboe LowLatency callback burst(~96 frames)이 너무 작음.
+H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV + SoundTouch callback 안 직접 처리 시 silence padding buzz + timing drift. **공통 root cause**: 음악용 transpose 라이브러리 모두 batch processing 알고리즘인데 우리 oboe LowLatency callback burst(~96 frames)이 너무 작음.
 
 진행 상태:
 - ✅ §H 디자인 명세 + 합의 권장값 (`SYNC_ALGORITHM_V2.md` §H-2-A~H)
-- ⏳ **(다음) PoC scaffold** `poc/transpose_engine/` — SoundTouch NDK + Worker thread + ring buffer
-- ⏳ PoC 측정 인프라 (algorithm latency + timing drift + glitch 카운트)
-- ⏳ 30분 stress 검증
-- ⏳ 본 앱 통합 (sync 알고리즘에 outputLatency 보정 식 추가)
-- ⏳ iOS 통합 검증 (AVAudioUnitTimePitch OS 내장이라 작업 작음)
+- ✅ PoC scaffold `poc/transpose_engine/` (step 1 NDK 빌드)
+- ✅ PoC step 2 (callback 안 처리 = silence padding 한계 객관적 확정)
+- ✅ PoC step 3 (Worker thread + lock-free SPSC ring = 청감 click 0 통과)
+- ✅ **v0.0.91 본 앱 통합 (HISTORY (108))** — Android worker thread + iOS AVAudioUnitTimePitch + Dart/UI/P2P 모두. cents=0 bypass.
+- ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정)
+- ⏳ 30분 stress + 측정 보고서
+- ⏳ iOS 실기기 검증
+- ⏳ P2P 게스트 동기화 실측 (호스트 transpose 변경 → 게스트 동일 적용)
+- ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
 - ⏳ 방 만들기 / 참가 동선 UI 위치 — 사용자 결정 대기. 현재 PlayerScreen AppBar `group_add` IconButton → HomeScreen 임시 동선.
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
 

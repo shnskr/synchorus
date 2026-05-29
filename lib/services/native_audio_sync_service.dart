@@ -192,6 +192,10 @@ class NativeAudioSyncService {
         _handleDownloadReport(message);
       } else if (type == 'decode-load-report' && _isHost) {
         _handleDecodeLoadReport(message);
+      } else if (type == 'audio-pitch' && !_isHost) {
+        // §H Transpose. 호스트 cents 변경 → 게스트 native engine에 적용.
+        final cents = (message['data']?['cents'] as num?)?.toInt() ?? 0;
+        await _engine.setSemitoneCents(cents);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -439,6 +443,7 @@ class NativeAudioSyncService {
           'url': _currentUrl,
           'playing': false,
           'fileName': originalName,
+          'transposeCents': _transposeCents,
         },
       });
     }
@@ -559,6 +564,23 @@ class NativeAudioSyncService {
   }
 
   // ═══════════════════════════════════════════════════════════
+  // §H Transpose (호스트 전용)
+  // ═══════════════════════════════════════════════════════════
+
+  int _transposeCents = 0;
+  int get transposeCents => _transposeCents;
+
+  Future<void> setTransposeCents(int cents) async {
+    final clamped = cents.clamp(-2400, 2400);
+    _transposeCents = clamped;
+    await _engine.setSemitoneCents(clamped);
+    _p2p.broadcastToAll({
+      'type': 'audio-pitch',
+      'data': {'cents': clamped},
+    });
+  }
+
+  // ═══════════════════════════════════════════════════════════
   // 호스트: audio-obs broadcast (500ms 주기)
   // ═══════════════════════════════════════════════════════════
 
@@ -621,6 +643,7 @@ class NativeAudioSyncService {
         'url': _currentUrl,
         'playing': _playing,
         'fileName': _currentFileName,
+        'transposeCents': _transposeCents,
       },
     });
   }
@@ -807,6 +830,9 @@ class NativeAudioSyncService {
   Future<void> _handleAudioUrl(Map<String, dynamic> data) async {
     var url = data['url'] as String;
     final hostPlaying = data['playing'] as bool? ?? false;
+    // §H Transpose 초기값 — 늦게 들어온 게스트도 호스트 현재 cents 적용.
+    final initCents = (data['transposeCents'] as num?)?.toInt() ?? 0;
+    await _engine.setSemitoneCents(initCents);
 
     // ── 이전 다운로드 취소 ──────────────────────────────────────
     _downloadAborted = true;

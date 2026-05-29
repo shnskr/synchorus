@@ -101,6 +101,14 @@ class MainActivity : AudioServiceActivity() {
                         result.success(NativeAudio.nativeIsMuted())
                     }
                     "unload" -> result.success(NativeAudio.nativeUnload())
+                    "setSemitoneCents" -> {
+                        val cents = (call.arguments as? Number)?.toInt() ?: 0
+                        NativeAudio.nativeSetSemitoneCents(cents)
+                        result.success(null)
+                    }
+                    "getSemitoneCents" -> {
+                        result.success(NativeAudio.nativeGetSemitoneCents())
+                    }
                     else -> result.notImplemented()
                 }
             }

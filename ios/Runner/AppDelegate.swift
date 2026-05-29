@@ -77,6 +77,12 @@ import UIKit
                 result(self.audioEngine.isMuted())
             case "unload":
                 result(self.audioEngine.unload())
+            case "setSemitoneCents":
+                let cents = (call.arguments as? NSNumber)?.intValue ?? 0
+                self.audioEngine.setSemitoneCents(cents)
+                result(nil)
+            case "getSemitoneCents":
+                result(self.audioEngine.getSemitoneCents())
             default:
                 result(FlutterMethodNotImplemented)
             }

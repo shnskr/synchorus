@@ -190,6 +190,15 @@ class NativeAudioService {
     return await _channel.invokeMethod<bool>('unload') ?? false;
   }
 
+  /// §H Transpose pitch (cents 단위, 1 semitone = 100 cents). 범위 ±2400.
+  Future<void> setSemitoneCents(int cents) async {
+    await _channel.invokeMethod('setSemitoneCents', cents);
+  }
+
+  Future<int> getSemitoneCents() async {
+    return await _channel.invokeMethod<int>('getSemitoneCents') ?? 0;
+  }
+
   /// 주기적 타임스탬프 폴링 시작.
   void startPolling({Duration interval = const Duration(milliseconds: 100)}) {
     stopPolling();

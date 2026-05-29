@@ -22,6 +22,11 @@
 #include <media/NdkMediaCodec.h>
 #include <media/NdkMediaFormat.h>
 
+// §H SoundTouch (Olli Parviainen, LGPL v2.1) 2.4.1 — pitch shift용.
+// 본 통합: PoC step 2 패턴 (callback 안 직접 처리) + cents=0 bypass.
+// 음질 fix는 다음 commit (worker thread + output ring).
+#include "SoundTouch.h"
+
 #define LOG_TAG "OboeEngine"
 #define LOGI(...) __android_log_print(ANDROID_LOG_INFO, LOG_TAG, __VA_ARGS__)
 #define LOGW(...) __android_log_print(ANDROID_LOG_WARN, LOG_TAG, __VA_ARGS__)
@@ -31,6 +36,62 @@ namespace {
 
 // 1초 분량 디코드 후 loadFile 반환 (48kHz 기준 ~48000 프레임)
 static constexpr int64_t MIN_PLAYBACK_FRAMES = 48000;
+
+// §H Worker thread + output ring (PoC step 3 검증된 패턴).
+// kSTWorkerBatchFrames: SoundTouch 안정 처리 단위.
+// kSTOutRingFrames: callback이 pop할 충분한 buffer (~170ms @48k).
+static constexpr size_t kSTWorkerBatchFrames = 4096;
+static constexpr size_t kSTOutRingFrames = 8192;
+
+// Lock-free SPSC ring (interleaved stereo float).
+// producer = worker thread, consumer = audio callback.
+class SpscRing {
+public:
+    void init(size_t capacityFrames) {
+        mCapacity = capacityFrames;
+        mBuf.assign(capacityFrames * 2u, 0.0f);
+        mHead.store(0, std::memory_order_relaxed);
+        mTail.store(0, std::memory_order_relaxed);
+    }
+    size_t available() const {
+        return mHead.load(std::memory_order_acquire) -
+               mTail.load(std::memory_order_acquire);
+    }
+    size_t space() const { return mCapacity - available(); }
+    bool push(const float* data, size_t frames) {
+        const size_t head = mHead.load(std::memory_order_relaxed);
+        const size_t tail = mTail.load(std::memory_order_acquire);
+        if (frames > mCapacity - (head - tail)) return false;
+        for (size_t i = 0; i < frames; ++i) {
+            const size_t idx = (head + i) % mCapacity;
+            mBuf[idx * 2u] = data[i * 2u];
+            mBuf[idx * 2u + 1u] = data[i * 2u + 1u];
+        }
+        mHead.store(head + frames, std::memory_order_release);
+        return true;
+    }
+    size_t pop(float* data, size_t maxFrames) {
+        const size_t tail = mTail.load(std::memory_order_relaxed);
+        const size_t head = mHead.load(std::memory_order_acquire);
+        const size_t frames = std::min(maxFrames, head - tail);
+        for (size_t i = 0; i < frames; ++i) {
+            const size_t idx = (tail + i) % mCapacity;
+            data[i * 2u] = mBuf[idx * 2u];
+            data[i * 2u + 1u] = mBuf[idx * 2u + 1u];
+        }
+        mTail.store(tail + frames, std::memory_order_release);
+        return frames;
+    }
+    void clear() {
+        mHead.store(0, std::memory_order_release);
+        mTail.store(0, std::memory_order_release);
+    }
+private:
+    std::vector<float> mBuf;
+    size_t mCapacity{0};
+    std::atomic<size_t> mHead{0};
+    std::atomic<size_t> mTail{0};
+};
 
 // §G G-1 ring buffer (2026-05-11): 60초 분량 사전할당, behind 10s + ahead 50s.
 // 곡 길이와 무관하게 메모리 일정 (48kHz 스테레오 ≈ 11.5MB).
@@ -43,9 +104,79 @@ static_assert(kRingBehindSeconds + kRingAheadSeconds == kRingSeconds,
 
 class OboeEngine : public oboe::AudioStreamDataCallback {
 public:
+    OboeEngine() {
+        // §H SoundTouch init.
+        mST.setSampleRate(48000);
+        mST.setChannels(2);
+        mST.setPitchSemiTones(0.0f);
+        mST.setSetting(SETTING_SEQUENCE_MS, 82);
+        mST.setSetting(SETTING_SEEKWINDOW_MS, 28);
+        mST.setSetting(SETTING_OVERLAP_MS, 12);
+        mST.setSetting(SETTING_USE_AA_FILTER, 1);
+        mST.setSetting(SETTING_USE_QUICKSEEK, 0);
+        mSTInRing.init(kSTOutRingFrames);
+        mSTOutRing.init(kSTOutRingFrames);
+        // Worker thread는 OboeEngine lifetime 동안 항상 동작.
+        mSTWorkerRunning.store(true, std::memory_order_release);
+        mSTWorker = std::thread(&OboeEngine::stWorkerLoop, this);
+    }
+
     ~OboeEngine() {
         stopDecodeThread();
         stop();
+        mSTWorkerRunning.store(false, std::memory_order_release);
+        if (mSTWorker.joinable()) mSTWorker.join();
+    }
+
+    // §H SoundTouch worker thread loop. callback이 mSTInRing에 PCM push하면
+    // 여기서 pop → SoundTouch process → mSTOutRing push. RT 외 thread라
+    // alloc/sleep/lock OK.
+    void stWorkerLoop() {
+        std::vector<float> inBuf(kSTWorkerBatchFrames * 2u);
+        std::vector<float> outBuf(kSTWorkerBatchFrames * 2u);
+        while (mSTWorkerRunning.load(std::memory_order_acquire)) {
+            // SoundTouch reconfigure / pitch 변경 — worker 단독 호출.
+            if (mSTReconfigure.exchange(false, std::memory_order_acq_rel)) {
+                mST.clear();
+                mST.setSampleRate(mSTSampleRate.load(std::memory_order_acquire));
+                mST.setChannels(2);
+                mSTOutRing.clear();
+            }
+            if (mPitchDirty.exchange(false, std::memory_order_acq_rel)) {
+                mST.clear();
+                mST.setPitchSemiTones(
+                    mSemitoneCents.load(std::memory_order_acquire) / 100.0f);
+                mSTOutRing.clear();
+            }
+            // input ring에서 batch 만큼 pop.
+            const size_t inAvail = mSTInRing.available();
+            if (inAvail < kSTWorkerBatchFrames) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+                continue;
+            }
+            const size_t popped = mSTInRing.pop(inBuf.data(), kSTWorkerBatchFrames);
+            if (popped == 0) continue;
+            // output ring 여유분 확인.
+            if (mSTOutRing.space() < kSTWorkerBatchFrames) {
+                // 가득 — callback이 따라잡을 때까지 대기.
+                // ※ 다시 pop 손실 안 됨 (이미 pop된 데이터를 재 push 안 함).
+                //   대신 inBuf 그대로 SoundTouch에 putSamples + ring 비울 때까지 대기.
+                std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            }
+            mST.putSamples(inBuf.data(),
+                static_cast<unsigned int>(popped));
+            unsigned int received = 0;
+            do {
+                received = mST.receiveSamples(outBuf.data(),
+                    static_cast<unsigned int>(kSTWorkerBatchFrames));
+                if (received > 0) {
+                    while (!mSTOutRing.push(outBuf.data(), received) &&
+                           mSTWorkerRunning.load(std::memory_order_acquire)) {
+                        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+                    }
+                }
+            } while (received == kSTWorkerBatchFrames);
+        }
     }
 
     const std::string& lastError() const { return mLastError; }
@@ -160,6 +291,11 @@ public:
         mDecodedSampleRate = sampleRate;
         mDecodedTotalFrames = estFrames;
         mVirtualFrame.store(0, std::memory_order_relaxed);
+
+        // ---- §H SoundTouch 갱신 신호 ----
+        mSTSampleRate.store(mDecodedSampleRate, std::memory_order_release);
+        mSTReconfigure.store(true, std::memory_order_release);
+        mPitchDirty.store(true, std::memory_order_release);
 
         // ---- 스트리밍 디코드 상태 초기화 ----
         mDecodeAbort.store(false, std::memory_order_relaxed);
@@ -506,6 +642,19 @@ public:
         return mMuted.load(std::memory_order_relaxed);
     }
 
+    /// §H Transpose: pitch를 cents 단위로 변경 (1 semitone = 100 cents, ±2400).
+    /// UI thread는 atomic store만, setPitchSemiTones는 콜백 thread가 mPitchDirty
+    /// 체크 후 적용 (SoundTouch는 thread-safe X).
+    void setSemitoneCents(int cents) {
+        const int clamped = std::max(-2400, std::min(2400, cents));
+        mSemitoneCents.store(clamped, std::memory_order_release);
+        mPitchDirty.store(true, std::memory_order_release);
+    }
+
+    int getSemitoneCents() const {
+        return mSemitoneCents.load(std::memory_order_acquire);
+    }
+
     /// NTP-style 예약 재생 (v0.0.47). data callback 안에서 wall clock과 비교 →
     /// 예약 시각 도달 시 정상 출력 시작 (그 전엔 silent + vf 동결).
     /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
@@ -638,20 +787,61 @@ public:
         const int64_t totalFrames = mDecodedTotalFrames;
         const int64_t capFrames = mRingCapacityFrames;
 
-        for (int i = 0; i < numFrames; ++i) {
-            const bool decoded = vf >= ringTail && vf < ringHead;
+        // §H cents=0이면 bypass (기존 패턴 그대로, 음질 손실 0).
+        // cents!=0이면 mDecodedData → mSTInRing push (vf 진행) → mSTOutRing pop → output.
+        // mSTReconfigure/mPitchDirty 적용은 worker thread 단독 (race 0).
+        const int currentCents = mSemitoneCents.load(std::memory_order_acquire);
+        const bool useST = (outCh == 2) && (currentCents != 0);
 
-            for (int ch = 0; ch < outCh; ++ch) {
-                float sample = 0.0f;
-                if (!muted && decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
-                    int srcCh = std::min(ch, mDecodedChannels - 1);
-                    int64_t bufFrame = vf % capFrames;
-                    int64_t idx = bufFrame * mDecodedChannels + srcCh;
-                    sample = static_cast<float>(mDecodedData[idx]) / 32768.0f;
+        if (useST) {
+            // 1. mDecodedData → mSTInBuf (interleaved 2ch float). vf 진행.
+            const size_t needSamples = static_cast<size_t>(numFrames) * 2u;
+            if (mSTInBuf.size() < needSamples) mSTInBuf.resize(needSamples);
+            for (int i = 0; i < numFrames; ++i) {
+                const bool decoded = vf >= ringTail && vf < ringHead;
+                for (int ch = 0; ch < 2; ++ch) {
+                    float sample = 0.0f;
+                    if (!muted && decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
+                        int srcCh = std::min(ch, mDecodedChannels - 1);
+                        int64_t bufFrame = vf % capFrames;
+                        int64_t idx = bufFrame * mDecodedChannels + srcCh;
+                        sample = static_cast<float>(mDecodedData[idx]) / 32768.0f;
+                    }
+                    mSTInBuf[static_cast<size_t>(i) * 2u + ch] = sample;
                 }
-                *output++ = sample;
+                ++vf;
             }
-            ++vf;
+            // 2. input ring push (worker가 다음 iteration에 pop). 실패 시 silence
+            //    드물게 발생 (ring 가득 = worker 못 따라옴).
+            mSTInRing.push(mSTInBuf.data(),
+                static_cast<size_t>(numFrames));
+            // 3. output ring pop → output. 부족분 silence (전환 초기 ~50ms).
+            if (mSTOutBuf.size() < needSamples) mSTOutBuf.resize(needSamples);
+            const size_t popped = mSTOutRing.pop(mSTOutBuf.data(),
+                static_cast<size_t>(numFrames));
+            const size_t popSamples = popped * 2u;
+            memcpy(output, mSTOutBuf.data(), popSamples * sizeof(float));
+            if (popped < static_cast<size_t>(numFrames)) {
+                memset(output + popSamples, 0,
+                       (needSamples - popSamples) * sizeof(float));
+            }
+            output += needSamples;
+        } else {
+            // cents=0 또는 outCh!=2 — 기존 패턴 그대로 (음질 손실 0).
+            for (int i = 0; i < numFrames; ++i) {
+                const bool decoded = vf >= ringTail && vf < ringHead;
+                for (int ch = 0; ch < outCh; ++ch) {
+                    float sample = 0.0f;
+                    if (!muted && decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
+                        int srcCh = std::min(ch, mDecodedChannels - 1);
+                        int64_t bufFrame = vf % capFrames;
+                        int64_t idx = bufFrame * mDecodedChannels + srcCh;
+                        sample = static_cast<float>(mDecodedData[idx]) / 32768.0f;
+                    }
+                    *output++ = sample;
+                }
+                ++vf;
+            }
         }
 
         mVirtualFrame.store(vf, std::memory_order_relaxed);
@@ -733,6 +923,23 @@ private:
     std::atomic<int64_t> mDecodedFrameCount{0};
     std::mutex mMinBufMutex;
     std::condition_variable mMinBufCv;
+
+    // ---- §H SoundTouch processor (PoC step 3 패턴) ----
+    // worker thread가 SoundTouch 단독 호출 (thread-safety 보장).
+    // callback: cents=0 → ring 직접 read + output (bypass), cents!=0 → mSTInRing push
+    //   + mSTOutRing pop → output.
+    // worker: mSTInRing pop → mST.put/receive → mSTOutRing push.
+    soundtouch::SoundTouch mST;
+    std::atomic<int> mSemitoneCents{0};
+    std::atomic<bool> mPitchDirty{false};
+    std::atomic<bool> mSTReconfigure{false};
+    std::atomic<int> mSTSampleRate{48000};
+    std::vector<float> mSTInBuf;     // callback 임시 (ring read → input PCM)
+    std::vector<float> mSTOutBuf;    // callback 임시 (output ring pop → output)
+    SpscRing mSTInRing;
+    SpscRing mSTOutRing;
+    std::thread mSTWorker;
+    std::atomic<bool> mSTWorkerRunning{false};
 
     // ---- 헬퍼 ----
 
@@ -1122,6 +1329,18 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeUnload(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().unload() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT void JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeSetSemitoneCents(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint cents) {
+    engine().setSemitoneCents(static_cast<int>(cents));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeGetSemitoneCents(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return static_cast<jint>(engine().getSemitoneCents());
 }
 
 }

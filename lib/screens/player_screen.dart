@@ -67,19 +67,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     audio.startListening(isHost: widget.isHost);
     handler.attachSyncService(audio, isHost: widget.isHost);
 
-    // A-B 반복 + seek 메모리: 호스트만. B 도달 감지 + 파일 변경 reset.
+    // A-B 반복 + seek 메모리 + §H transpose: 호스트만. 파일 변경 시 모두 reset.
     if (widget.isHost) {
       _positionSub = audio.positionStream.listen(_onAbPositionTick);
       _durationSub = audio.durationStream.listen((_) {
         final hasAny = _abPointA != null ||
             _abPointB != null ||
-            _seekSlots.any((s) => s != null);
+            _seekSlots.any((s) => s != null) ||
+            audio.transposeCents != 0;
         if (hasAny) {
           setState(() {
             _abPointA = null;
             _abPointB = null;
             _seekSlots = List<Duration?>.filled(3, null);
           });
+          audio.setTransposeCents(0);
         }
       });
     }
@@ -301,12 +303,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               // 시크바 + 시간
               _buildSeekBar(),
 
-              // A-B 구간 반복 + seek 메모리 (호스트만)
+              // A-B 구간 반복 + seek 메모리 + §H transpose (호스트만)
               if (widget.isHost) ...[
                 const SizedBox(height: 8),
                 _buildAbControls(),
                 const SizedBox(height: 8),
                 _buildSeekSlots(),
+                const SizedBox(height: 8),
+                _buildTransposeControls(),
               ],
 
               const SizedBox(height: 16),
@@ -700,6 +704,99 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ],
       ),
     );
+  }
+
+  Widget _buildTransposeControls() {
+    final hasAudio = _audio.currentFileName != null;
+    final semitone = (_audio.transposeCents / 100).round();
+    final label = semitone == 0
+        ? '0'
+        : (semitone > 0 ? '+$semitone' : '$semitone');
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'TRANSPOSE',
+              style: TextStyle(
+                fontSize: 10,
+                letterSpacing: 1.2,
+                color: scheme.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(width: 12),
+            GestureDetector(
+              onLongPress:
+                  (hasAudio && semitone != 0) ? _resetTranspose : null,
+              child: SizedBox(
+                width: 36,
+                child: Center(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: semitone != 0 ? scheme.primary : null,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.remove),
+              iconSize: 20,
+              onPressed: hasAudio && semitone > -12
+                  ? () => _adjustTranspose(-1)
+                  : null,
+            ),
+            Expanded(
+              child: Slider(
+                min: -12,
+                max: 12,
+                divisions: 24,
+                value: semitone.toDouble().clamp(-12.0, 12.0),
+                onChanged: hasAudio
+                    ? (v) {
+                        final newCents = v.round() * 100;
+                        if (newCents != _audio.transposeCents) {
+                          _audio.setTransposeCents(newCents);
+                          setState(() {});
+                        }
+                      }
+                    : null,
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.add),
+              iconSize: 20,
+              onPressed: hasAudio && semitone < 12
+                  ? () => _adjustTranspose(1)
+                  : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _adjustTranspose(int delta) {
+    final current = (_audio.transposeCents / 100).round();
+    final next = (current + delta).clamp(-12, 12);
+    _audio.setTransposeCents(next * 100);
+    setState(() {});
+  }
+
+  void _resetTranspose() {
+    HapticFeedback.mediumImpact();
+    _audio.setTransposeCents(0);
+    setState(() {});
   }
 
   Widget _buildSyncInfo() {
