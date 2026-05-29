@@ -457,14 +457,23 @@ class NativeAudioSyncService {
   // 호스트: 재생 제어
   // ═══════════════════════════════════════════════════════════
 
-  Future<void> syncPlay() async {
+  Future<void> syncPlay({Duration? startFrom}) async {
     if (!_audioReady) return;
 
-    // 재생 완료 상태에서 play → 처음으로 되돌리기
+    // startFrom 명시 시: 그 위치에서 시작 (곡끝 → 0 분기 우회).
+    // PlayerScreen A-B 반복 등 호출자가 시작 위치를 알 때 사용.
+    if (startFrom != null) {
+      await syncSeek(startFrom);
+    }
+
+    // 재생 완료 상태에서 play → 처음으로 되돌리기 (startFrom 없을 때만)
     var ts = _engine.latest;
     var vf = await _engine.getVirtualFrame();
     final sr = ts?.sampleRate ?? 0;
-    if (ts != null && ts.totalFrames > 0 && vf >= ts.totalFrames) {
+    if (startFrom == null &&
+        ts != null &&
+        ts.totalFrames > 0 &&
+        vf >= ts.totalFrames) {
       await syncSeek(Duration.zero);
       vf = 0;
     }

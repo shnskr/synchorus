@@ -101,6 +101,17 @@
 
 ### HIGH
 
+**🆕 UI 폴리싱 트랙 (2026-05-29 시작)** — 단독 플레이어 앱 사용성 + 호스트 모드 UX 정리.
+
+- ✅ v0.0.86 NativeTestScreen 제거 (PoC 임시 화면, HISTORY (103))
+- ✅ v0.0.87 첫 화면 = PlayerScreen (단독 호스트 모드, HISTORY (104))
+- ✅ v0.0.88 단독 모드 loadFile WiFi IP 가드 완화 (HISTORY (105))
+- ✅ v0.0.89 A-B 구간 반복 (호스트 전용, 효과적 A=0/B=duration, 새 지정 우선 충돌 처리, long-press 1점 해제 + 햅틱, 시크바 위 마커, [A, B] clamp, HISTORY (106))
+- ⏳ **(다음) seek 메모리 3슬롯** (1회성, 호스트만, tap=저장/이동, long-press=리셋). 사용자 합의 완료.
+- ⏳ 단독 모드 → P2P 전환 시 audio-url 재시작 흐름 (HISTORY (105) 미해결 이슈)
+- ⏳ 방 만들기 / 참가 동선 UI 위치 — 사용자 결정 대기. 현재 PlayerScreen AppBar `group_add` IconButton → HomeScreen 임시 동선.
+- ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
+
 **§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms, G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR.
 
 진행 상태:

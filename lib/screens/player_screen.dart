@@ -1,7 +1,9 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import '../providers/app_providers.dart';
@@ -18,9 +20,33 @@ class PlayerScreen extends ConsumerStatefulWidget {
 }
 
 class _PlayerScreenState extends ConsumerState<PlayerScreen> {
+  // Slider 좌우 padding 명시 — SliderTheme + 마커 위치 계산이 같은 값 공유.
+  // 이 값을 SliderTheme.padding에 강제하면 thumb 가용 영역이 [padding, width-padding]
+  // 으로 정해지고 마커 left = padding + ratio * (width - 2*padding) 이 정확.
+  static const double _sliderHorizontalPadding = 12.0;
+
   bool _isDragging = false;
   double _dragValue = 0;
   bool _muted = false;
+
+  // A-B 구간 반복 (호스트만, 1회성 — 파일 변경/앱 재시작 시 리셋).
+  // A 없으면 효과적 A=0, B 없으면 효과적 B=duration. 간격 100ms 미만이면 비활성.
+  static const int _abMinGapMs = 100;
+  Duration? _abPointA;
+  Duration? _abPointB;
+  Duration _lastPosition = Duration.zero;
+  StreamSubscription<Duration>? _positionSub;
+  StreamSubscription<Duration?>? _durationSub;
+
+  Duration get _effectiveA => _abPointA ?? Duration.zero;
+  Duration? get _effectiveB => _abPointB ?? _audio.currentDuration;
+  bool get _abAnySet => _abPointA != null || _abPointB != null;
+  bool get _abActive {
+    if (!_abAnySet) return false;
+    final b = _effectiveB;
+    if (b == null) return false;
+    return (b.inMilliseconds - _effectiveA.inMilliseconds) >= _abMinGapMs;
+  }
 
   NativeAudioSyncService get _audio =>
       ref.read(nativeAudioSyncServiceProvider);
@@ -35,11 +61,85 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final handler = ref.read(audioHandlerProvider);
     audio.startListening(isHost: widget.isHost);
     handler.attachSyncService(audio, isHost: widget.isHost);
+
+    // A-B 반복: 호스트만. B 도달 감지 + 파일 변경 reset.
+    if (widget.isHost) {
+      _positionSub = audio.positionStream.listen(_onAbPositionTick);
+      _durationSub = audio.durationStream.listen((_) {
+        if (_abPointA != null || _abPointB != null) {
+          setState(() {
+            _abPointA = null;
+            _abPointB = null;
+          });
+        }
+      });
+    }
   }
 
   @override
   void dispose() {
+    _positionSub?.cancel();
+    _durationSub?.cancel();
     super.dispose();
+  }
+
+  void _onAbPositionTick(Duration position) {
+    // 정지 중에는 jump 안 함 — B와 같은 위치에 정지된 상태에서도 무한 jump 방지.
+    final b = _effectiveB;
+    if (_abActive && _audio.playing && b != null && position >= b) {
+      _audio.syncSeek(_effectiveA);
+    }
+    _lastPosition = position;
+  }
+
+  void _setAbPoint({required bool isA}) {
+    final fileName = _audio.currentFileName;
+    if (fileName == null) return; // 파일 없으면 무동작
+    final newPoint = _lastPosition;
+    setState(() {
+      if (isA) {
+        // A를 새로 지정 — 기존 B와 100ms 이내로 가까우면 B 해제 (새 지정 우선).
+        if (_abPointB != null &&
+            (newPoint.inMilliseconds - _abPointB!.inMilliseconds).abs() <
+                _abMinGapMs) {
+          _abPointB = null;
+        }
+        _abPointA = newPoint;
+      } else {
+        if (_abPointA != null &&
+            (newPoint.inMilliseconds - _abPointA!.inMilliseconds).abs() <
+                _abMinGapMs) {
+          _abPointA = null;
+        }
+        _abPointB = newPoint;
+      }
+      // 둘 다 지정됐고 순서가 뒤집혔으면 swap.
+      if (_abPointA != null &&
+          _abPointB != null &&
+          _abPointA! > _abPointB!) {
+        final tmp = _abPointA;
+        _abPointA = _abPointB;
+        _abPointB = tmp;
+      }
+    });
+  }
+
+  void _resetAb() {
+    setState(() {
+      _abPointA = null;
+      _abPointB = null;
+    });
+  }
+
+  void _clearAbPoint({required bool isA}) {
+    HapticFeedback.mediumImpact();
+    setState(() {
+      if (isA) {
+        _abPointA = null;
+      } else {
+        _abPointB = null;
+      }
+    });
   }
 
   Future<void> _pickFile() async {
@@ -73,16 +173,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     if (ts == null || ts.sampleRate <= 0) return;
     final currentMs = ts.virtualFrame * 1000 / ts.sampleRate;
     final totalMs = ts.totalFrames * 1000 / ts.sampleRate;
-    final newMs = (currentMs + seconds * 1000).clamp(0, totalMs);
+    // 효과적 A/B로 clamp. A 없으면 0, B 없으면 곡끝.
+    final minMs = _effectiveA.inMilliseconds.toDouble();
+    final maxMs =
+        _effectiveB?.inMilliseconds.toDouble() ?? totalMs.toDouble();
+    final newMs = (currentMs + seconds * 1000).clamp(minMs, maxMs);
     _audio.syncSeek(Duration(milliseconds: newMs.round()));
   }
 
   void _togglePlay() {
     if (_audio.playing) {
       _audio.syncPause();
-    } else {
-      _audio.syncPlay();
+      return;
     }
+    // A/B 중 하나라도 지정됐으면 [효과적 A, 효과적 B] 범위 검사. 밖이면 A에서 시작.
+    Duration? startFrom;
+    if (_abAnySet) {
+      final a = _effectiveA;
+      final b = _effectiveB;
+      final ts = _audio.engine.latest;
+      final totalMs = ts != null && ts.sampleRate > 0
+          ? ts.totalFrames * 1000 / ts.sampleRate
+          : 0.0;
+      final atEnd =
+          totalMs > 0 && _lastPosition.inMilliseconds >= totalMs - 50;
+      final outside = _lastPosition < a ||
+          (b != null && _lastPosition >= b) ||
+          atEnd;
+      if (outside) startFrom = a;
+    }
+    _audio.syncPlay(startFrom: startFrom);
   }
 
   void _toggleMute() {
@@ -147,6 +267,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
               // 시크바 + 시간
               _buildSeekBar(),
+
+              // A-B 구간 반복 (호스트만)
+              if (widget.isHost) ...[
+                const SizedBox(height: 8),
+                _buildAbControls(),
+              ],
 
               const SizedBox(height: 16),
 
@@ -231,9 +357,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             final position = positionSnap.data ?? Duration.zero;
             final maxMs =
                 duration.inMilliseconds.toDouble().clamp(1.0, double.maxFinite);
+            // 효과적 [A, B] 범위로 clamp. 시크바 max는 곡 끝(시각적으로 전체
+            // 표시)이지만 thumb은 [A, B] 안에서만 움직임. A 없으면 0, B 없으면 곡끝.
+            final minSeekMs = _effectiveA.inMilliseconds.toDouble();
+            final maxSeekMs =
+                _effectiveB?.inMilliseconds.toDouble() ?? maxMs;
             return Column(
               children: [
-                Slider(
+                // A/B 마커 overlay (시크바 위)
+                if (widget.isHost && (_abPointA != null || _abPointB != null))
+                  _buildAbMarkers(maxMs),
+                SliderTheme(
+                  data: Theme.of(context).sliderTheme.copyWith(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: _sliderHorizontalPadding),
+                      ),
+                  child: Slider(
                   min: 0,
                   max: maxMs,
                   value: _isDragging
@@ -241,19 +380,22 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       : position.inMilliseconds.toDouble().clamp(0.0, maxMs),
                   onChanged: widget.isHost
                       ? (value) {
+                          final clamped = value.clamp(minSeekMs, maxSeekMs);
                           setState(() {
                             _isDragging = true;
-                            _dragValue = value;
+                            _dragValue = clamped;
                           });
                         }
                       : null,
                   onChangeEnd: widget.isHost
                       ? (value) {
+                          final clamped = value.clamp(minSeekMs, maxSeekMs);
                           setState(() => _isDragging = false);
-                          _audio
-                              .syncSeek(Duration(milliseconds: value.toInt()));
+                          _audio.syncSeek(
+                              Duration(milliseconds: clamped.toInt()));
                         }
                       : null,
+                ),
                 ),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
@@ -327,6 +469,123 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ],
         );
       },
+    );
+  }
+
+  /// 시크바 위 A/B 위치 마커. SliderTheme.padding과 같은 _sliderHorizontalPadding으로
+  /// thumb 가용 영역을 동일 가정 + FractionalTranslation(-0.5)로 자기 너비 절반만큼
+  /// 왼쪽 이동 → thumb 중심과 마커 중심 정렬.
+  Widget _buildAbMarkers(double maxMs) {
+    return SizedBox(
+      height: 18,
+      child: LayoutBuilder(
+        builder: (context, constraints) {
+          final usable = (constraints.maxWidth - _sliderHorizontalPadding * 2)
+              .clamp(1.0, double.infinity);
+          Widget marker(Duration point, String label) {
+            final ratio = (point.inMilliseconds / maxMs).clamp(0.0, 1.0);
+            final left = _sliderHorizontalPadding + usable * ratio;
+            return Positioned(
+              left: left,
+              top: 0,
+              child: FractionalTranslation(
+                translation: const Offset(-0.5, 0),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    Text(
+                      label,
+                      style: TextStyle(
+                        fontSize: 11,
+                        fontWeight: FontWeight.bold,
+                        color: Theme.of(context).colorScheme.primary,
+                      ),
+                    ),
+                    Container(
+                      width: 2,
+                      height: 4,
+                      color: Theme.of(context).colorScheme.primary,
+                    ),
+                  ],
+                ),
+              ),
+            );
+          }
+
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              if (_abPointA != null) marker(_abPointA!, 'A'),
+              if (_abPointB != null) marker(_abPointB!, 'B'),
+            ],
+          );
+        },
+      ),
+    );
+  }
+
+  Widget _buildAbControls() {
+    final hasAudio = _audio.currentFileName != null;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        _abButton(label: 'A', point: _abPointA, enabled: hasAudio, isA: true),
+        const SizedBox(width: 8),
+        _abButton(label: 'B', point: _abPointB, enabled: hasAudio, isA: false),
+        const SizedBox(width: 8),
+        IconButton(
+          tooltip: 'A-B 해제',
+          icon: Icon(
+            Icons.cancel_outlined,
+            color: _abActive
+                ? Theme.of(context).colorScheme.primary
+                : (_abAnySet
+                    ? Theme.of(context).colorScheme.onSurface
+                    : Theme.of(context).disabledColor),
+          ),
+          onPressed: _abAnySet ? _resetAb : null,
+        ),
+      ],
+    );
+  }
+
+  Widget _abButton({
+    required String label,
+    required Duration? point,
+    required bool enabled,
+    required bool isA,
+  }) {
+    final hasPoint = point != null;
+    // duration이 1시간 넘는 곡이면 placeholder도 HH:MM:SS 길이로 reserve.
+    final dur = _audio.currentDuration ?? Duration.zero;
+    final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
+    const tabular = TextStyle(
+      fontFeatures: [FontFeature.tabularFigures()],
+    );
+    return OutlinedButton(
+      onPressed: enabled ? () => _setAbPoint(isA: isA) : null,
+      onLongPress:
+          (enabled && hasPoint) ? () => _clearAbPoint(isA: isA) : null,
+      style: OutlinedButton.styleFrom(
+        foregroundColor:
+            hasPoint ? Theme.of(context).colorScheme.primary : null,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          // 너비 reserve (보이지 않음)
+          Opacity(
+            opacity: 0,
+            child: Text('$label  $placeholderTime', style: tabular),
+          ),
+          // 실제 표시
+          Text(
+            hasPoint ? '$label  ${_formatDuration(point)}' : label,
+            style: tabular,
+          ),
+        ],
+      ),
     );
   }
 
