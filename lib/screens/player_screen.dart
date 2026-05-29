@@ -48,6 +48,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return (b.inMilliseconds - _effectiveA.inMilliseconds) >= _abMinGapMs;
   }
 
+  // seek 메모리 3슬롯 (호스트만, 1회성).
+  // tap: 비어있으면 현재 위치 저장, 저장됐으면 그 위치로 이동.
+  // long-press: 그 슬롯만 해제 + 햅틱. 비어있으면 무동작.
+  List<Duration?> _seekSlots = List<Duration?>.filled(3, null);
+
   NativeAudioSyncService get _audio =>
       ref.read(nativeAudioSyncServiceProvider);
 
@@ -62,14 +67,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     audio.startListening(isHost: widget.isHost);
     handler.attachSyncService(audio, isHost: widget.isHost);
 
-    // A-B 반복: 호스트만. B 도달 감지 + 파일 변경 reset.
+    // A-B 반복 + seek 메모리: 호스트만. B 도달 감지 + 파일 변경 reset.
     if (widget.isHost) {
       _positionSub = audio.positionStream.listen(_onAbPositionTick);
       _durationSub = audio.durationStream.listen((_) {
-        if (_abPointA != null || _abPointB != null) {
+        final hasAny = _abPointA != null ||
+            _abPointB != null ||
+            _seekSlots.any((s) => s != null);
+        if (hasAny) {
           setState(() {
             _abPointA = null;
             _abPointB = null;
+            _seekSlots = List<Duration?>.filled(3, null);
           });
         }
       });
@@ -140,6 +149,30 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _abPointB = null;
       }
     });
+  }
+
+  void _onSlotTap(int idx) {
+    if (_audio.currentFileName == null) return;
+    final stored = _seekSlots[idx];
+    if (stored == null) {
+      setState(() => _seekSlots[idx] = _lastPosition);
+      return;
+    }
+    // 저장된 위치로 이동. A-B 활성이면 [A, B]로 clamp(슬롯이 범위 밖이면 가까운 끝점).
+    Duration target = stored;
+    if (_abActive) {
+      final aMs = _effectiveA.inMilliseconds;
+      final bMs = _effectiveB!.inMilliseconds;
+      final clamped = target.inMilliseconds.clamp(aMs, bMs);
+      target = Duration(milliseconds: clamped);
+    }
+    _audio.syncSeek(target);
+  }
+
+  void _onSlotLongPress(int idx) {
+    if (_seekSlots[idx] == null) return;
+    HapticFeedback.mediumImpact();
+    setState(() => _seekSlots[idx] = null);
   }
 
   Future<void> _pickFile() async {
@@ -268,10 +301,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               // 시크바 + 시간
               _buildSeekBar(),
 
-              // A-B 구간 반복 (호스트만)
+              // A-B 구간 반복 + seek 메모리 (호스트만)
               if (widget.isHost) ...[
                 const SizedBox(height: 8),
                 _buildAbControls(),
+                const SizedBox(height: 8),
+                _buildSeekSlots(),
               ],
 
               const SizedBox(height: 16),
@@ -364,9 +399,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 _effectiveB?.inMilliseconds.toDouble() ?? maxMs;
             return Column(
               children: [
-                // A/B 마커 overlay (시크바 위)
-                if (widget.isHost && (_abPointA != null || _abPointB != null))
-                  _buildAbMarkers(maxMs),
+                // A/B 마커 영역 (호스트 시 항상 reserve — 마커 0개여도 SizedBox 유지)
+                if (widget.isHost) _buildAbMarkers(maxMs),
                 SliderTheme(
                   data: Theme.of(context).sliderTheme.copyWith(
                         padding: const EdgeInsets.symmetric(
@@ -397,6 +431,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       : null,
                 ),
                 ),
+                // 메모리 슬롯 마커 영역 (호스트 시 항상 reserve)
+                if (widget.isHost) _buildSlotMarkers(maxMs),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
@@ -472,19 +508,58 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     );
   }
 
-  /// 시크바 위 A/B 위치 마커. SliderTheme.padding과 같은 _sliderHorizontalPadding으로
-  /// thumb 가용 영역을 동일 가정 + FractionalTranslation(-0.5)로 자기 너비 절반만큼
-  /// 왼쪽 이동 → thumb 중심과 마커 중심 정렬.
+  /// 시크바 위 A/B 마커. 텍스트(위) + 막대(아래, 시크바 쪽). primary 색.
   Widget _buildAbMarkers(double maxMs) {
+    return _markerRow(
+      maxMs: maxMs,
+      below: false,
+      color: Theme.of(context).colorScheme.primary,
+      points: [
+        if (_abPointA != null) (point: _abPointA!, label: 'A'),
+        if (_abPointB != null) (point: _abPointB!, label: 'B'),
+      ],
+    );
+  }
+
+  /// 시크바 아래 메모리 슬롯 마커. 막대(위, 시크바 쪽) + 텍스트(아래). tertiary 색.
+  Widget _buildSlotMarkers(double maxMs) {
+    return _markerRow(
+      maxMs: maxMs,
+      below: true,
+      color: Theme.of(context).colorScheme.tertiary,
+      points: [
+        for (int i = 0; i < 3; i++)
+          if (_seekSlots[i] != null)
+            (point: _seekSlots[i]!, label: '${i + 1}'),
+      ],
+    );
+  }
+
+  /// 마커 Row 공통 헬퍼. below=true면 막대 위·텍스트 아래(시크바 아래용).
+  Widget _markerRow({
+    required double maxMs,
+    required bool below,
+    required Color color,
+    required List<({Duration point, String label})> points,
+  }) {
     return SizedBox(
       height: 18,
       child: LayoutBuilder(
         builder: (context, constraints) {
           final usable = (constraints.maxWidth - _sliderHorizontalPadding * 2)
               .clamp(1.0, double.infinity);
+          final bar = Container(width: 2, height: 4, color: color);
           Widget marker(Duration point, String label) {
             final ratio = (point.inMilliseconds / maxMs).clamp(0.0, 1.0);
             final left = _sliderHorizontalPadding + usable * ratio;
+            final textWidget = Text(
+              label,
+              style: TextStyle(
+                fontSize: 11,
+                fontWeight: FontWeight.bold,
+                color: color,
+              ),
+            );
             return Positioned(
               left: left,
               top: 0,
@@ -492,21 +567,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 translation: const Offset(-0.5, 0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: [
-                    Text(
-                      label,
-                      style: TextStyle(
-                        fontSize: 11,
-                        fontWeight: FontWeight.bold,
-                        color: Theme.of(context).colorScheme.primary,
-                      ),
-                    ),
-                    Container(
-                      width: 2,
-                      height: 4,
-                      color: Theme.of(context).colorScheme.primary,
-                    ),
-                  ],
+                  children: below
+                      ? [bar, textWidget]
+                      : [textWidget, bar],
                 ),
               ),
             );
@@ -515,8 +578,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           return Stack(
             clipBehavior: Clip.none,
             children: [
-              if (_abPointA != null) marker(_abPointA!, 'A'),
-              if (_abPointB != null) marker(_abPointB!, 'B'),
+              for (final p in points) marker(p.point, p.label),
             ],
           );
         },
@@ -580,6 +642,57 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             child: Text('$label  $placeholderTime', style: tabular),
           ),
           // 실제 표시
+          Text(
+            hasPoint ? '$label  ${_formatDuration(point)}' : label,
+            style: tabular,
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSeekSlots() {
+    final hasAudio = _audio.currentFileName != null;
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.center,
+      children: [
+        for (int i = 0; i < 3; i++) ...[
+          if (i > 0) const SizedBox(width: 8),
+          _slotButton(idx: i, point: _seekSlots[i], enabled: hasAudio),
+        ],
+      ],
+    );
+  }
+
+  Widget _slotButton({
+    required int idx,
+    required Duration? point,
+    required bool enabled,
+  }) {
+    final hasPoint = point != null;
+    final dur = _audio.currentDuration ?? Duration.zero;
+    final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
+    const tabular = TextStyle(
+      fontFeatures: [FontFeature.tabularFigures()],
+    );
+    final label = '${idx + 1}';
+    return OutlinedButton(
+      onPressed: enabled ? () => _onSlotTap(idx) : null,
+      onLongPress:
+          (enabled && hasPoint) ? () => _onSlotLongPress(idx) : null,
+      style: OutlinedButton.styleFrom(
+        // 시크바 마커와 통일 — 슬롯은 tertiary로 A/B(primary)와 시각 구분.
+        foregroundColor:
+            hasPoint ? Theme.of(context).colorScheme.tertiary : null,
+        padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
+      ),
+      child: Stack(
+        alignment: Alignment.center,
+        children: [
+          Opacity(
+            opacity: 0,
+            child: Text('$label  $placeholderTime', style: tabular),
+          ),
           Text(
             hasPoint ? '$label  ${_formatDuration(point)}' : label,
             style: tabular,
