@@ -109,6 +109,19 @@
 - ✅ v0.0.89 A-B 구간 반복 (호스트 전용, 효과적 A=0/B=duration, 새 지정 우선 충돌 처리, long-press 1점 해제 + 햅틱, 시크바 위 마커, [A, B] clamp, HISTORY (106))
 - ✅ v0.0.90 seek 메모리 3슬롯 + 마커 색상/위치 분리 + 영역 reserve (HISTORY (107))
 - ⏳ 단독 모드 → P2P 전환 시 audio-url 재시작 흐름 (HISTORY (105) 미해결 이슈)
+- ⏳ **방 만들기 (S26+ 케이스) UI 무반응 진단** — 2026-05-29 v0.0.90 SM-S947N에서 PlayerScreen → group_add → HomeScreen → 방 만들기 클릭 무반응 보고. logcat에 mDNS 등록(`MdnsAdvertiser: roomCode=2306, port=41235`) 성공 보임 → RoomScreen navigate가 안 됐거나 진입 후 UI 동결 의심. 정확한 시점 + 무선 이어폰 stream invalid 잔재와 관계 확인 필요.
+
+**🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
+
+H-1 첫 시도(v0.0.91, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV + SoundTouch callback 안 직접 처리 시 silence padding buzz + timing drift. **공통 root cause**: 음악용 transpose 라이브러리 모두 batch processing 알고리즘인데 우리 oboe LowLatency callback burst(~96 frames)이 너무 작음.
+
+진행 상태:
+- ✅ §H 디자인 명세 + 합의 권장값 (`SYNC_ALGORITHM_V2.md` §H-2-A~H)
+- ⏳ **(다음) PoC scaffold** `poc/transpose_engine/` — SoundTouch NDK + Worker thread + ring buffer
+- ⏳ PoC 측정 인프라 (algorithm latency + timing drift + glitch 카운트)
+- ⏳ 30분 stress 검증
+- ⏳ 본 앱 통합 (sync 알고리즘에 outputLatency 보정 식 추가)
+- ⏳ iOS 통합 검증 (AVAudioUnitTimePitch OS 내장이라 작업 작음)
 - ⏳ 방 만들기 / 참가 동선 UI 위치 — 사용자 결정 대기. 현재 PlayerScreen AppBar `group_add` IconButton → HomeScreen 임시 동선.
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
 
