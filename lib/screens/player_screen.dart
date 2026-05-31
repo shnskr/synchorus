@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -72,6 +73,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   StreamSubscription<bool>? _loadingSub;
   // 스피커 모드 sync 진행 중 — _buildNowPlaying에서 "동기화 중" 안내 표시.
   bool _isSyncing = false;
+  // AppBar 우측에 작게 표시할 버전 (예: "v0.0.95"). 초기 빈 문자열, initState에서 load.
+  String _versionLabel = '';
+  // ignore: unused_element — 노출 제거됐지만 모드 분기에 재사용 가능성 위해 보존.
   String get _modeLabel {
     switch (_mode) {
       case PlayerMode.standalone:
@@ -118,6 +122,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   void initState() {
     super.initState();
     _mode = widget.initialMode;
+    _loadVersion();
     // 단독/호스트는 sync 권한 같음(isHost=true), speaker만 isHost=false.
     final audio = ref.read(nativeAudioSyncServiceProvider);
     final handler = ref.read(audioHandlerProvider);
@@ -358,7 +363,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text('플레이어'),
+        title: Row(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.baseline,
+          textBaseline: TextBaseline.alphabetic,
+          children: [
+            const Text('Synchorus'),
+            const SizedBox(width: 8),
+            Text(
+              _versionLabel,
+              style: TextStyle(
+                fontSize: 11,
+                color: Theme.of(context)
+                    .colorScheme
+                    .onSurface
+                    .withValues(alpha: 0.5),
+              ),
+            ),
+          ],
+        ),
         actions: [
           IconButton(
             tooltip: 'P2P 모드',
@@ -372,23 +395,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           padding: const EdgeInsets.all(16.0),
           child: Column(
             children: [
-              // 파일 선택 — 스피커 모드에선 비활성(호스트만 가능)이지만 표시는 유지.
-              Row(
-                children: [
-                  Expanded(
-                    child: ElevatedButton.icon(
-                      onPressed: _isController ? _pickFile : null,
-                      icon: const Icon(Icons.folder_open),
-                      label: const Text('파일 선택'),
-                    ),
-                  ),
-                ],
-              ),
-              const SizedBox(height: 16),
-              const Divider(),
-              const SizedBox(height: 8),
-
-              // 현재 재생 정보
+              // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
               _buildNowPlaying(),
 
               const Spacer(),
@@ -439,48 +446,55 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             final progress = progressSnap.data ?? 0.0;
             final progressPct = (progress * 100).round();
 
-            final title = isLoading
-                ? (progress > 0 && progress < 1.0
-                    ? '파일 수신 중... $progressPct%'
-                    : '파일 수신 중...')
-                : fileName ??
-                    (_isController ? '오디오를 선택하세요' : '음악 대기 중');
-
-        return Card(
-          child: ListTile(
-            leading: isLoading
-                ? SizedBox(
-                    width: 40,
-                    height: 40,
-                    child: Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: CircularProgressIndicator(
-                        strokeWidth: 3,
-                        value: progress > 0 && progress < 1.0
-                            ? progress
-                            : null,
-                      ),
-                    ),
-                  )
-                : const Icon(Icons.music_note, size: 40),
-            title: Text(
-              title,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-            ),
-            subtitle: Text(
-              _isSyncing && _mode == PlayerMode.speaker
-                  ? '$_modeLabel · 동기화 중'
-                  : _modeLabel,
-              style: _isSyncing && _mode == PlayerMode.speaker
-                  ? TextStyle(
-                      color: Theme.of(context).colorScheme.primary,
-                      fontStyle: FontStyle.italic,
-                    )
-                  : null,
-            ),
-          ),
-        );
+            // 우선순위: 동기화 중 > 다운로드 중 > 파일명 > placeholder.
+            // 모드 라벨(단독/호스트/스피커)은 노출 안 함 (사용자 요청).
+            // 카드 자체를 탭하면 파일 선택 — 호스트 권한 + 진행 중 아닐 때만.
+            final showSync = _isSyncing && _mode == PlayerMode.speaker;
+            final String title;
+            final Widget leading;
+            if (showSync) {
+              title = '동기화 중';
+              leading = const SizedBox(
+                width: 40,
+                height: 40,
+                child: Padding(
+                  padding: EdgeInsets.all(8),
+                  child: CircularProgressIndicator(strokeWidth: 3),
+                ),
+              );
+            } else if (isLoading) {
+              title = (progress > 0 && progress < 1.0)
+                  ? '파일 수신 중... $progressPct%'
+                  : '파일 수신 중...';
+              leading = SizedBox(
+                width: 40,
+                height: 40,
+                child: Padding(
+                  padding: const EdgeInsets.all(8),
+                  child: CircularProgressIndicator(
+                    strokeWidth: 3,
+                    value: progress > 0 && progress < 1.0 ? progress : null,
+                  ),
+                ),
+              );
+            } else {
+              title = fileName ??
+                  (_isController ? '오디오를 선택하세요' : '음악 대기 중');
+              leading = const Icon(Icons.music_note, size: 40);
+            }
+            return Card(
+              child: ListTile(
+                onTap: (!isLoading && !showSync && _isController)
+                    ? _pickFile
+                    : null,
+                leading: leading,
+                title: Text(
+                  title,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            );
           },
         );
       },
@@ -506,8 +520,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 _effectiveB?.inMilliseconds.toDouble() ?? maxMs;
             return Column(
               children: [
-                // A/B 마커 영역 (호스트 시 항상 reserve — 마커 0개여도 SizedBox 유지)
-                if (_isController) _buildAbMarkers(maxMs),
+                // A/B 마커 영역 — 모드 무관 항상 reserve해서 시크바 높이 고정.
+                // 스피커 모드는 _abPointA/B가 null이라 빈 18px SizedBox만 표시.
+                _buildAbMarkers(maxMs),
                 SliderTheme(
                   data: Theme.of(context).sliderTheme.copyWith(
                         padding: const EdgeInsets.symmetric(
@@ -538,8 +553,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       : null,
                 ),
                 ),
-                // 메모리 슬롯 마커 영역 (호스트 시 항상 reserve)
-                if (_isController) _buildSlotMarkers(maxMs),
+                // 슬롯 마커 영역 — 모드 무관 항상 reserve해서 시크바 높이 고정.
+                _buildSlotMarkers(maxMs),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
@@ -1043,6 +1058,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // ═══════════════════════════════════════════════════════════════════════════
   // P2P 모드 진입/종료 — Phase 4(호스트) + Phase 5(스피커, 일부 stub)
   // ═══════════════════════════════════════════════════════════════════════════
+
+  Future<void> _loadVersion() async {
+    final info = await PackageInfo.fromPlatform();
+    if (mounted) setState(() => _versionLabel = 'v${info.version}');
+  }
 
   /// 게스트 표시명. Android: model, iOS: 사용자 설정명. (home_screen.dart 동일 로직)
   /// stale 매칭은 _resolveDeviceId UUID로 하므로 충돌 무관.
