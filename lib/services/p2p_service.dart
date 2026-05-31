@@ -51,6 +51,19 @@ class P2PService {
     return _roomCode!;
   }
 
+  /// 호스트 존재만 빠르게 확인. raw TCP connect → 즉시 close (코드 검증 없음).
+  /// 연결 성공 = 해당 IP:port에 호스트가 listen 중. 실패(timeout/refused 등) = false.
+  /// 호스트 측에선 join 메시지 없는 connect를 onDone 분기에서 무시 (peer 추가 안 함).
+  Future<bool> pingHost(String ip, int port) async {
+    try {
+      final s = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
+      s.destroy();
+      return true;
+    } catch (_) {
+      return false;
+    }
+  }
+
   /// 호스트: TCP 서버 시작
   Future<int> startHost() async {
     await disconnect();
@@ -158,6 +171,7 @@ class P2PService {
   int? _lastHostPort;
   String? _lastMyName;
   String? _lastMyDeviceId;
+  String? _lastRoomCode;
 
   /// 마지막 reconnect 시도에서 잡힌 SocketException의 errno (없으면 null).
   /// 호출부가 errno=111(refused) 같은 값으로 빠른 포기 판정에 사용.
@@ -169,22 +183,27 @@ class P2PService {
   /// [deviceId]는 SharedPreferences에 영속된 UUID v4 hex (`home_screen.dart`의
   /// `_resolveDeviceId()`). 호스트의 stale peer 정리(_handleNewPeer)가 이 값으로
   /// 같은 디바이스의 재접속을 식별하므로 같은 모델 충돌이 0이 됨. (v0.0.73)
+  ///
+  /// [roomCode] 호스트 입장 코드. 호스트 `_handleNewPeer`에서 비교 → 안 맞으면
+  /// `join-rejected` 응답 후 socket.destroy. 재연결 시 `_lastRoomCode` 사용.
   Future<void> connectToHost(
     String ip,
     int port,
     String myName, {
     required String deviceId,
+    required String roomCode,
   }) async {
     _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
     _connectedHostIp = ip;
     _lastHostPort = port;
     _lastMyName = myName;
     _lastMyDeviceId = deviceId;
+    _lastRoomCode = roomCode;
 
     // 입장 메시지 전송
     _sendTo(_hostSocket!, {
       'type': 'join',
-      'data': {'name': myName, 'deviceId': deviceId},
+      'data': {'name': myName, 'deviceId': deviceId, 'roomCode': roomCode},
     });
 
     // 호스트로부터 메시지 수신
@@ -197,7 +216,8 @@ class P2PService {
     final port = _lastHostPort;
     final name = _lastMyName;
     final deviceId = _lastMyDeviceId;
-    if (ip == null || port == null || name == null || deviceId == null) return false;
+    final roomCode = _lastRoomCode;
+    if (ip == null || port == null || name == null || deviceId == null || roomCode == null) return false;
 
     _hostSocket?.destroy();
     _hostSocket = null;
@@ -210,7 +230,7 @@ class P2PService {
         _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
         _sendTo(_hostSocket!, {
           'type': 'join',
-          'data': {'name': name, 'deviceId': deviceId},
+          'data': {'name': name, 'deviceId': deviceId, 'roomCode': roomCode},
         });
         _listenToSocket(_hostSocket!, 'host');
         debugPrint('Reconnected successfully');
@@ -240,6 +260,23 @@ class P2PService {
       if (message['type'] != 'join') {
         debugPrint('Invalid first message from $peerId: ${message['type']}');
         socket.destroy();
+        return;
+      }
+
+      // 입장 코드 검증. 게스트가 보낸 roomCode가 호스트 _roomCode와 일치해야 입장.
+      // 누락(빈 문자열 / null)도 reject. join-rejected 메시지로 reason 전달 후 destroy.
+      final claimedCode = message['data']['roomCode'] as String? ?? '';
+      if (_roomCode == null || claimedCode != _roomCode) {
+        debugPrint('Join rejected from $peerId: code=$claimedCode (expected=$_roomCode)');
+        _sendTo(socket, {
+          'type': 'join-rejected',
+          'data': {'reason': 'invalid-code'},
+        });
+        // flush 시간 확보 후 destroy. socket.flush()는 Future이지만 즉시 destroy 시
+        // 게스트가 메시지 못 받을 수 있어 짧은 delay.
+        Future.delayed(const Duration(milliseconds: 100), () {
+          try { socket.destroy(); } catch (_) {}
+        });
         return;
       }
 

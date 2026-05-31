@@ -242,7 +242,7 @@ class _AutoMeasureScreenState extends ConsumerState<AutoMeasureScreen> {
           final welcomeFuture = p2p.onMessage
               .firstWhere((m) => m['type'] == 'welcome')
               .timeout(const Duration(seconds: 10));
-          await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId);
+          await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId, roomCode: host.roomCode);
           try {
             await welcomeFuture;
           } catch (_) {}

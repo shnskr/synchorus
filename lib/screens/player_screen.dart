@@ -1,19 +1,30 @@
 import 'dart:async';
 import 'dart:io';
+import 'dart:math';
 
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/app_providers.dart';
+import '../services/discovery_service.dart';
 import '../services/native_audio_sync_service.dart';
-import 'home_screen.dart';
+import '../services/p2p_service.dart';
+
+/// 플레이어 모드.
+/// - standalone: 단독 재생. P2P 비활성. UI 컨트롤 권한 보유.
+/// - host: 단독 + P2P 호스트 (방 열기/광고/게스트 수용). UI 컨트롤 동일.
+/// - speaker: 호스트에 연결된 게스트 (음악 sync 수신, 재생 컨트롤 권한 없음).
+enum PlayerMode { standalone, host, speaker }
 
 class PlayerScreen extends ConsumerStatefulWidget {
-  final bool isHost;
+  /// 진입 시 초기 모드. 보통 standalone. 디버그/측정용으로 즉시 호스트 진입 가능.
+  final PlayerMode initialMode;
 
-  const PlayerScreen({super.key, required this.isHost});
+  const PlayerScreen({super.key, this.initialMode = PlayerMode.standalone});
 
   @override
   ConsumerState<PlayerScreen> createState() => _PlayerScreenState();
@@ -24,6 +35,53 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // 이 값을 SliderTheme.padding에 강제하면 thumb 가용 영역이 [padding, width-padding]
   // 으로 정해지고 마커 left = padding + ratio * (width - 2*padding) 이 정확.
   static const double _sliderHorizontalPadding = 12.0;
+
+  // 현재 모드. standalone(단독) / host(P2P 호스트) / speaker(P2P 게스트).
+  // standalone + host는 UI 컨트롤 권한 동일 (재생/시크/파일선택), speaker만 read-only.
+  // P2P 활성 여부는 (_mode != standalone) 기준. 사용자가 group_add → BottomSheet에서 전환.
+  late PlayerMode _mode;
+  // 모드 전환 비동기 진행 중인지. true면 group_add 버튼 disable — 빠르게 다시 눌러
+  // sheet 중복 진입하는 race 방지(_enterHostMode가 _startHost + discovery.startBroadcast로
+  // 수십~수백ms 걸려 그 사이에 사용자가 재누름 가능).
+  bool _isModeTransitioning = false;
+  // BottomSheet 안 카드를 rebuild하기 위한 setState 참조. peer count 등 외부 변경 시
+  // PlayerScreen setState만으로는 sheet 안 위젯이 갱신 안 됨 (별도 element tree).
+  // sheet 열려있는 동안만 non-null. whenComplete에서 null로 reset.
+  void Function(VoidCallback)? _setSheetState;
+  bool get _isController => _mode != PlayerMode.speaker;
+  // ignore: unused_element — Phase 4 호스트 시작/종료 로직에서 사용 예정.
+  bool get _isHostP2P => _mode == PlayerMode.host;
+
+  // P2P 정보 (BottomSheet 카드 + 모드 전환용).
+  // 호스트 모드: _roomCode + _hostIp + _peerCount. 스피커 모드: _connectedHostIp +
+  // _connectedRoomCode + _peerCount. standalone은 모두 null.
+  String? _roomCode;
+  String? _hostIp;
+  String? _connectedHostIp;
+  String? _connectedRoomCode;
+  int _peerCount = 0;
+  StreamSubscription? _peerJoinSub;
+  StreamSubscription? _peerLeaveSub;
+  StreamSubscription? _disconnectedSub;
+  StreamSubscription? _rejectedSub;
+  // 외부(스피커 모드 게스트가 호스트 broadcast로 받음 또는 호스트 본인 변경)에 의한
+  // transpose/speed 값 갱신 시 PlayerScreen rebuild 트리거.
+  StreamSubscription<int>? _transposeStreamSub;
+  StreamSubscription<int>? _speedStreamSub;
+  // (이전 다운로드 완료 트리거용 listener는 입장 즉시 sync 변경으로 제거됨.)
+  StreamSubscription<bool>? _loadingSub;
+  // 스피커 모드 sync 진행 중 — _buildNowPlaying에서 "동기화 중" 안내 표시.
+  bool _isSyncing = false;
+  String get _modeLabel {
+    switch (_mode) {
+      case PlayerMode.standalone:
+        return '단독';
+      case PlayerMode.host:
+        return '호스트';
+      case PlayerMode.speaker:
+        return '스피커';
+    }
+  }
 
   bool _isDragging = false;
   double _dragValue = 0;
@@ -59,19 +117,56 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   @override
   void initState() {
     super.initState();
-    // 단독 진입(main → PlayerScreen) 경로에서도 audio listen / handler attach 보장.
-    // RoomScreen 경유 진입 시엔 이미 호출됐지만 재호출 안전(startListening은
-    // _messageSub 재구독, attachSyncService는 detach 먼저).
+    _mode = widget.initialMode;
+    // 단독/호스트는 sync 권한 같음(isHost=true), speaker만 isHost=false.
     final audio = ref.read(nativeAudioSyncServiceProvider);
     final handler = ref.read(audioHandlerProvider);
-    audio.startListening(isHost: widget.isHost);
-    handler.attachSyncService(audio, isHost: widget.isHost);
+    audio.startListening(isHost: _isController);
+    handler.attachSyncService(audio, isHost: _isController);
 
-    // A-B 반복 + seek 메모리: 호스트만. 파일 변경 시 widget state reset.
-    // §H transpose + §I 속도는 sync_service.loadFile에서 native+Dart 동시 reset
-    // (v0.0.93) → 여기서 처리 안 함. hasAny gate도 제거 — 이전엔 Dart 값이
-    // default일 때 native 잔재(SoundTouch 내부)를 못 잡아내는 결함이 있었음.
-    if (widget.isHost) {
+    // P2P 정보 stream subscribe (호스트 측). standalone에선 _peers 빈 상태라 무해.
+    // 게스트(speaker) 측 peerCount는 onMessage에서 welcome / peer-joined / peer-left
+    // 메시지의 data.peerCount로 받음.
+    final p2p = ref.read(p2pServiceProvider);
+    _peerJoinSub = p2p.onPeerJoin.listen((_) {
+      if (!mounted || _mode != PlayerMode.host) return;
+      _setStateAndSheet(() => _peerCount = p2p.peers.length);
+    });
+    _peerLeaveSub = p2p.onPeerLeave.listen((_) {
+      if (!mounted || _mode != PlayerMode.host) return;
+      _setStateAndSheet(() => _peerCount = p2p.peers.length);
+    });
+    _disconnectedSub = p2p.onDisconnected.listen((_) {
+      if (!mounted || _mode != PlayerMode.speaker) return;
+      _exitSpeakerMode(reason: '호스트 연결이 끊겼습니다');
+    });
+    // 게스트 측 메시지: welcome / peer-joined / peer-left → peerCount 갱신.
+    // 호스트가 보낸 join-rejected는 _enterSpeakerMode에서 별도 처리.
+    _rejectedSub = p2p.onMessage.listen((m) {
+      if (!mounted || _mode != PlayerMode.speaker) return;
+      final type = m['type'];
+      if (type == 'welcome' || type == 'peer-joined' || type == 'peer-left') {
+        final c = m['data']?['peerCount'];
+        if (c is int) _setStateAndSheet(() => _peerCount = c);
+      } else if (type == 'host-closed') {
+        _exitSpeakerMode(reason: '호스트가 방을 닫았습니다');
+      }
+    });
+
+    // transpose/speed 외부 변경 시 UI 갱신. 스피커 모드 게스트(audio-pitch/audio-tempo
+    // 수신) + 호스트 본인 슬라이더 조정 모두 emit. listener는 단순 setState 트리거.
+    _transposeStreamSub = audio.transposeCentsStream.listen((_) {
+      if (mounted) setState(() {});
+    });
+    _speedStreamSub = audio.playbackSpeedStream.listen((_) {
+      if (mounted) setState(() {});
+    });
+
+    // (이전엔 다운로드 완료 후 sync 트리거 listener 있었으나, sync 시점이 입장 즉시로
+    // 변경되어 제거. _loadingSub 필드는 호환성 위해 유지 — 차후 다른 용도로 재사용 가능.)
+
+    // A-B 반복 + seek 메모리: 컨트롤러(단독/호스트)만. 파일 변경 시 widget state reset.
+    if (_isController) {
       _positionSub = audio.positionStream.listen(_onAbPositionTick);
       _durationSub = audio.durationStream.listen((_) {
         if (!mounted) return;
@@ -88,6 +183,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   void dispose() {
     _positionSub?.cancel();
     _durationSub?.cancel();
+    _peerJoinSub?.cancel();
+    _peerLeaveSub?.cancel();
+    _disconnectedSub?.cancel();
+    _rejectedSub?.cancel();
+    _transposeStreamSub?.cancel();
+    _speedStreamSub?.cancel();
+    _loadingSub?.cancel();
     super.dispose();
   }
 
@@ -258,14 +360,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       appBar: AppBar(
         title: const Text('플레이어'),
         actions: [
-          // [임시] 방 만들기/참가 동선. 사용자가 UI 위치 정해줄 때까지 AppBar에 둠.
           IconButton(
-            tooltip: '방 만들기 / 참가',
+            tooltip: 'P2P 모드',
             icon: const Icon(Icons.group_add),
-            onPressed: () => Navigator.push(
-              context,
-              MaterialPageRoute(builder: (_) => const HomeScreen()),
-            ),
+            onPressed: _isModeTransitioning ? null : _showModeSheet,
           ),
         ],
       ),
@@ -274,23 +372,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           padding: const EdgeInsets.all(16.0),
           child: Column(
             children: [
-              // 호스트 전용: 오디오 소스 선택
-              if (widget.isHost) ...[
-                Row(
-                  children: [
-                    Expanded(
-                      child: ElevatedButton.icon(
-                        onPressed: _pickFile,
-                        icon: const Icon(Icons.folder_open),
-                        label: const Text('파일 선택'),
-                      ),
+              // 파일 선택 — 스피커 모드에선 비활성(호스트만 가능)이지만 표시는 유지.
+              Row(
+                children: [
+                  Expanded(
+                    child: ElevatedButton.icon(
+                      onPressed: _isController ? _pickFile : null,
+                      icon: const Icon(Icons.folder_open),
+                      label: const Text('파일 선택'),
                     ),
-                  ],
-                ),
-                const SizedBox(height: 16),
-                const Divider(),
-                const SizedBox(height: 8),
-              ],
+                  ),
+                ],
+              ),
+              const SizedBox(height: 16),
+              const Divider(),
+              const SizedBox(height: 8),
 
               // 현재 재생 정보
               _buildNowPlaying(),
@@ -300,17 +396,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               // 시크바 + 시간
               _buildSeekBar(),
 
-              // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도 (호스트만)
-              if (widget.isHost) ...[
-                const SizedBox(height: 8),
-                _buildAbControls(),
-                const SizedBox(height: 8),
-                _buildSeekSlots(),
-                const SizedBox(height: 8),
-                _buildTransposeControls(),
-                const SizedBox(height: 8),
-                _buildSpeedControls(),
-              ],
+              // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
+              // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
+              const SizedBox(height: 8),
+              _buildAbControls(),
+              const SizedBox(height: 8),
+              _buildSeekSlots(),
+              const SizedBox(height: 8),
+              _buildTransposeControls(),
+              const SizedBox(height: 8),
+              _buildSpeedControls(),
 
               const SizedBox(height: 16),
 
@@ -319,8 +414,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
               const SizedBox(height: 24),
 
-              // 싱크 정보 (디버그)
-              if (!widget.isHost) _buildSyncInfo(),
+              // Sync Info는 디버그용 — 사용자 요청으로 노출 안 함.
 
               const SizedBox(height: 16),
             ],
@@ -350,7 +444,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                     ? '파일 수신 중... $progressPct%'
                     : '파일 수신 중...')
                 : fileName ??
-                    (widget.isHost ? '오디오를 선택하세요' : '음악 대기 중');
+                    (_isController ? '오디오를 선택하세요' : '음악 대기 중');
 
         return Card(
           child: ListTile(
@@ -374,7 +468,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               maxLines: 1,
               overflow: TextOverflow.ellipsis,
             ),
-            subtitle: Text(widget.isHost ? '호스트' : '참가자'),
+            subtitle: Text(
+              _isSyncing && _mode == PlayerMode.speaker
+                  ? '$_modeLabel · 동기화 중'
+                  : _modeLabel,
+              style: _isSyncing && _mode == PlayerMode.speaker
+                  ? TextStyle(
+                      color: Theme.of(context).colorScheme.primary,
+                      fontStyle: FontStyle.italic,
+                    )
+                  : null,
+            ),
           ),
         );
           },
@@ -403,7 +507,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             return Column(
               children: [
                 // A/B 마커 영역 (호스트 시 항상 reserve — 마커 0개여도 SizedBox 유지)
-                if (widget.isHost) _buildAbMarkers(maxMs),
+                if (_isController) _buildAbMarkers(maxMs),
                 SliderTheme(
                   data: Theme.of(context).sliderTheme.copyWith(
                         padding: const EdgeInsets.symmetric(
@@ -415,7 +519,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   value: _isDragging
                       ? _dragValue.clamp(0.0, maxMs)
                       : position.inMilliseconds.toDouble().clamp(0.0, maxMs),
-                  onChanged: widget.isHost
+                  onChanged: (_isController && _audio.currentFileName != null)
                       ? (value) {
                           final clamped = value.clamp(minSeekMs, maxSeekMs);
                           setState(() {
@@ -424,7 +528,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                           });
                         }
                       : null,
-                  onChangeEnd: widget.isHost
+                  onChangeEnd: (_isController && _audio.currentFileName != null)
                       ? (value) {
                           final clamped = value.clamp(minSeekMs, maxSeekMs);
                           setState(() => _isDragging = false);
@@ -435,7 +539,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 ),
                 ),
                 // 메모리 슬롯 마커 영역 (호스트 시 항상 reserve)
-                if (widget.isHost) _buildSlotMarkers(maxMs),
+                if (_isController) _buildSlotMarkers(maxMs),
                 Padding(
                   padding: const EdgeInsets.symmetric(horizontal: 16),
                   child: Row(
@@ -473,13 +577,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 IconButton(
                   iconSize: 40,
                   onPressed:
-                      (widget.isHost && hasAudio) ? () => _skipSeconds(-5) : null,
+                      (_isController && hasAudio) ? () => _skipSeconds(-5) : null,
                   icon: const Icon(Icons.replay_5),
                 ),
                 const SizedBox(width: 16),
                 IconButton(
                   iconSize: 64,
-                  onPressed: (widget.isHost && hasAudio) ? _togglePlay : null,
+                  onPressed: (_isController && hasAudio) ? _togglePlay : null,
                   icon: Icon(
                     playing
                         ? Icons.pause_circle_filled
@@ -490,7 +594,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 IconButton(
                   iconSize: 40,
                   onPressed:
-                      (widget.isHost && hasAudio) ? () => _skipSeconds(5) : null,
+                      (_isController && hasAudio) ? () => _skipSeconds(5) : null,
                   icon: const Icon(Icons.forward_5),
                 ),
               ],
@@ -590,7 +694,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Widget _buildAbControls() {
-    final hasAudio = _audio.currentFileName != null;
+    // 스피커 모드에선 hasAudio여도 컨트롤 비활성 (호스트 widget state라 의미 없음).
+    final hasAudio = _audio.currentFileName != null && _isController;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -608,7 +713,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                     ? Theme.of(context).colorScheme.onSurface
                     : Theme.of(context).disabledColor),
           ),
-          onPressed: _abAnySet ? _resetAb : null,
+          onPressed: (_abAnySet && _isController) ? _resetAb : null,
         ),
       ],
     );
@@ -655,7 +760,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Widget _buildSeekSlots() {
-    final hasAudio = _audio.currentFileName != null;
+    final hasAudio = _audio.currentFileName != null && _isController;
     return Row(
       mainAxisAlignment: MainAxisAlignment.center,
       children: [
@@ -706,7 +811,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Widget _buildTransposeControls() {
-    final hasAudio = _audio.currentFileName != null;
+    final hasAudio = _audio.currentFileName != null && _isController;
     final semitone = (_audio.transposeCents / 100).round();
     final label = semitone == 0
         ? '0'
@@ -799,7 +904,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   Widget _buildSpeedControls() {
-    final hasAudio = _audio.currentFileName != null;
+    final hasAudio = _audio.currentFileName != null && _isController;
     final speed = _audio.playbackSpeed;
     final label = '${speed.toStringAsFixed(2)}x';
     final isDefault = _audio.playbackSpeedX1000 == 1000;
@@ -889,6 +994,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     setState(() {});
   }
 
+  // ignore: unused_element — 디버그용. 사용자 요청으로 build에서 노출 제거.
   Widget _buildSyncInfo() {
     // v0.0.81: positionStream(100ms 주기 native poll) 구독으로 매번 rebuild —
     // drift / seekCount / offset / RTT 실시간 표시. 기존엔 한 번 read만 해서 갱신 안 됨.
@@ -931,6 +1037,807 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           ),
         );
       },
+    );
+  }
+
+  // ═══════════════════════════════════════════════════════════════════════════
+  // P2P 모드 진입/종료 — Phase 4(호스트) + Phase 5(스피커, 일부 stub)
+  // ═══════════════════════════════════════════════════════════════════════════
+
+  /// 게스트 표시명. Android: model, iOS: 사용자 설정명. (home_screen.dart 동일 로직)
+  /// stale 매칭은 _resolveDeviceId UUID로 하므로 충돌 무관.
+  Future<String> _resolveDeviceName() async {
+    String base = 'Guest';
+    try {
+      final plugin = DeviceInfoPlugin();
+      if (Platform.isAndroid) {
+        final info = await plugin.androidInfo;
+        base = info.model;
+      } else if (Platform.isIOS) {
+        final info = await plugin.iosInfo;
+        base = info.name;
+      }
+    } catch (_) {}
+    if (base.isEmpty) base = 'Guest';
+    if (base.length > 24) base = base.substring(0, 24);
+    return base;
+  }
+
+  /// 영구 디바이스 식별자 (32자 hex). SharedPreferences 영속. (home_screen.dart 동일)
+  // ignore: unused_element — Phase 5 _enterSpeakerMode에서 사용 예정.
+  Future<String> _resolveDeviceId() async {
+    final prefs = await SharedPreferences.getInstance();
+    String? id = prefs.getString('device_uuid');
+    if (id != null && id.length == 32) return id;
+    final rng = Random.secure();
+    final bytes = List<int>.generate(16, (_) => rng.nextInt(256));
+    id = bytes.map((b) => b.toRadixString(16).padLeft(2, '0')).join();
+    await prefs.setString('device_uuid', id);
+    return id;
+  }
+
+  void _showModeSheet() {
+    showModalBottomSheet(
+      context: context,
+      isScrollControlled: true,
+      builder: (sheetContext) {
+        return StatefulBuilder(
+          builder: (sheetContext, setSheetState) {
+            _setSheetState = setSheetState;
+            return SafeArea(
+              child: Padding(
+                padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 16,
+                  bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
+                ),
+                child: switch (_mode) {
+                  PlayerMode.standalone => _buildStandaloneSheet(sheetContext),
+                  PlayerMode.host => _buildHostSheet(sheetContext),
+                  PlayerMode.speaker => _buildSpeakerSheet(sheetContext),
+                },
+              ),
+            );
+          },
+        );
+      },
+    ).whenComplete(() {
+      _setSheetState = null;
+    });
+  }
+
+  /// state 변경 시 PlayerScreen + (sheet 열려있으면) sheet도 함께 rebuild.
+  /// peer count, mode, hostIp 등 sheet에 표시되는 정보 갱신 시 사용.
+  void _setStateAndSheet(VoidCallback fn) {
+    setState(fn);
+    _setSheetState?.call(() {});
+  }
+
+  Widget _buildStandaloneSheet(BuildContext sheetContext) {
+    return SingleChildScrollView(
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: [
+          const Text('P2P 모드 선택',
+              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+              textAlign: TextAlign.center),
+          const SizedBox(height: 16),
+          ElevatedButton.icon(
+            // sheet 닫지 않고 호스트 진입 — _enterHostMode 안 _setStateAndSheet
+            // (_mode=host)이 sheet rebuild → switch에서 _buildHostSheet으로 전환
+            // (정보 카드 + 종료 버튼). 사용자가 정보 카드를 그 자리에서 확인 가능.
+            onPressed: () => _enterHostMode(),
+            icon: const Icon(Icons.cast_connected),
+            label: const Padding(
+              padding: EdgeInsets.symmetric(vertical: 8),
+              child: Text('호스트 모드'),
+            ),
+          ),
+          const SizedBox(height: 20),
+          const Divider(),
+          const SizedBox(height: 8),
+          Row(
+            children: [
+              const Icon(Icons.speaker, size: 18),
+              const SizedBox(width: 8),
+              Text('스피커 모드',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.bold,
+                      color: Theme.of(context).colorScheme.onSurface)),
+            ],
+          ),
+          const SizedBox(height: 8),
+          _SpeakerModePicker(
+            discovery: ref.read(discoveryServiceProvider),
+            onConnect: (ip, port, code) =>
+                _enterSpeakerMode(ip: ip, port: port, roomCode: code),
+            onPing: (ip, port) => ref.read(p2pServiceProvider).pingHost(ip, port),
+            onSuccess: () => Navigator.pop(sheetContext),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildHostSheet(BuildContext sheetContext) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('호스트 모드',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _infoRow('입장 코드', _roomCode ?? '—', emphasize: true),
+                const SizedBox(height: 8),
+                _infoRow('IP', _hostIp ?? '—'),
+                const SizedBox(height: 8),
+                _infoRow('접속자', '${_peerCount + 1}명'),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton(
+          onPressed: () async {
+            Navigator.pop(sheetContext);
+            await _exitHostMode();
+          },
+          style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red[400], foregroundColor: Colors.white),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text('호스트 모드 종료'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSpeakerSheet(BuildContext sheetContext) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: [
+        const Text('스피커 모드',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center),
+        const SizedBox(height: 12),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                _infoRow('호스트 IP', _connectedHostIp ?? '—'),
+                const SizedBox(height: 8),
+                _infoRow('입장 코드', _connectedRoomCode ?? '—'),
+                const SizedBox(height: 8),
+                _infoRow('접속자', '${_peerCount + 1}명'),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 12),
+        ElevatedButton(
+          onPressed: () async {
+            Navigator.pop(sheetContext);
+            await _exitSpeakerMode();
+          },
+          style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red[400], foregroundColor: Colors.white),
+          child: const Padding(
+            padding: EdgeInsets.symmetric(vertical: 8),
+            child: Text('스피커 모드 종료'),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _infoRow(String label, String value, {bool emphasize = false}) {
+    return Row(
+      children: [
+        SizedBox(
+          width: 90,
+          child: Text(label,
+              style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context)
+                      .colorScheme
+                      .onSurface
+                      .withValues(alpha: 0.6))),
+        ),
+        Expanded(
+          child: Text(value,
+              style: TextStyle(
+                  fontSize: emphasize ? 18 : 14,
+                  fontWeight: emphasize ? FontWeight.bold : FontWeight.normal,
+                  fontFeatures: const [FontFeature.tabularFigures()])),
+        ),
+      ],
+    );
+  }
+
+  Future<void> _enterHostMode() async {
+    if (_isModeTransitioning) return;
+    setState(() => _isModeTransitioning = true);
+    try {
+      final ip = await NativeAudioSyncService.getLocalIP();
+      if (ip == null) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('WiFi 연결이 필요합니다')),
+          );
+        }
+        return;
+      }
+
+      final p2p = ref.read(p2pServiceProvider);
+      final discovery = ref.read(discoveryServiceProvider);
+
+      int port;
+      try {
+        port = await p2p.startHost();
+      } catch (e) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('서버 시작 실패: 포트가 이미 사용 중입니다')),
+          );
+        }
+        return;
+      }
+
+      final roomCode = p2p.generateRoomCode();
+      final hostName = await _resolveDeviceName();
+      await discovery.startBroadcast(
+        hostName: hostName,
+        tcpPort: port,
+        roomCode: roomCode,
+      );
+
+      if (!mounted) return;
+      _setStateAndSheet(() {
+        _mode = PlayerMode.host;
+        _hostIp = ip;
+        _roomCode = roomCode;
+        _peerCount = 0;
+      });
+
+      // 호스트 측 sync-ping 응답 listener 등록 — 게스트가 sync.syncWithHost 호출 시
+      // 호스트가 sync-pong 응답해야 sync 완료됨. 누락 시 게스트 무한 await.
+      // (이전 RoomScreen이 했던 호출, PlayerScreen 이식 누락 fix.)
+      ref.read(syncServiceProvider).startHostHandler();
+
+      // HISTORY (105) audio-url 미전파 fix. 단독 모드에서 파일 로드된 상태로 호스트
+      // 전환 시 _currentUrl이 null이면 HTTP 서버 재바인딩 + audio-url broadcast.
+      await _audio.rebindFileServerIfNeeded();
+    } finally {
+      if (mounted) setState(() => _isModeTransitioning = false);
+    }
+  }
+
+  Future<void> _exitHostMode() async {
+    if (_isModeTransitioning) return;
+    setState(() => _isModeTransitioning = true);
+    try {
+      final p2p = ref.read(p2pServiceProvider);
+      final discovery = ref.read(discoveryServiceProvider);
+
+      // host-closed broadcast best-effort. 게스트는 RoomLifecycleCoordinator 또는
+      // 본인 onMessage host-closed 핸들러에서 단독 모드 복귀.
+      try {
+        p2p.broadcastToAll({'type': 'host-closed'});
+      } catch (_) {}
+      await Future.delayed(const Duration(milliseconds: 100));
+
+      await discovery.stop();
+      await p2p.disconnect();
+
+      if (!mounted) return;
+      _setStateAndSheet(() {
+        _mode = PlayerMode.standalone;
+        _hostIp = null;
+        _roomCode = null;
+        _peerCount = 0;
+      });
+    } finally {
+      if (mounted) setState(() => _isModeTransitioning = false);
+    }
+  }
+
+  /// 스피커 모드 진입. 호스트에 connect + welcome/join-rejected 응답 처리.
+  /// 반환: null=성공(mode=speaker 전환), string=실패 사유(BottomSheet picker가 inline
+  /// 표시 — SnackBar는 sheet에 가려서 안 보임).
+  Future<String?> _enterSpeakerMode({
+    required String ip,
+    required int port,
+    required String roomCode,
+  }) async {
+    if (_isModeTransitioning) return '진행 중입니다';
+    setState(() => _isModeTransitioning = true);
+    try {
+      final p2p = ref.read(p2pServiceProvider);
+      await p2p.disconnect();
+
+      final guestName = await _resolveDeviceName();
+      final deviceId = await _resolveDeviceId();
+
+      // welcome 또는 join-rejected 둘 중 먼저 도착 대기 (5초 timeout).
+      final replyFuture = p2p.onMessage
+          .where((m) => m['type'] == 'welcome' || m['type'] == 'join-rejected')
+          .first
+          .timeout(const Duration(seconds: 5));
+
+      try {
+        await p2p.connectToHost(ip, port, guestName,
+            deviceId: deviceId, roomCode: roomCode);
+      } catch (e) {
+        return e is SocketException ? '호스트에 연결할 수 없습니다' : '연결 실패';
+      }
+
+      Map<String, dynamic> reply;
+      try {
+        reply = await replyFuture;
+      } on TimeoutException {
+        await p2p.disconnect();
+        return '호스트 응답 없음 (시간 초과)';
+      }
+
+      if (reply['type'] == 'join-rejected') {
+        await p2p.disconnect();
+        return '입장 코드가 맞지 않습니다';
+      }
+
+      // welcome 수신
+      final peerCount = (reply['data']?['peerCount'] as int?) ?? 1;
+
+      if (!mounted) return null;
+      _setStateAndSheet(() {
+        _mode = PlayerMode.speaker;
+        _connectedHostIp = ip;
+        _connectedRoomCode = roomCode;
+        _peerCount = peerCount;
+      });
+
+      // sync 권한 변경 (호스트 → 게스트). startListening 재호출은 안전 (이미 구독되어 있어도 재구독).
+      final audio = ref.read(nativeAudioSyncServiceProvider);
+      final handler = ref.read(audioHandlerProvider);
+      audio.startListening(isHost: false);
+      handler.attachSyncService(audio, isHost: false);
+
+      // 직렬 흐름: sync 먼저 완료 → audio-request → 다운로드.
+      // 다운로드와 sync 병렬 시 WiFi 채널 점유로 RTT jitter 발생, sync 정확도
+      // 떨어져 결국 싱크에 영향 (사용자 합의).
+      unawaited(_runGuestStartupSequence());
+
+      return null;
+    } finally {
+      if (mounted) setState(() => _isModeTransitioning = false);
+    }
+  }
+
+  /// 게스트 입장 startup 시퀀스: sync 먼저 → 완료 후 audio-request로 다운로드 트리거.
+  /// 직렬 처리로 다운로드의 WiFi 채널 점유가 sync RTT를 망치는 영향 회피.
+  Future<void> _runGuestStartupSequence() async {
+    if (!mounted || _mode != PlayerMode.speaker) return;
+
+    // 1. sync 먼저 (다운로드 시작 전)
+    setState(() => _isSyncing = true);
+    debugPrint('[GUEST-STARTUP] sync begin');
+    try {
+      final sync = ref.read(syncServiceProvider);
+      sync.reset();
+      final result = await sync.syncWithHost();
+      debugPrint(
+          '[GUEST-STARTUP] sync done: offset=${result.offsetMs}ms RTT=${result.rttMs}ms isSynced=${sync.isSynced}');
+      sync.startPeriodicSync();
+      debugPrint('[GUEST-STARTUP] startPeriodicSync OK');
+    } catch (e) {
+      debugPrint('[GUEST-STARTUP] sync FAILED: $e');
+    } finally {
+      if (mounted) setState(() => _isSyncing = false);
+    }
+
+    // 2. sync 완료 후 audio-request → 호스트가 audio-url 응답 → 다운로드.
+    if (!mounted || _mode != PlayerMode.speaker) return;
+    debugPrint('[GUEST-STARTUP] audio-request');
+    ref.read(p2pServiceProvider)
+        .sendToHost({'type': 'audio-request', 'data': <String, dynamic>{}});
+  }
+
+  /// 스피커 모드 종료 — disconnect + 단독 복귀 (재생 상태 유지).
+  /// [reason]이 있으면 SnackBar 안내 (호스트 끊김 등).
+  Future<void> _exitSpeakerMode({String? reason}) async {
+    if (_isModeTransitioning) return;
+    setState(() => _isModeTransitioning = true);
+    try {
+      final sync = ref.read(syncServiceProvider);
+      sync.stopPeriodicSync();
+      sync.reset();
+
+      final audio = ref.read(nativeAudioSyncServiceProvider);
+      audio.cleanupSync();
+
+      final p2p = ref.read(p2pServiceProvider);
+      await p2p.disconnect();
+
+      if (!mounted) return;
+      _setStateAndSheet(() {
+        _mode = PlayerMode.standalone;
+        _connectedHostIp = null;
+        _connectedRoomCode = null;
+        _peerCount = 0;
+      });
+
+      // 단독 모드로 sync 권한 회복 (isHost: true 재attach).
+      final handler = ref.read(audioHandlerProvider);
+      audio.startListening(isHost: true);
+      handler.attachSyncService(audio, isHost: true);
+
+      if (reason != null) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(reason)));
+      }
+    } finally {
+      if (mounted) setState(() => _isModeTransitioning = false);
+    }
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// _SpeakerModePicker — Phase 5
+//
+// BottomSheet 안 스피커 모드 영역. 검색 토글 + 결과 리스트(이름/IP만, 코드 숨김)
+// + IP 직접 입력. 검색은 자동 시작 X (사용자가 버튼 누름). 중단 조건: 검색 버튼
+// 재누름, 방 입장 성공, sheet/picker dispose.
+//
+// 코드 검증: 결과 탭 또는 IP 연결 누름 → 코드 입력 다이얼로그 → onConnect 콜백
+// 호출. onConnect=Future<bool>으로 호스트 측 reject 처리 후 성공 시 onSuccess
+// (PlayerScreen sheet 닫기).
+// ═══════════════════════════════════════════════════════════════════════════
+
+class _SpeakerModePicker extends StatefulWidget {
+  final DiscoveryService discovery;
+  // onConnect: null=성공, string=실패 사유(picker가 inline 표시).
+  final Future<String?> Function(String ip, int port, String code) onConnect;
+  // onPing: 호스트 존재 확인. 코드 다이얼로그 띄우기 전 검증용.
+  final Future<bool> Function(String ip, int port) onPing;
+  final VoidCallback onSuccess;
+
+  const _SpeakerModePicker({
+    required this.discovery,
+    required this.onConnect,
+    required this.onPing,
+    required this.onSuccess,
+  });
+
+  @override
+  State<_SpeakerModePicker> createState() => _SpeakerModePickerState();
+}
+
+class _SpeakerModePickerState extends State<_SpeakerModePicker> {
+  bool _isSearching = false;
+  bool _isConnecting = false;
+  String? _lastError;
+  final List<DiscoveredHost> _hosts = [];
+  StreamSubscription<DiscoveredHost>? _hostSub;
+  StreamSubscription<String>? _hostLeftSub;
+  final TextEditingController _ipController = TextEditingController();
+
+  @override
+  void dispose() {
+    // sheet 닫힘/widget 해제 시 검색 중단 — 사용자 요청.
+    _stopSearch();
+    _ipController.dispose();
+    super.dispose();
+  }
+
+  Future<void> _toggleSearch() async {
+    if (_isSearching) {
+      await _stopSearch();
+    } else {
+      await _startSearch();
+    }
+  }
+
+  Future<void> _startSearch() async {
+    setState(() {
+      _isSearching = true;
+      _hosts.clear();
+    });
+    _hostSub = widget.discovery.discoverHosts().listen(
+      (host) {
+        if (!mounted) return;
+        setState(() {
+          _hosts.removeWhere((h) => h.ip == host.ip && h.port == host.port);
+          _hosts.add(host);
+        });
+      },
+      onError: (_) {
+        if (mounted) setState(() => _isSearching = false);
+      },
+    );
+    _hostLeftSub = widget.discovery.hostLeftStream.listen((code) {
+      if (!mounted) return;
+      setState(() => _hosts.removeWhere((h) => h.roomCode == code));
+    });
+  }
+
+  Future<void> _stopSearch() async {
+    await _hostSub?.cancel();
+    _hostSub = null;
+    await _hostLeftSub?.cancel();
+    _hostLeftSub = null;
+    // stop()이 아니라 stopDiscovery()만 — 호스트 모드 진입 직후 standalone sheet의
+    // picker가 dispose되며 호스트 광고까지 같이 정지되던 회귀 fix.
+    await widget.discovery.stopDiscovery();
+    if (mounted) setState(() => _isSearching = false);
+  }
+
+  Future<void> _promptCodeAndConnect({
+    required String ip,
+    required int port,
+  }) async {
+    // 1) IP에 호스트가 실제로 있는지 사전 확인 (사용자 요청: IP → 호스트 확인 → 코드).
+    setState(() {
+      _isConnecting = true;
+      _lastError = null;
+    });
+    bool hostAlive;
+    try {
+      hostAlive = await widget.onPing(ip, port);
+    } finally {
+      if (mounted) setState(() => _isConnecting = false);
+    }
+    if (!hostAlive) {
+      if (mounted) setState(() => _lastError = '호스트를 찾을 수 없습니다');
+      return;
+    }
+    // 2) 호스트 확인 OK — 코드 입력 받기
+    final code = await _askCode();
+    if (code == null || code.isEmpty) return;
+    setState(() {
+      _isConnecting = true;
+      _lastError = null;
+    });
+    try {
+      // 검색이 돌고 있었다면 중단 (방 입장 시 검색 중단 — 사용자 요청).
+      await _stopSearch();
+      final error = await widget.onConnect(ip, port, code);
+      // sheet 닫기를 다음 frame으로 미룸 — 같은 frame에 PlayerScreen setState
+      // (mode=speaker)와 Navigator.pop(sheetContext)이 동시 발생 시 'child.owner
+      // == owner' BuildOwner mismatch가 났던 사례(사용자 실측) 회피.
+      if (error == null && mounted) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (mounted) widget.onSuccess();
+        });
+      } else if (error != null && mounted) {
+        // inline 표시 — SnackBar는 BottomSheet에 가려서 안 보임(사용자 실측).
+        setState(() => _lastError = error);
+      }
+    } finally {
+      if (mounted) setState(() => _isConnecting = false);
+    }
+  }
+
+  bool _isValidIPv4(String s) {
+    final parts = s.split('.');
+    if (parts.length != 4) return false;
+    for (final p in parts) {
+      if (p.isEmpty || p.length > 3) return false;
+      final n = int.tryParse(p);
+      if (n == null || n < 0 || n > 255) return false;
+    }
+    return true;
+  }
+
+  Future<String?> _askCode() async {
+    // _CodeInputDialog StatefulWidget으로 controller 자체 관리 → dispose 시점
+    // _dependents.isEmpty assertion 회피. pop 직전 unfocus로 키보드 layer 정리.
+    return showDialog<String>(
+      context: context,
+      builder: (ctx) => const _CodeInputDialog(),
+    );
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      mainAxisSize: MainAxisSize.min,
+      children: [
+        // 검색 버튼 토글 + 결과 리스트
+        Row(
+          children: [
+            Expanded(
+              child: OutlinedButton.icon(
+                onPressed: _isConnecting ? null : _toggleSearch,
+                icon: Icon(_isSearching ? Icons.stop : Icons.search),
+                label: Text(_isSearching ? '검색 중단' : '호스트 검색'),
+              ),
+            ),
+          ],
+        ),
+        if (_isSearching || _hosts.isNotEmpty) ...[
+          const SizedBox(height: 8),
+          ConstrainedBox(
+            constraints: const BoxConstraints(maxHeight: 180),
+            child: _hosts.isEmpty
+                ? Padding(
+                    padding: const EdgeInsets.all(16),
+                    child: Center(
+                      child: Text(
+                        _isSearching ? '주변 방을 찾는 중...' : '방을 찾을 수 없습니다',
+                        style: TextStyle(
+                          fontSize: 13,
+                          color: Theme.of(context)
+                              .colorScheme
+                              .onSurface
+                              .withValues(alpha: 0.5),
+                        ),
+                      ),
+                    ),
+                  )
+                : ListView.separated(
+                    shrinkWrap: true,
+                    itemCount: _hosts.length,
+                    separatorBuilder: (_, _) => const Divider(height: 1),
+                    itemBuilder: (_, i) {
+                      final h = _hosts[i];
+                      return ListTile(
+                        dense: true,
+                        leading: const Icon(Icons.cast),
+                        title: Text(h.name, maxLines: 1),
+                        subtitle: Text(h.ip, maxLines: 1),
+                        onTap: _isConnecting
+                            ? null
+                            : () => _promptCodeAndConnect(
+                                ip: h.ip, port: h.port),
+                      );
+                    },
+                  ),
+          ),
+        ],
+        const SizedBox(height: 12),
+        const Text('또는 IP 직접 입력', style: TextStyle(fontSize: 12)),
+        const SizedBox(height: 4),
+        Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _ipController,
+                enabled: !_isConnecting,
+                keyboardType: TextInputType.numberWithOptions(decimal: true),
+                decoration: const InputDecoration(
+                  hintText: '192.168.x.x',
+                  isDense: true,
+                  border: OutlineInputBorder(),
+                ),
+              ),
+            ),
+            const SizedBox(width: 8),
+            ElevatedButton(
+              onPressed: _isConnecting
+                  ? null
+                  : () async {
+                      final ip = _ipController.text.trim();
+                      if (ip.isEmpty) return;
+                      // IP 형식 검증 후에만 코드 다이얼로그 띄움 — 잘못된 IP에 코드
+                      // 입력하는 번거로움 회피 (사용자 요청).
+                      if (!_isValidIPv4(ip)) {
+                        setState(() => _lastError = '올바른 IP 주소를 입력하세요');
+                        return;
+                      }
+                      await _promptCodeAndConnect(
+                          ip: ip, port: P2PService.defaultPort);
+                    },
+              child: const Text('연결'),
+            ),
+          ],
+        ),
+        if (_isConnecting) ...[
+          const SizedBox(height: 8),
+          const LinearProgressIndicator(minHeight: 2),
+        ],
+        if (_lastError != null) ...[
+          const SizedBox(height: 8),
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: Theme.of(context).colorScheme.errorContainer,
+              borderRadius: BorderRadius.circular(4),
+            ),
+            child: Row(
+              children: [
+                Icon(Icons.error_outline,
+                    size: 18,
+                    color: Theme.of(context).colorScheme.onErrorContainer),
+                const SizedBox(width: 8),
+                Expanded(
+                  child: Text(
+                    _lastError!,
+                    style: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(context).colorScheme.onErrorContainer,
+                    ),
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ],
+      ],
+    );
+  }
+}
+
+class _CodeInputDialog extends StatefulWidget {
+  const _CodeInputDialog();
+
+  @override
+  State<_CodeInputDialog> createState() => _CodeInputDialogState();
+}
+
+class _CodeInputDialogState extends State<_CodeInputDialog> {
+  late final TextEditingController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = TextEditingController();
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  void _submit() {
+    // 키보드 unfocus 후 pop — focus layer가 남은 채 dialog가 unmount되면
+    // InheritedElement의 _dependents가 비지 않은 상태로 dispose되어 framework
+    // assertion 발생 (사용자 실측). 명시적 unfocus로 회피.
+    FocusManager.instance.primaryFocus?.unfocus();
+    Navigator.pop(context, _controller.text.trim());
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: const Text('입장 코드'),
+      content: TextField(
+        controller: _controller,
+        autofocus: true,
+        keyboardType: TextInputType.number,
+        maxLength: 4,
+        decoration: const InputDecoration(
+          hintText: '4자리 숫자',
+          counterText: '',
+        ),
+        onSubmitted: (_) => _submit(),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () {
+            FocusManager.instance.primaryFocus?.unfocus();
+            Navigator.pop(context);
+          },
+          child: const Text('취소'),
+        ),
+        TextButton(
+          onPressed: _submit,
+          child: const Text('연결'),
+        ),
+      ],
     );
   }
 }

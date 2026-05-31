@@ -299,7 +299,9 @@ class _RoomScreenState extends ConsumerState<RoomScreen>
     Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (_) => PlayerScreen(isHost: widget.isHost),
+        builder: (_) => PlayerScreen(
+          initialMode: widget.isHost ? PlayerMode.host : PlayerMode.speaker,
+        ),
       ),
     );
   }

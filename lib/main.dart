@@ -55,7 +55,7 @@ class SynchorusApp extends StatelessWidget {
               mode: _autoMeasureMode,
               durationSec: _autoMeasureDurationSec,
             )
-          : const PlayerScreen(isHost: true),
+          : const PlayerScreen(),
     );
   }
 }

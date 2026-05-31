@@ -109,6 +109,10 @@ class NativeAudioSyncService {
   // ── UI 스트림 ─────────────────────────────────────────────
   final _positionController = StreamController<Duration>.broadcast();
   final _durationController = StreamController<Duration?>.broadcast();
+  // §H/§I 외부 변경(스피커 모드 게스트가 호스트로부터 audio-pitch/audio-tempo/audio-url
+  // 수신) 시 UI 갱신용. 호스트 본인 슬라이더 변경 시에도 emit해서 일관 처리.
+  final _transposeCentsController = StreamController<int>.broadcast();
+  final _playbackSpeedController = StreamController<int>.broadcast();
   Duration? _currentDuration;
   final _playingController = StreamController<bool>.broadcast();
   final _loadingController = StreamController<bool>.broadcast();
@@ -117,6 +121,8 @@ class NativeAudioSyncService {
 
   Stream<Duration> get positionStream => _positionController.stream;
   Stream<Duration?> get durationStream => _durationController.stream;
+  Stream<int> get transposeCentsStream => _transposeCentsController.stream;
+  Stream<int> get playbackSpeedStream => _playbackSpeedController.stream;
   Duration? get currentDuration => _currentDuration;
   Stream<bool> get playingStream => _playingController.stream;
   Stream<bool> get loadingStream => _loadingController.stream;
@@ -193,12 +199,16 @@ class NativeAudioSyncService {
       } else if (type == 'decode-load-report' && _isHost) {
         _handleDecodeLoadReport(message);
       } else if (type == 'audio-pitch' && !_isHost) {
-        // §H Transpose. 호스트 cents 변경 → 게스트 native engine에 적용.
+        // §H Transpose. 호스트 cents 변경 → 게스트 native engine + Dart 상태 + UI 갱신.
         final cents = (message['data']?['cents'] as num?)?.toInt() ?? 0;
+        _transposeCents = cents;
+        _transposeCentsController.add(cents);
         await _engine.setSemitoneCents(cents);
       } else if (type == 'audio-tempo' && !_isHost) {
         // §I 속도. 호스트 변경 → 게스트 동일 적용.
         final v = (message['data']?['speedX1000'] as num?)?.toInt() ?? 1000;
+        _playbackSpeedX1000 = v;
+        _playbackSpeedController.add(v);
         await _engine.setPlaybackSpeedX1000(v);
       }
     } catch (e) {
@@ -290,6 +300,34 @@ class NativeAudioSyncService {
   Future<void> _stopFileServer() async {
     await _httpServer?.close(force: true);
     _httpServer = null;
+  }
+
+  /// 호스트 모드 진입 시 HTTP 파일 서버 재바인딩 (HISTORY (105) audio-url 미전파 fix).
+  /// 단독 모드에서 파일 로드된 채로 호스트 모드로 전환하면 `_currentUrl`이 null인
+  /// 경우가 있음 (WiFi 없어서 `_startFileServer`가 null 반환). 이 시점에 호출하면
+  /// HTTP 서버 재시작 + `_currentUrl` 갱신 + 곧 들어올 게스트 대비 audio-url broadcast.
+  /// 파일 안 로드된 상태(`_storedSafeName=null`)면 no-op.
+  Future<void> rebindFileServerIfNeeded() async {
+    final safeName = _storedSafeName;
+    final originalName = _currentFileName;
+    if (safeName == null || originalName == null) return;
+
+    final tempDir = await getTemporaryDirectory();
+    final httpUrl = await _startFileServer(tempDir.path, safeName);
+    if (httpUrl == null) return;
+
+    _currentUrl = '$httpUrl?v=${DateTime.now().millisecondsSinceEpoch}';
+
+    _p2p.broadcastToAll({
+      'type': 'audio-url',
+      'data': {
+        'url': _currentUrl,
+        'playing': _playing,
+        'fileName': originalName,
+        'transposeCents': _transposeCents,
+        'playbackSpeedX1000': _playbackSpeedX1000,
+      },
+    });
   }
 
   /// WiFi IP 조회. NetworkInterface.list()에서 WiFi 인터페이스명(wlan/en) + 사설 IP 우선.
@@ -590,6 +628,7 @@ class NativeAudioSyncService {
   Future<void> setTransposeCents(int cents) async {
     final clamped = cents.clamp(-2400, 2400);
     _transposeCents = clamped;
+    _transposeCentsController.add(clamped);
     await _engine.setSemitoneCents(clamped);
     _p2p.broadcastToAll({
       'type': 'audio-pitch',
@@ -605,6 +644,7 @@ class NativeAudioSyncService {
   Future<void> setPlaybackSpeedX1000(int speedX1000) async {
     final clamped = speedX1000.clamp(500, 2000);
     _playbackSpeedX1000 = clamped;
+    _playbackSpeedController.add(clamped);
     await _engine.setPlaybackSpeedX1000(clamped);
     _p2p.broadcastToAll({
       'type': 'audio-tempo',
@@ -864,10 +904,15 @@ class NativeAudioSyncService {
     var url = data['url'] as String;
     final hostPlaying = data['playing'] as bool? ?? false;
     // §H Transpose 초기값 — 늦게 들어온 게스트도 호스트 현재 cents 적용.
+    // Dart 상태 + stream도 같이 갱신해야 게스트 UI 표시가 정확 (이전엔 native만 적용).
     final initCents = (data['transposeCents'] as num?)?.toInt() ?? 0;
+    _transposeCents = initCents;
+    _transposeCentsController.add(initCents);
     await _engine.setSemitoneCents(initCents);
     // §I 속도 초기값.
     final initSpeed = (data['playbackSpeedX1000'] as num?)?.toInt() ?? 1000;
+    _playbackSpeedX1000 = initSpeed;
+    _playbackSpeedController.add(initSpeed);
     await _engine.setPlaybackSpeedX1000(initSpeed);
 
     // ── 이전 다운로드 취소 ──────────────────────────────────────
@@ -1281,6 +1326,12 @@ class NativeAudioSyncService {
   Future<void> _startGuestPlayback() async {
     if (_playing) {
       debugPrint('[GUEST] _startGuestPlayback: already playing, skip');
+      return;
+    }
+    // sync 안 됐으면 재생 보류 — 부정확한 alignment로 시작 방지(사용자 합의).
+    // sync 완료 후 다음 audio-obs(500ms 주기) 도달 시 자동 재시도.
+    if (!_sync.isSynced) {
+      debugPrint('[GUEST] _startGuestPlayback: sync not ready, defer');
       return;
     }
     debugPrint('[GUEST] _startGuestPlayback: calling engine.start()');
@@ -1842,8 +1893,10 @@ class NativeAudioSyncService {
     _activeHttpClient?.close(force: true);
     _activeHttpClient = null;
     _isLoading = false;
+    _loadingController.add(false);
     _audioReady = false;
     _playing = false;
+    _playingController.add(false);
     _seekOverrideTimer?.cancel();
     _seekOverridePosition = null;
     _messageSub?.cancel();
@@ -1858,6 +1911,9 @@ class NativeAudioSyncService {
     _storedSafeName = null;
     _currentFileName = null;
     _currentUrl = null;
+    _currentDuration = null;
+    _durationController.add(null);
+    _positionController.add(Duration.zero);
     unawaited(_logger.stop());
   }
 
@@ -1892,6 +1948,8 @@ class NativeAudioSyncService {
     cleanupSync();
     _positionController.close();
     _durationController.close();
+    _transposeCentsController.close();
+    _playbackSpeedController.close();
     _playingController.close();
     _loadingController.close();
     _downloadProgressController.close();

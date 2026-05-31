@@ -191,7 +191,7 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
       // deviceId(UUID)로 stale 매칭하므로 같은 모델 충돌 0. name은 UI 표시 전용.
       final guestName = await _resolveDeviceName();
       final deviceId = await _resolveDeviceId();
-      await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId);
+      await p2p.connectToHost(host.ip, host.port, guestName, deviceId: deviceId, roomCode: host.roomCode);
 
       int peerCount = 1;
       try {
@@ -411,7 +411,10 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
 
       final guestName = await _resolveDeviceName();
       final deviceId = await _resolveDeviceId();
-      await p2p.connectToHost(ip, P2PService.defaultPort, guestName, deviceId: deviceId);
+      // HomeScreen IP 직접 입력은 Phase 6에서 PlayerScreen으로 이식 후 dead route 예정.
+      // 그 때 IP+코드 함께 입력받는 UI로 교체. 현 단계에선 임시로 빈 코드 전달 →
+      // 호스트가 reject (catch 분기에서 SnackBar 안내).
+      await p2p.connectToHost(ip, P2PService.defaultPort, guestName, deviceId: deviceId, roomCode: '');
 
       String roomCode = '----';
       int peerCount = 1;

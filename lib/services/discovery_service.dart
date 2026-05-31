@@ -49,22 +49,37 @@ class DiscoveryService {
     required int tcpPort,
     required String roomCode,
   }) async {
-    await stop();
-    _registration = await nsd.register(nsd.Service(
-      name: hostName,
-      type: serviceType,
-      port: tcpPort,
-      txt: {
-        _txtRoomCodeKey: Uint8List.fromList(utf8.encode(roomCode)),
-      },
-    ));
+    // ignore: avoid_print
+    print('[DISCOVERY] startBroadcast: name=$hostName port=$tcpPort code=$roomCode');
+    // 이전 호스트 등록만 정리 (게스트 검색은 별개 — 같은 디바이스에서 검색 활성이
+    // 가능성은 낮지만 안전상).
+    await stopBroadcast();
+    try {
+      _registration = await nsd.register(nsd.Service(
+        name: hostName,
+        type: serviceType,
+        port: tcpPort,
+        txt: {
+          _txtRoomCodeKey: Uint8List.fromList(utf8.encode(roomCode)),
+        },
+      ));
+      // ignore: avoid_print
+      print('[DISCOVERY] startBroadcast OK: registered=${_registration != null}');
+    } catch (e) {
+      // ignore: avoid_print
+      print('[DISCOVERY] startBroadcast FAILED: $e');
+      rethrow;
+    }
   }
 
   /// 게스트: 같은 LAN의 호스트 서비스를 mDNS browse.
   /// `addresses`에 IPv4가 들어오면 emit. 같은 호스트가 여러 번 found될 수 있어
   /// 호출자가 중복 처리 책임.
   Stream<DiscoveredHost> discoverHosts() async* {
-    await stop();
+    // ignore: avoid_print
+    print('[DISCOVERY] discoverHosts: starting nsd discovery type=$serviceType');
+    // 이전 검색만 정리 (광고는 영향 없음).
+    await stopDiscovery();
     final controller = StreamController<DiscoveredHost>();
     _hostController = controller;
 
@@ -74,7 +89,11 @@ class DiscoveryService {
         serviceType,
         ipLookupType: nsd.IpLookupType.any,
       );
+      // ignore: avoid_print
+      print('[DISCOVERY] discoverHosts: startDiscovery OK');
     } catch (e) {
+      // ignore: avoid_print
+      print('[DISCOVERY] discoverHosts FAILED to start: $e');
       controller.addError(e);
       await controller.close();
       _hostController = null;
@@ -127,6 +146,8 @@ class DiscoveryService {
         port: port,
         roomCode: roomCode,
       );
+      // ignore: avoid_print
+      print('[DISCOVERY] discoverHosts found: name=${host.name} ip=${host.ip}:${host.port} code=$roomCode');
       _knownHosts[serviceName] = host;
       controller.add(host);
     });
@@ -134,13 +155,21 @@ class DiscoveryService {
     yield* controller.stream;
   }
 
-  Future<void> stop() async {
+  /// 호스트 광고만 정지. 게스트 검색은 영향 없음.
+  Future<void> stopBroadcast() async {
     if (_registration != null) {
       try {
         await nsd.unregister(_registration!);
       } catch (_) {}
       _registration = null;
     }
+  }
+
+  /// 게스트 검색만 정지. 호스트 광고는 영향 없음.
+  /// _SpeakerModePicker.dispose에서 이 메서드 호출 — 이전 stop() 호출로 호스트
+  /// 광고까지 같이 정지되던 회귀(사용자 실측, BottomSheet rebuild로 picker dispose
+  /// 시 호스트 광고도 제거) fix.
+  Future<void> stopDiscovery() async {
     if (_discovery != null) {
       try {
         await nsd.stopDiscovery(_discovery!);
@@ -153,6 +182,12 @@ class DiscoveryService {
     if (c != null && !c.isClosed) {
       await c.close();
     }
+  }
+
+  /// 광고 + 검색 모두 정지 (호스트 모드 종료 등).
+  Future<void> stop() async {
+    await stopBroadcast();
+    await stopDiscovery();
   }
 
   Future<void> dispose() async {

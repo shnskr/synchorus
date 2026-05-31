@@ -108,7 +108,7 @@
 - ✅ v0.0.88 단독 모드 loadFile WiFi IP 가드 완화 (HISTORY (105))
 - ✅ v0.0.89 A-B 구간 반복 (호스트 전용, 효과적 A=0/B=duration, 새 지정 우선 충돌 처리, long-press 1점 해제 + 햅틱, 시크바 위 마커, [A, B] clamp, HISTORY (106))
 - ✅ v0.0.90 seek 메모리 3슬롯 + 마커 색상/위치 분리 + 영역 reserve (HISTORY (107))
-- ⏳ 단독 모드 → P2P 전환 시 audio-url 재시작 흐름 (HISTORY (105) 미해결 이슈)
+- ✅ **v0.0.95 P2P 동선 통합 (HISTORY (112))** — group_add → BottomSheet 안에서 호스트/스피커 선택 + 정보 카드 + 종료까지 단일 화면. RoomScreen 거치지 않음. 입장 코드 검증 + IP 검증 + 호스트 ping. 단독↔P2P 전환 시 audio-url 재바인딩(HISTORY (105) 자연 해소). 게스트 transpose/speed UI 정합성 + sync 직렬 처리 + cleanupSync stream emit + 시크바 hasAudio 가드. 검증 통과(SM-S947N + S22).
 - ✅ **방 만들기 WiFi 미연결 silent fail fix (v0.0.94, HISTORY (111))** — 2026-05-29 v0.0.90 SM-S947N "방 만들기 클릭 무반응" 보고는 사용자 진단으로 WiFi 미연결이 root cause로 확인. `_createRoom` 진입 시 `NativeAudioSyncService.getLocalIP()` 사전 체크 + SnackBar "WiFi 연결이 필요합니다" 안내로 마감. iOS 제어센터 WiFi 토글 케이스도 IP 직접 체크라 robust.
 
 **🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
@@ -129,7 +129,7 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
-- ⏳ 방 만들기 / 참가 동선 UI 위치 — 사용자 결정 대기. 현재 PlayerScreen AppBar `group_add` IconButton → HomeScreen 임시 동선.
+- ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 완료 (HISTORY (112))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen은 dead route 후보(Phase 6에서 폐기 예정).
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
 
 **§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms, G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR.
