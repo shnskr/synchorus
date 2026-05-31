@@ -83,6 +83,12 @@ import UIKit
                 result(nil)
             case "getSemitoneCents":
                 result(self.audioEngine.getSemitoneCents())
+            case "setPlaybackSpeedX1000":
+                let v = (call.arguments as? NSNumber)?.intValue ?? 1000
+                self.audioEngine.setPlaybackSpeedX1000(v)
+                result(nil)
+            case "getPlaybackSpeedX1000":
+                result(self.audioEngine.getPlaybackSpeedX1000())
             default:
                 result(FlutterMethodNotImplemented)
             }

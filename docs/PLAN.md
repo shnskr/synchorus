@@ -121,10 +121,13 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ✅ PoC step 2 (callback 안 처리 = silence padding 한계 객관적 확정)
 - ✅ PoC step 3 (Worker thread + lock-free SPSC ring = 청감 click 0 통과)
 - ✅ **v0.0.91 본 앱 통합 (HISTORY (108))** — Android worker thread + iOS AVAudioUnitTimePitch + Dart/UI/P2P 모두. cents=0 bypass.
+- ✅ **v0.0.92 §I 속도 조절 추가 (HISTORY (109))** — SoundTouch setTempo + AVAudioUnitTimePitch.rate, 0.5~2.0x, 5% step, 동일 worker thread 인프라.
+- ⏳ **edge case 검증** (시크바/A-B/메모리/5초/일시정지/transpose+속도 조합) — 다음 세션
 - ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정)
 - ⏳ 30분 stress + 측정 보고서
 - ⏳ iOS 실기기 검증
-- ⏳ P2P 게스트 동기화 실측 (호스트 transpose 변경 → 게스트 동일 적용)
+- ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼.
+- ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
 - ⏳ 방 만들기 / 참가 동선 UI 위치 — 사용자 결정 대기. 현재 PlayerScreen AppBar `group_add` IconButton → HomeScreen 임시 동선.
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.

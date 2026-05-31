@@ -11,6 +11,7 @@ class AudioEngine {
     private let timePitch = AVAudioUnitTimePitch()
     private var timePitchAttached = false
     private var pitchCents: Int = 0
+    private var playbackSpeedX1000: Int = 1000
 
     private var sampleRate: Double = 48000
     private var seekFrameOffset: Int64 = 0
@@ -351,6 +352,17 @@ class AudioEngine {
 
     func getSemitoneCents() -> Int {
         return pitchCents
+    }
+
+    /// §I 속도. 정수 x1000 (500~2000 = 0.5x~2.0x). pitch 유지.
+    func setPlaybackSpeedX1000(_ speedX1000: Int) {
+        let clamped = max(500, min(2000, speedX1000))
+        playbackSpeedX1000 = clamped
+        timePitch.rate = Float(clamped) / 1000.0
+    }
+
+    func getPlaybackSpeedX1000() -> Int {
+        return playbackSpeedX1000
     }
 
     func setMuted(_ muted: Bool) {

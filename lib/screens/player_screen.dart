@@ -67,14 +67,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     audio.startListening(isHost: widget.isHost);
     handler.attachSyncService(audio, isHost: widget.isHost);
 
-    // A-B 반복 + seek 메모리 + §H transpose: 호스트만. 파일 변경 시 모두 reset.
+    // A-B 반복 + seek 메모리 + §H transpose + §I 속도: 호스트만. 파일 변경 시 reset.
     if (widget.isHost) {
       _positionSub = audio.positionStream.listen(_onAbPositionTick);
       _durationSub = audio.durationStream.listen((_) {
         final hasAny = _abPointA != null ||
             _abPointB != null ||
             _seekSlots.any((s) => s != null) ||
-            audio.transposeCents != 0;
+            audio.transposeCents != 0 ||
+            audio.playbackSpeedX1000 != 1000;
         if (hasAny) {
           setState(() {
             _abPointA = null;
@@ -82,6 +83,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             _seekSlots = List<Duration?>.filled(3, null);
           });
           audio.setTransposeCents(0);
+          audio.setPlaybackSpeedX1000(1000);
         }
       });
     }
@@ -303,7 +305,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               // 시크바 + 시간
               _buildSeekBar(),
 
-              // A-B 구간 반복 + seek 메모리 + §H transpose (호스트만)
+              // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도 (호스트만)
               if (widget.isHost) ...[
                 const SizedBox(height: 8),
                 _buildAbControls(),
@@ -311,6 +313,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 _buildSeekSlots(),
                 const SizedBox(height: 8),
                 _buildTransposeControls(),
+                const SizedBox(height: 8),
+                _buildSpeedControls(),
               ],
 
               const SizedBox(height: 16),
@@ -796,6 +800,97 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   void _resetTranspose() {
     HapticFeedback.mediumImpact();
     _audio.setTransposeCents(0);
+    setState(() {});
+  }
+
+  Widget _buildSpeedControls() {
+    final hasAudio = _audio.currentFileName != null;
+    final speed = _audio.playbackSpeed;
+    final label = '${speed.toStringAsFixed(2)}x';
+    final isDefault = _audio.playbackSpeedX1000 == 1000;
+    final scheme = Theme.of(context).colorScheme;
+    return Column(
+      children: [
+        Row(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Text(
+              'SPEED',
+              style: TextStyle(
+                fontSize: 10,
+                letterSpacing: 1.2,
+                color: scheme.onSurface.withValues(alpha: 0.6),
+              ),
+            ),
+            const SizedBox(width: 12),
+            GestureDetector(
+              onLongPress: (hasAudio && !isDefault) ? _resetSpeed : null,
+              child: SizedBox(
+                width: 52,
+                child: Center(
+                  child: Text(
+                    label,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.bold,
+                      color: !isDefault ? scheme.primary : null,
+                      fontFeatures: const [FontFeature.tabularFigures()],
+                    ),
+                  ),
+                ),
+              ),
+            ),
+          ],
+        ),
+        Row(
+          children: [
+            IconButton(
+              icon: const Icon(Icons.remove),
+              iconSize: 20,
+              onPressed: hasAudio && _audio.playbackSpeedX1000 > 500
+                  ? () => _adjustSpeed(-50)
+                  : null,
+            ),
+            Expanded(
+              child: Slider(
+                min: 500,
+                max: 2000,
+                divisions: 30, // 5% step
+                value: _audio.playbackSpeedX1000.toDouble().clamp(500.0, 2000.0),
+                onChanged: hasAudio
+                    ? (v) {
+                        final newVal = (v / 50).round() * 50;
+                        if (newVal != _audio.playbackSpeedX1000) {
+                          _audio.setPlaybackSpeedX1000(newVal);
+                          setState(() {});
+                        }
+                      }
+                    : null,
+              ),
+            ),
+            IconButton(
+              icon: const Icon(Icons.add),
+              iconSize: 20,
+              onPressed: hasAudio && _audio.playbackSpeedX1000 < 2000
+                  ? () => _adjustSpeed(50)
+                  : null,
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  void _adjustSpeed(int deltaX1000) {
+    final current = _audio.playbackSpeedX1000;
+    final next = (current + deltaX1000).clamp(500, 2000);
+    _audio.setPlaybackSpeedX1000(next);
+    setState(() {});
+  }
+
+  void _resetSpeed() {
+    HapticFeedback.mediumImpact();
+    _audio.setPlaybackSpeedX1000(1000);
     setState(() {});
   }
 

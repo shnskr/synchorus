@@ -199,6 +199,15 @@ class NativeAudioService {
     return await _channel.invokeMethod<int>('getSemitoneCents') ?? 0;
   }
 
+  /// §I 속도. speedX1000 정수 (500~2000 = 0.5x~2.0x). pitch 유지.
+  Future<void> setPlaybackSpeedX1000(int speedX1000) async {
+    await _channel.invokeMethod('setPlaybackSpeedX1000', speedX1000);
+  }
+
+  Future<int> getPlaybackSpeedX1000() async {
+    return await _channel.invokeMethod<int>('getPlaybackSpeedX1000') ?? 1000;
+  }
+
   /// 주기적 타임스탬프 폴링 시작.
   void startPolling({Duration interval = const Duration(milliseconds: 100)}) {
     stopPolling();

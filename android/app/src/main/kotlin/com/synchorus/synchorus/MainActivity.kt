@@ -109,6 +109,14 @@ class MainActivity : AudioServiceActivity() {
                     "getSemitoneCents" -> {
                         result.success(NativeAudio.nativeGetSemitoneCents())
                     }
+                    "setPlaybackSpeedX1000" -> {
+                        val v = (call.arguments as? Number)?.toInt() ?: 1000
+                        NativeAudio.nativeSetPlaybackSpeedX1000(v)
+                        result.success(null)
+                    }
+                    "getPlaybackSpeedX1000" -> {
+                        result.success(NativeAudio.nativeGetPlaybackSpeedX1000())
+                    }
                     else -> result.notImplemented()
                 }
             }

@@ -148,6 +148,13 @@ public:
                     mSemitoneCents.load(std::memory_order_acquire) / 100.0f);
                 mSTOutRing.clear();
             }
+            if (mTempoDirty.exchange(false, std::memory_order_acq_rel)) {
+                // tempo만 변경 (pitch 유지). clear는 잔재 빨리 비워 응답성 ↑.
+                mST.clear();
+                mST.setTempo(
+                    mPlaybackSpeedX1000.load(std::memory_order_acquire) / 1000.0f);
+                mSTOutRing.clear();
+            }
             // input ring에서 batch 만큼 pop.
             const size_t inAvail = mSTInRing.available();
             if (inAvail < kSTWorkerBatchFrames) {
@@ -655,6 +662,18 @@ public:
         return mSemitoneCents.load(std::memory_order_acquire);
     }
 
+    /// §I 속도(tempo) 조절. 0.5x ~ 2.0x. pitch 유지 (transpose와 독립).
+    /// API: speedX1000 정수(500~2000). 1000 = 1.0배속.
+    void setPlaybackSpeedX1000(int speedX1000) {
+        const int clamped = std::max(500, std::min(2000, speedX1000));
+        mPlaybackSpeedX1000.store(clamped, std::memory_order_release);
+        mTempoDirty.store(true, std::memory_order_release);
+    }
+
+    int getPlaybackSpeedX1000() const {
+        return mPlaybackSpeedX1000.load(std::memory_order_acquire);
+    }
+
     /// NTP-style 예약 재생 (v0.0.47). data callback 안에서 wall clock과 비교 →
     /// 예약 시각 도달 시 정상 출력 시작 (그 전엔 silent + vf 동결).
     /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
@@ -787,17 +806,24 @@ public:
         const int64_t totalFrames = mDecodedTotalFrames;
         const int64_t capFrames = mRingCapacityFrames;
 
-        // §H cents=0이면 bypass (기존 패턴 그대로, 음질 손실 0).
-        // cents!=0이면 mDecodedData → mSTInRing push (vf 진행) → mSTOutRing pop → output.
-        // mSTReconfigure/mPitchDirty 적용은 worker thread 단독 (race 0).
+        // §H/§I cents=0 && speed=1.0 → bypass (기존 패턴, 음질 손실 0).
+        // 그 외 → mDecodedData → mSTInRing push (vf 진행) → mSTOutRing pop → output.
+        // speed!=1.0 시 input frames = numFrames * speed (output 매 numFrames 보장).
+        // mSTReconfigure/mPitchDirty/mTempoDirty 적용은 worker thread 단독 (race 0).
         const int currentCents = mSemitoneCents.load(std::memory_order_acquire);
-        const bool useST = (outCh == 2) && (currentCents != 0);
+        const int speedX1000 = mPlaybackSpeedX1000.load(std::memory_order_acquire);
+        const bool useST = (outCh == 2) &&
+            (currentCents != 0 || speedX1000 != 1000);
 
         if (useST) {
+            // SoundTouch: input N → output N/speed. callback이 매 burst N output
+            // 받으려면 input N*speed 넣어야. vf 진행도 N*speed.
+            const int inputFrames = (numFrames * speedX1000 + 500) / 1000;
             // 1. mDecodedData → mSTInBuf (interleaved 2ch float). vf 진행.
             const size_t needSamples = static_cast<size_t>(numFrames) * 2u;
-            if (mSTInBuf.size() < needSamples) mSTInBuf.resize(needSamples);
-            for (int i = 0; i < numFrames; ++i) {
+            const size_t inSamples = static_cast<size_t>(inputFrames) * 2u;
+            if (mSTInBuf.size() < inSamples) mSTInBuf.resize(inSamples);
+            for (int i = 0; i < inputFrames; ++i) {
                 const bool decoded = vf >= ringTail && vf < ringHead;
                 for (int ch = 0; ch < 2; ++ch) {
                     float sample = 0.0f;
@@ -811,11 +837,10 @@ public:
                 }
                 ++vf;
             }
-            // 2. input ring push (worker가 다음 iteration에 pop). 실패 시 silence
-            //    드물게 발생 (ring 가득 = worker 못 따라옴).
+            // 2. input ring push (worker가 다음 iteration에 pop).
             mSTInRing.push(mSTInBuf.data(),
-                static_cast<size_t>(numFrames));
-            // 3. output ring pop → output. 부족분 silence (전환 초기 ~50ms).
+                static_cast<size_t>(inputFrames));
+            // 3. output ring pop numFrames → output. 부족분 silence.
             if (mSTOutBuf.size() < needSamples) mSTOutBuf.resize(needSamples);
             const size_t popped = mSTOutRing.pop(mSTOutBuf.data(),
                 static_cast<size_t>(numFrames));
@@ -931,7 +956,11 @@ private:
     // worker: mSTInRing pop → mST.put/receive → mSTOutRing push.
     soundtouch::SoundTouch mST;
     std::atomic<int> mSemitoneCents{0};
+    // §I 속도. mPlaybackSpeedX1000: 1.0배속 = 1000, 0.5 = 500, 2.0 = 2000 (정수
+    // atomic 사용 — float atomic 미지원 환경 회피). 적용 시 / 1000.0f.
+    std::atomic<int> mPlaybackSpeedX1000{1000};
     std::atomic<bool> mPitchDirty{false};
+    std::atomic<bool> mTempoDirty{false};
     std::atomic<bool> mSTReconfigure{false};
     std::atomic<int> mSTSampleRate{48000};
     std::vector<float> mSTInBuf;     // callback 임시 (ring read → input PCM)
@@ -1341,6 +1370,18 @@ JNIEXPORT jint JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeGetSemitoneCents(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return static_cast<jint>(engine().getSemitoneCents());
+}
+
+JNIEXPORT void JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeSetPlaybackSpeedX1000(
+    JNIEnv* /*env*/, jobject /*thiz*/, jint speedX1000) {
+    engine().setPlaybackSpeedX1000(static_cast<int>(speedX1000));
+}
+
+JNIEXPORT jint JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeGetPlaybackSpeedX1000(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return static_cast<jint>(engine().getPlaybackSpeedX1000());
 }
 
 }

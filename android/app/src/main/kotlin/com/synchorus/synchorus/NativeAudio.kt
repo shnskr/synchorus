@@ -21,4 +21,6 @@ object NativeAudio {
     external fun nativeUnload(): Boolean
     external fun nativeSetSemitoneCents(cents: Int)
     external fun nativeGetSemitoneCents(): Int
+    external fun nativeSetPlaybackSpeedX1000(speedX1000: Int)
+    external fun nativeGetPlaybackSpeedX1000(): Int
 }

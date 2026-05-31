@@ -196,6 +196,10 @@ class NativeAudioSyncService {
         // §H Transpose. 호스트 cents 변경 → 게스트 native engine에 적용.
         final cents = (message['data']?['cents'] as num?)?.toInt() ?? 0;
         await _engine.setSemitoneCents(cents);
+      } else if (type == 'audio-tempo' && !_isHost) {
+        // §I 속도. 호스트 변경 → 게스트 동일 적용.
+        final v = (message['data']?['speedX1000'] as num?)?.toInt() ?? 1000;
+        await _engine.setPlaybackSpeedX1000(v);
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -444,6 +448,7 @@ class NativeAudioSyncService {
           'playing': false,
           'fileName': originalName,
           'transposeCents': _transposeCents,
+          'playbackSpeedX1000': _playbackSpeedX1000,
         },
       });
     }
@@ -580,6 +585,21 @@ class NativeAudioSyncService {
     });
   }
 
+  // §I 속도 — 정수 x1000 (500~2000 = 0.5x ~ 2.0x).
+  int _playbackSpeedX1000 = 1000;
+  int get playbackSpeedX1000 => _playbackSpeedX1000;
+  double get playbackSpeed => _playbackSpeedX1000 / 1000.0;
+
+  Future<void> setPlaybackSpeedX1000(int speedX1000) async {
+    final clamped = speedX1000.clamp(500, 2000);
+    _playbackSpeedX1000 = clamped;
+    await _engine.setPlaybackSpeedX1000(clamped);
+    _p2p.broadcastToAll({
+      'type': 'audio-tempo',
+      'data': {'speedX1000': clamped},
+    });
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 호스트: audio-obs broadcast (500ms 주기)
   // ═══════════════════════════════════════════════════════════
@@ -644,6 +664,7 @@ class NativeAudioSyncService {
         'playing': _playing,
         'fileName': _currentFileName,
         'transposeCents': _transposeCents,
+        'playbackSpeedX1000': _playbackSpeedX1000,
       },
     });
   }
@@ -833,6 +854,9 @@ class NativeAudioSyncService {
     // §H Transpose 초기값 — 늦게 들어온 게스트도 호스트 현재 cents 적용.
     final initCents = (data['transposeCents'] as num?)?.toInt() ?? 0;
     await _engine.setSemitoneCents(initCents);
+    // §I 속도 초기값.
+    final initSpeed = (data['playbackSpeedX1000'] as num?)?.toInt() ?? 1000;
+    await _engine.setPlaybackSpeedX1000(initSpeed);
 
     // ── 이전 다운로드 취소 ──────────────────────────────────────
     _downloadAborted = true;
