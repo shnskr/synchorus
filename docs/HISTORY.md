@@ -6015,6 +6015,35 @@ v0.0.95 P2P 동선 통합 직후 follow-up 사용자 요청 폴리싱.
 
 ---
 
+### 2026-06-01 (114) — v0.0.97 Phase 6: HomeScreen/RoomScreen/RoomLifecycleCoordinator 폐기
+
+v0.0.95 P2P 동선 PlayerScreen 통합 이후 dead route 정리. 사용자 요청.
+
+**삭제 파일**:
+- `lib/screens/home_screen.dart` — group_add 진입점이 BottomSheet로 바뀐 v0.0.95부터 dead route. Phase 3 결제/로그인 등 재진입 필요 시 git history(`6af678e^`)에서 복구해 fresh로 시작.
+- `lib/screens/room_screen.dart` — PlayerScreen이 모드 + 정보 카드 + 종료까지 모두 처리. RoomScreen 진입 path 없음.
+- `lib/services/room_lifecycle_coordinator.dart` — RoomScreen에서만 사용 → RoomScreen 폐기와 함께 dead. WiFi 끊김 재접속/백그라운드 재동기화 등 로직은 PlayerScreen에 이식 시 git history에서 복구 + 적용.
+
+**의존성**:
+- 다른 코드 import 없음 (v0.0.95에서 player_screen은 이미 import 정리됨)
+- auto_measure_screen 주석에 HomeScreen/RoomScreen 참조만 있고 코드 의존 X — 주석은 그대로 (이름 변경 시점에 같이 정리)
+- `flutter analyze` No issues
+
+**변경 파일**:
+- `lib/screens/home_screen.dart` — 삭제
+- `lib/screens/room_screen.dart` — 삭제
+- `lib/services/room_lifecycle_coordinator.dart` — 삭제
+- `pubspec.yaml` 0.0.96+1 → 0.0.97+1
+
+**미해결 후속 (별도 트랙)**:
+- `RoomLifecycleCoordinator` 핵심 기능(WiFi 끊김 자동 재접속, 백그라운드 진입 후 재동기화)을 PlayerScreen에 이식 — UI 안내(자리 비움 배너 등)는 사용자 요청으로 제외. git history `9deaea3^:lib/services/room_lifecycle_coordinator.dart`에서 복구 시작.
+
+**회귀 위험**: 매우 낮음. dead code 제거뿐 — 동작 변경 0.
+
+**빌드**: v0.0.97
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

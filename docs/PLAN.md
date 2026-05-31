@@ -129,7 +129,7 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
-- ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 완료 (HISTORY (112))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen은 dead route 후보(Phase 6에서 폐기 예정).
+- ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 + v0.0.97에서 dead route 정리 완료 (HISTORY (112)/(114))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen/RoomLifecycleCoordinator 3개 삭제. RoomLifecycleCoordinator 핵심 기능 이식은 별도 트랙.
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
 
 **§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms, G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR.
