@@ -10,6 +10,7 @@ import 'package:shared_preferences/shared_preferences.dart';
 
 import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
+import '../services/native_audio_sync_service.dart';
 import '../services/p2p_service.dart';
 import 'room_screen.dart';
 
@@ -87,6 +88,21 @@ class _HomeScreenState extends ConsumerState<HomeScreen> {
   /// 방 만들기 (호스트)
   Future<void> _createRoom() async {
     _stopDiscovery();
+
+    // WiFi 미연결 시 silent fail 방지 (2026-05-31, HISTORY (110) 후속).
+    // mDNS 등록 자체는 인터페이스 없어도 일부 진행되지만 IP 못 받으면 게스트가
+    // 방을 찾아도 접속 불가 → 호스트 입장에선 무반응처럼 보임. 사전에 안내.
+    // connectivity_plus 대신 NetworkInterface 사설 IP 직접 체크 — iOS 제어센터
+    // WiFi 토글에서 connectivity가 'none' 미발화하는 케이스 우회 (CLAUDE.md note).
+    final ip = await NativeAudioSyncService.getLocalIP();
+    if (ip == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('WiFi 연결이 필요합니다')),
+        );
+      }
+      return;
+    }
 
     final p2p = ref.read(p2pServiceProvider);
     final discovery = ref.read(discoveryServiceProvider);

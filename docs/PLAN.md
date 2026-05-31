@@ -109,7 +109,7 @@
 - ✅ v0.0.89 A-B 구간 반복 (호스트 전용, 효과적 A=0/B=duration, 새 지정 우선 충돌 처리, long-press 1점 해제 + 햅틱, 시크바 위 마커, [A, B] clamp, HISTORY (106))
 - ✅ v0.0.90 seek 메모리 3슬롯 + 마커 색상/위치 분리 + 영역 reserve (HISTORY (107))
 - ⏳ 단독 모드 → P2P 전환 시 audio-url 재시작 흐름 (HISTORY (105) 미해결 이슈)
-- ⏳ **방 만들기 (S26+ 케이스) UI 무반응 진단** — 2026-05-29 v0.0.90 SM-S947N에서 PlayerScreen → group_add → HomeScreen → 방 만들기 클릭 무반응 보고. logcat에 mDNS 등록(`MdnsAdvertiser: roomCode=2306, port=41235`) 성공 보임 → RoomScreen navigate가 안 됐거나 진입 후 UI 동결 의심. 정확한 시점 + 무선 이어폰 stream invalid 잔재와 관계 확인 필요.
+- ✅ **방 만들기 WiFi 미연결 silent fail fix (v0.0.94, HISTORY (111))** — 2026-05-29 v0.0.90 SM-S947N "방 만들기 클릭 무반응" 보고는 사용자 진단으로 WiFi 미연결이 root cause로 확인. `_createRoom` 진입 시 `NativeAudioSyncService.getLocalIP()` 사전 체크 + SnackBar "WiFi 연결이 필요합니다" 안내로 마감. iOS 제어센터 WiFi 토글 케이스도 IP 직접 체크라 robust.
 
 **🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
 

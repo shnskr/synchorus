@@ -223,7 +223,7 @@ class NativeAudioSyncService {
       (request) => _serveFile(request, dirPath),
       onError: (e) => debugPrint('HTTP server error: $e'),
     );
-    final ip = await _getLocalIP();
+    final ip = await getLocalIP();
     if (ip == null) {
       await _stopFileServer();
       return null;
@@ -293,7 +293,8 @@ class NativeAudioSyncService {
   }
 
   /// WiFi IP 조회. NetworkInterface.list()에서 WiFi 인터페이스명(wlan/en) + 사설 IP 우선.
-  static Future<String?> _getLocalIP() async {
+  /// public — HomeScreen 등에서 WiFi 연결 사전 체크용으로도 사용.
+  static Future<String?> getLocalIP() async {
     try {
       String? privateAddr;
       for (final iface in await NetworkInterface.list(
