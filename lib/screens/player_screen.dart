@@ -1144,14 +1144,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('P2P 모드 선택',
+          const Text('모드 선택',
               style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
               textAlign: TextAlign.center),
           const SizedBox(height: 16),
-          ElevatedButton.icon(
+          OutlinedButton.icon(
             // sheet 닫지 않고 호스트 진입 — _enterHostMode 안 _setStateAndSheet
-            // (_mode=host)이 sheet rebuild → switch에서 _buildHostSheet으로 전환
-            // (정보 카드 + 종료 버튼). 사용자가 정보 카드를 그 자리에서 확인 가능.
+            // (_mode=host)이 sheet rebuild → switch에서 _buildHostSheet으로 전환.
+            // OutlinedButton — 스피커 검색 버튼과 시각 통일 (사용자 요청).
             onPressed: () => _enterHostMode(),
             icon: const Icon(Icons.cast_connected),
             label: const Padding(
@@ -1693,8 +1693,10 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
         ),
         if (_isSearching || _hosts.isNotEmpty) ...[
           const SizedBox(height: 8),
-          ConstrainedBox(
-            constraints: const BoxConstraints(maxHeight: 180),
+          // 결과 영역 고정 높이 — 1개 검색되었다고 갑자기 작아지지 않도록.
+          // 여러 개 시 ListView 자체 스크롤.
+          SizedBox(
+            height: 180,
             child: _hosts.isEmpty
                 ? Padding(
                     padding: const EdgeInsets.all(16),
@@ -1712,7 +1714,6 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
                     ),
                   )
                 : ListView.separated(
-                    shrinkWrap: true,
                     itemCount: _hosts.length,
                     separatorBuilder: (_, _) => const Divider(height: 1),
                     itemBuilder: (_, i) {
