@@ -4,6 +4,7 @@ import 'dart:math';
 
 import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
+import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -123,6 +124,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     super.initState();
     _mode = widget.initialMode;
     _loadVersion();
+    // 앱 사용 중 화면 꺼짐 방지 — 음악 재생 중에도 lock screen으로 빠지지 않도록.
+    WakelockPlus.enable();
     // 단독/호스트는 sync 권한 같음(isHost=true), speaker만 isHost=false.
     final audio = ref.read(nativeAudioSyncServiceProvider);
     final handler = ref.read(audioHandlerProvider);
@@ -186,6 +189,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   void dispose() {
+    WakelockPlus.disable();
     _positionSub?.cancel();
     _durationSub?.cancel();
     _peerJoinSub?.cancel();

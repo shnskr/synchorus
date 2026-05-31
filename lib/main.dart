@@ -1,6 +1,7 @@
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'measurement/auto_measure_screen.dart';
@@ -16,6 +17,13 @@ const int _autoMeasureDurationSec =
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
+
+  // 세로 고정 — 가로 회전 시 시크바/카드 영역이 overflow되어 노란 경고 띄움.
+  await SystemChrome.setPreferredOrientations([
+    DeviceOrientation.portraitUp,
+    DeviceOrientation.portraitDown,
+  ]);
+
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
 
