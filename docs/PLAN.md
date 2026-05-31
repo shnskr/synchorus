@@ -122,7 +122,7 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ✅ PoC step 3 (Worker thread + lock-free SPSC ring = 청감 click 0 통과)
 - ✅ **v0.0.91 본 앱 통합 (HISTORY (108))** — Android worker thread + iOS AVAudioUnitTimePitch + Dart/UI/P2P 모두. cents=0 bypass.
 - ✅ **v0.0.92 §I 속도 조절 추가 (HISTORY (109))** — SoundTouch setTempo + AVAudioUnitTimePitch.rate, 0.5~2.0x, 5% step, 동일 worker thread 인프라.
-- ⏳ **edge case 검증** (시크바/A-B/메모리/5초/일시정지/transpose+속도 조합) — 다음 세션
+- ✅ **v0.0.93 edge case 검증 + state 누수 fix (HISTORY (110))** — 시나리오 1~9 단독 모드 통과. 검증 중 발견된 회귀(파일 변경/세션 진입 시 native 측 transpose/speed state 잔재) 4 layer reset으로 fix. ±12 semitone 극단 케이스도 통과.
 - ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정)
 - ⏳ 30분 stress + 측정 보고서
 - ⏳ iOS 실기기 검증

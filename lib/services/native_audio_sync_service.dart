@@ -364,6 +364,17 @@ class NativeAudioSyncService {
     _isLoading = true;
     _loadingController.add(true);
 
+    // §H/§I 파일 변경 시 transpose/speed default 강제 reset (HISTORY (110)).
+    // native engine state(mSemitoneCents, mPlaybackSpeedX1000)와 SoundTouch
+    // 내부(setPitchSemiTones, setTempo)는 세션을 넘어 살아남음. Dart UI가
+    // default를 보여도 native는 이전 값 그대로 → 음악이 잘못된 속도/음정으로
+    // 재생됨. 양쪽 모두 명시적으로 0/1000으로 강제. audio-url 동봉(443~)으로
+    // 게스트도 동일 초기화. broadcast 부작용 없는 _engine 직접 호출.
+    _transposeCents = 0;
+    _playbackSpeedX1000 = 1000;
+    await _engine.setSemitoneCents(0);
+    await _engine.setPlaybackSpeedX1000(1000);
+
     // UI 프레임이 로딩 인디케이터를 렌더링할 시간 확보.
     // 없으면 네이티브 디코딩이 즉시 시작되어 화면이 멈춘 것처럼 보임.
     await Future.delayed(Duration.zero);

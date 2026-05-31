@@ -194,6 +194,15 @@ public:
         stop();
         resetState();
 
+        // §H/§I 파일 변경 시 transpose/speed default 강제 reset (HISTORY (110)).
+        // 호출 측(Dart)이 reset 잊더라도 native가 깨끗한 default로 시작 — 안전망.
+        // mPitchDirty/mTempoDirty=true로 SoundTouch worker가 setPitchSemiTones(0)
+        // + setTempo(1.0)을 재호출 보장 (mST 내부 state까지 강제 갱신).
+        mSemitoneCents.store(0, std::memory_order_release);
+        mPlaybackSpeedX1000.store(1000, std::memory_order_release);
+        mPitchDirty.store(true, std::memory_order_release);
+        mTempoDirty.store(true, std::memory_order_release);
+
         // ---- 파일 열기 ----
         int fd = open(path, O_RDONLY);
         if (fd < 0) {

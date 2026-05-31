@@ -32,6 +32,14 @@ class AudioEngine {
     func loadFile(_ path: String) -> [String: Any] {
         if isEngineRunning { stop() }
 
+        // §H/§I 파일 변경 시 transpose/speed default 강제 reset (HISTORY (110)).
+        // 호출 측이 reset 잊더라도 native가 깨끗한 default로 시작 — 안전망.
+        // AVAudioUnitTimePitch.pitch/rate도 직접 0/1.0으로 강제.
+        pitchCents = 0
+        playbackSpeedX1000 = 1000
+        timePitch.pitch = 0
+        timePitch.rate = 1.0
+
         let url = URL(fileURLWithPath: path)
         do {
             let file = try AVAudioFile(forReading: url)

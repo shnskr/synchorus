@@ -67,24 +67,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     audio.startListening(isHost: widget.isHost);
     handler.attachSyncService(audio, isHost: widget.isHost);
 
-    // A-B 반복 + seek 메모리 + §H transpose + §I 속도: 호스트만. 파일 변경 시 reset.
+    // A-B 반복 + seek 메모리: 호스트만. 파일 변경 시 widget state reset.
+    // §H transpose + §I 속도는 sync_service.loadFile에서 native+Dart 동시 reset
+    // (v0.0.93) → 여기서 처리 안 함. hasAny gate도 제거 — 이전엔 Dart 값이
+    // default일 때 native 잔재(SoundTouch 내부)를 못 잡아내는 결함이 있었음.
     if (widget.isHost) {
       _positionSub = audio.positionStream.listen(_onAbPositionTick);
       _durationSub = audio.durationStream.listen((_) {
-        final hasAny = _abPointA != null ||
-            _abPointB != null ||
-            _seekSlots.any((s) => s != null) ||
-            audio.transposeCents != 0 ||
-            audio.playbackSpeedX1000 != 1000;
-        if (hasAny) {
-          setState(() {
-            _abPointA = null;
-            _abPointB = null;
-            _seekSlots = List<Duration?>.filled(3, null);
-          });
-          audio.setTransposeCents(0);
-          audio.setPlaybackSpeedX1000(1000);
-        }
+        if (!mounted) return;
+        setState(() {
+          _abPointA = null;
+          _abPointB = null;
+          _seekSlots = List<Duration?>.filled(3, null);
+        });
       });
     }
   }
