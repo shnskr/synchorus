@@ -59,7 +59,10 @@ android {
 }
 
 dependencies {
-    implementation("com.google.oboe:oboe:1.9.0")
+    // oboe 1.9.0 prebuilt AAR의 liboboe.so는 LOAD align 0x1000(4KB)으로 16KB
+    // 미정렬이었음(실측 확인, 2026-06-01). Android 16KB page size 대응 위해 1.9.3로
+    // 상향 — 빌드 후 liboboe.so align 0x4000 재실측으로 검증할 것.
+    implementation("com.google.oboe:oboe:1.9.3")
 }
 
 flutter {

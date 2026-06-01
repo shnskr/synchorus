@@ -6113,6 +6113,38 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-01 (118) — v0.0.101 Android 16KB page size 정렬 (출시 차단 해소)
+
+**배경**: SM S947N(16KB page size로 동작하는 기기) 첫 실행 시 호환성 경고 다이얼로그. Google Play 2025-11-01부터 16KB 지원 필수 → **출시 차단 이슈**(미해결 이슈에 있던 항목).
+
+**실측 우선 (가설 검증)**: debug APK의 arm64-v8a `.so` ELF LOAD segment align을 NDK 28 `llvm-readelf -l`로 측정. 7개 중 **`liboboe.so`만 `0x1000`(4KB) 미정렬**, 나머지는 이미 정렬:
+- `liboboe_engine.so`(우리 native 엔진) `0x4000` / `libc++_shared.so` `0x4000` — NDK **28.2.13676358**(r28)이 자동 16KB 정렬
+- `libflutter.so` `0x10000` / `libdartjni.so` `0x4000` — Flutter **3.41.6** 엔진
+- `libdatastore_shared_counter.so` `0x4000` — androidx (shared_preferences 경유)
+- `libVkLayer_khronos_validation.so` — **debug 전용** (release APK 미포함)
+- AGP **8.11.1** / Gradle **8.14** 이미 요구치(8.5.1+/8.7+) 초과 → APK zip 정렬도 자동
+- **가설 철회**: oboe 1.9.0 release note는 "16KB 지원"이라 표기([oboe #2041](https://github.com/google/oboe/issues/2041))했으나, **배포 AAR의 `liboboe.so`는 실측 4KB**. release note ≠ 배포 바이너리.
+
+**fix**: `android/app/build.gradle.kts` oboe `1.9.0` → **`1.9.3`** (한 줄). 재빌드 후 `liboboe.so` `0x4000` 정렬 실측 확인.
+
+**완전성 검사**: 전 ABI(arm64-v8a/armeabi-v7a/x86_64) ELF LOAD align ≥16KB + APK zip 정렬 `zipalign -c -P 16` → **Verification successful (exit 0)**. (16KB는 64비트 ABI만 해당, 32비트는 page size 전환 안 함. Android page size는 4KB/16KB 둘뿐 — 추가 정렬 불요.)
+
+**oboe 1.9.0→1.9.3 버전업 영향**: 우리가 쓰는 **출력 LowLatency/Exclusive 경로 API 무변경**(컴파일 호환). 1.9.3 변경([releases](https://github.com/google/oboe/releases))은 FullDuplex shared ptr(미사용)·AudioClock(미사용)·OpenSL ES deadlock fix(잠재 이득)·workload reporting(opt-in)·16KB뿐. iOS는 oboe 미사용(AVAudioEngine)이라 무관.
+
+**검증 (SM S947N 실기기)**:
+- ✅ 첫 실행 호환성 경고 **사라짐** (16KB 정렬 실증)
+- ✅ 오디오 회귀 없음 — 재생/일시정지·재개/seek/transpose/speed/A-B 정상
+
+**변경 파일**:
+- `android/app/build.gradle.kts` (oboe 1.9.0 → 1.9.3)
+- `pubspec.yaml` 0.0.100+1 → 0.0.101+1
+
+**회귀 위험**: 낮음. oboe 패치 업 + 우리 코드 무변경, 실기기 오디오 통과.
+
+**빌드**: v0.0.101
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6139,7 +6171,7 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 - [ ] **anchor 베이크인 outputLatency 부정확 (vfDiff -319ms 잔재)** (2026-05-17 (100) 신규 관찰, HISTORY (42)/(45)/(98) 동일 영역). v0.0.84 5분 측정 중 1회 13초 지속 — `out_lat_delta_anchored = 13.09ms` 영구 박힘 + drift_ms ±4ms (sync 자체 정확) + vfDiff -319 ~ -346ms (청감 인지). 사용자 seek로 anchor reset 시 0ms 복귀. 본 commit 무관. PLAN HIGH §B v0.0.81 ANCHOR-VERIFY 임계 200~300ms로 좁히는 후속에 이미 분류.
 - [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
 - [ ] **단독 모드 → P2P 전환 시 audio-url 미전파** (2026-05-29 (105) v0.0.88 신규). 단독 모드(WiFi 없음)에서 파일 로드 후 사용자가 WiFi 켜고 방 만들기 누르면 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 해결안: 방 만들기 시점에 `_startFileServer` 재시도 + audio-url broadcast 트리거. 사용자 합의 후 처리.
-- [ ] **Android 16 16KB page size 정렬 미준수** (2026-05-29 (105) v0.0.88 신규, **출시 차단 이슈**). SM S947N (Android 16 API 36) 첫 실행 시 호환성 다이얼로그 표시. 미정렬 라이브러리: `liboboe.so`, `liboboe_engine.so`(우리 native engine), `libflutter.so`, `libc++_shared.so`, `libdartjni.so`, `libdatastore_shared_counter.so`, `libVkLayer_khronos_validation.so`. 동작 영향 0 (다시 표시 안 함 가능)이나 Google Play 등록 전 반드시 fix. NDK r27+ 업그레이드 + Flutter SDK 16KB 빌드 플래그(`--target-platform android-arm64` + 정렬 옵션) 검토. 별도 트랙.
+- [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
