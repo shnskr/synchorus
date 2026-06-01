@@ -143,17 +143,21 @@ public:
                 mSTOutRing.clear();
             }
             if (mPitchDirty.exchange(false, std::memory_order_acq_rel)) {
-                mST.clear();
+                // §H B실험 (v0.0.102): clear 생략 — 연속 변경(슬라이더 드래그) 중에도
+                // 소리 끊김 없이 실시간 피치 변화. clear하면 SoundTouch batch(82ms) +
+                // 입력 ring 재충전 동안 무음이라, 연속 변경 시 멈출 때까지 무음이었음.
+                // mSTOutRing의 옛 피치 잔재는 자연 소비됨(pitch는 frame수 불변 → vf 무관).
+                // 파일 로드 시엔 mSTReconfigure(313)가 clear 보장 → 이전 파일 잔재 안 섞임.
                 mST.setPitchSemiTones(
                     mSemitoneCents.load(std::memory_order_acquire) / 100.0f);
-                mSTOutRing.clear();
             }
             if (mTempoDirty.exchange(false, std::memory_order_acq_rel)) {
-                // tempo만 변경 (pitch 유지). clear는 잔재 빨리 비워 응답성 ↑.
-                mST.clear();
+                // §H B실험 (v0.0.102): clear 생략 (pitch와 동일 의도).
+                // ※ speed 주의 — vf(재생 위치)는 새 속도로 진행하나 mSTOutRing의 옛 속도
+                //   출력이 먼저 소비돼 ~170ms position↔audio 불일치 가능. 청감/P2P sync
+                //   확인 대상. 별로면 speed만 debounce(A)로 전환.
                 mST.setTempo(
                     mPlaybackSpeedX1000.load(std::memory_order_acquire) / 1000.0f);
-                mSTOutRing.clear();
             }
             // input ring에서 batch 만큼 pop.
             const size_t inAvail = mSTInRing.available();

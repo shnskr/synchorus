@@ -6145,6 +6145,41 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-01 (119) — v0.0.102 §H transpose/speed 연속 변경 무음 fix (clear 생략, B안)
+
+**증상 (사용자 보고)**: transpose(피치)·speed(속도)를 슬라이더로 **연속으로 빠르게 바꾸면** 재생 시간(position)은 흘러가는데 **소리가 안 남**. 변경을 멈추면 그 값으로 정상 복구 → 영구 stuck 아닌 일시 현상.
+
+**Root cause (코드 분석)**: SoundTouch는 batch 알고리즘(`SETTING_SEQUENCE_MS=82` 등). worker가 pitch/tempo 변경마다 `mST.clear()` + `mSTOutRing.clear()`를 호출(`oboe_engine.cpp:145-157`, v0.0.91 도입). 연속 변경 시 SoundTouch가 82ms치를 다 모으기 전에 또 clear → 출력 ring이 영영 안 차서 콜백 `pop`이 0 → silence(`854-860`). vf(재생 위치)는 이 경로와 무관하게 진행(`847`,`881`)이라 시간만 흐름.
+
+**PoC와의 차이 (가설 추적)**: 사용자가 "PoC transpose 테스트 땐 연속 변화 부드러웠다"고 기억 → "PoC는 clear 안 했나?" 가설. **코드 확인 결과 PoC도 clear 함**(`poc/transpose_engine/.../transpose_engine.cpp:243-246`, 본 앱과 구조 동일). 진짜 차이는 **입력 공급 방식**:
+- PoC: worker가 **사인파를 자체 생성**해 즉시 무한 공급(`transpose_engine.cpp:255-267`) → clear 후 SoundTouch 재충전 빠름 → 무음 미인지.
+- 본 앱: 실제 PCM을 callback이 `mSTInRing` 경유 공급 + worker는 4096 frame 모일 때까지 대기(`160-162`) → 재충전 느림(입력 ring ~85ms + SoundTouch 82ms+) → 무음 두드러짐.
+
+**fix (B안 — clear 생략)**: `mPitchDirty`/`mTempoDirty` 처리에서 `mST.clear()` + `mSTOutRing.clear()` 제거, `setPitchSemiTones`/`setTempo`만 호출(`145-160`). SoundTouch는 실시간 파라미터 변경 지원([README](https://www.surina.net/soundtouch/README.html)) → crash·데이터 손상 없음. 옛 설정 출력은 mSTOutRing에서 자연 소비. **파일 로드 시엔 `mSTReconfigure`(`313`)가 clear 보장**하므로 이전 파일 잔재는 안 섞임.
+
+**검토했으나 안 택한 대안**:
+- A(debounce): 드래그 중 native 미적용 → 멈추면 마지막 값 1회. 안전하나 드래그 중 실시간 변화 없음.
+- B 선택 이유: 드래그 중에도 소리 끊김 없이 실시간 변화 UX(사용자 욕심). speed의 position↔audio ~170ms 불일치 위험은 청감으로 판단키로.
+
+**검증 (SM S947N 실기기, 단독 모드)**:
+- ✅ pitch 연속 변경 — 드래그 중 끊김 없이 실시간 변화, click/buzz 없음
+- ✅ speed 연속 변경 — 우려한 position↔audio 불일치 청감상 거슬리지 않음, 2배속 연속에서도 무음 없음
+- ✅ 파일 변경 시 이전 곡 잔재 안 섞임 (mSTReconfigure clear 정상)
+
+**미검증 / 후속 (PLAN §H 등록)**:
+- **P2P 게스트 sync에서 speed B의 영향** — 단독 청감만 OK. vf-audio 불일치가 게스트 동기화에 주는 영향 미측정.
+- **2배속 장시간 stress + underrun 측정** — 현재 무음(underrun) 객관 카운터 없음(`840` vf≥ringHead / `862` popped<numFrames 지점). 측정하려면 카운터 추가 선행. idle 측정과 다른 시나리오(2배속 긴 재생).
+
+**변경 파일**:
+- `android/app/src/main/cpp/oboe_engine.cpp` (clear 2곳 제거)
+- `pubspec.yaml` 0.0.101+1 → 0.0.102+1
+
+**회귀 위험**: 낮음(단독 모드). 단 P2P speed sync 미검증.
+
+**빌드**: v0.0.102
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -123,10 +123,11 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ✅ **v0.0.91 본 앱 통합 (HISTORY (108))** — Android worker thread + iOS AVAudioUnitTimePitch + Dart/UI/P2P 모두. cents=0 bypass.
 - ✅ **v0.0.92 §I 속도 조절 추가 (HISTORY (109))** — SoundTouch setTempo + AVAudioUnitTimePitch.rate, 0.5~2.0x, 5% step, 동일 worker thread 인프라.
 - ✅ **v0.0.93 edge case 검증 + state 누수 fix (HISTORY (110))** — 시나리오 1~9 단독 모드 통과. 검증 중 발견된 회귀(파일 변경/세션 진입 시 native 측 transpose/speed state 잔재) 4 layer reset으로 fix. ±12 semitone 극단 케이스도 통과.
+- ✅ **v0.0.102 연속 변경 무음 fix (HISTORY (119))** — transpose/speed 슬라이더 연속 변경 시 위치는 가는데 소리 안 나던 증상. root cause: pitch/tempo 변경마다 `mST.clear()`로 SoundTouch batch(82ms)를 못 채워 출력 ring이 빔. **B안(clear 생략)** — `setPitchSemiTones`/`setTempo`만 호출. 드래그 중에도 끊김 없이 실시간 변화. 파일 로드는 `mSTReconfigure`가 clear 보장. SM S947N 단독 모드 청감 통과(2배속 연속 포함 무음 없음). PoC가 부드러웠던 건 clear 유무가 아니라 입력 공급 방식(PoC sine self-feed vs 본 앱 PCM callback feed) 차이로 확인.
 - ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정)
-- ⏳ 30분 stress + 측정 보고서
+- ⏳ 30분 stress + 측정 보고서 — **2배속 장시간 포함**. 현재 underrun(무음) 객관 카운터 없음(`oboe_engine.cpp:840` vf≥ringHead / `862` popped<numFrames) → 측정 전 카운터 추가 선행.
 - ⏳ iOS 실기기 검증
-- ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼.
+- ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼. **+ v0.0.102 B안(clear 생략)의 speed position↔audio ~170ms 불일치가 게스트 sync에 주는 영향 미검증** — 단독 청감만 OK. 거슬리면 speed만 debounce(A)로 전환 검토.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
 - ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 + v0.0.97에서 dead route 정리 완료 (HISTORY (112)/(114))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen/RoomLifecycleCoordinator 3개 삭제. RoomLifecycleCoordinator 핵심 기능 이식은 별도 트랙.
