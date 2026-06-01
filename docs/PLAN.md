@@ -272,22 +272,32 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 
 ## 수익화 전략
 
-### 프리미엄 모델 (추천)
+**결정 (2026-06-01): 일회성 "프로" IAP** — 구독 ❌ / 광고 ❌ / 자체 서버 ❌. 근거 상세는 [DECISIONS.md](DECISIONS.md).
 
-| 기능 | 무료 | 프리미엄 |
+### 모델
+
+| 기능 | 무료 | 프로 (일회성 결제) |
 |------|------|---------|
-| 동시 연결 디바이스 | 2대 | 무제한 |
-| 재생 시간 | 30분/세션 | 무제한 |
-| 오디오 품질 | 표준 | 고음질 (무손실) |
-| 이퀄라이저 | X | O |
-| 스테레오 분리 | X | O |
-| 광고 | 배너 | 없음 |
+| 동기화 재생 | O | O |
+| 동시 연결 | 2대 (호스트+게스트1 = 1:1 동기화 체험) | 무제한 (3대+) |
+| 광고 | 없음 | 없음 |
+| 추후 확장 여지 | | 무손실·EQ·스테레오 분리 등 |
 
-### 결제 검증 흐름
+가격은 5,000~9,900원 범위에서 출시 후 결정.
 
-```
-앱 → 앱스토어/플레이스토어 결제 → 영수증 → Cloud Functions에서 검증 → 프리미엄 활성화
-```
+### 왜 일회성인가 (구독·광고 아님)
+
+- **구독 안 함**: 유틸+로컬 동작 앱은 "정적 기능에 월정액" 저항이 큼 (2026 능동 해지율 31%→47%, 유틸 앱 일회성 회귀 트렌드). 동기화는 "정해진 일을 잘하는 도구"라 일회성이 맞음.
+- **광고 안 함**: 재생 후 화면을 안 봐서(백그라운드) 배너 노출이 적어 수익 미미. AdMob + iOS ATT 권한 + 개인정보처리방침 부담만 늘어 제거.
+- **자체 서버 안 함**: `in_app_purchase` non-consumable + `restorePurchases`(서버 0) 또는 RevenueCat(MTR $2,500까지 무료, Firebase 불필요 — anonymous App User ID 단독). 구독 갱신/해지 관리 복잡성 없음.
+
+### 결제 흐름 (서버리스)
+
+앱 → 스토어 IAP 구매 → `restorePurchases` / RevenueCat entitlement → 로컬 프로 잠금해제. Firebase Functions 영수증 검증 불필요(RevenueCat 쓰면 검증도 대행).
+
+### 구현 시점
+
+무료로 먼저 출시(수익화 코드 0) → 사용자·반응 확보 → 그 후 일회성 IAP 추가(며칠 작업). 아래 출시 전략과 일치.
 
 ## 고려사항 / 한계
 
@@ -328,51 +338,44 @@ Phase 4:   확장 기능 추가
 - [x] 연결 끊김 시 자동 재연결
 - [x] 에러 처리 + UX 개선
 
-### Phase 3: 수익화 (Firebase 연동 시작)
+### Phase 3: 수익화 (일회성 프로 IAP — 서버리스)
 
-#### 3-1. 결정 포인트 (진입 전 확정 필요)
+> **2026-06-01 방향 전환**: 기존 "구독 + Firebase Functions 자작 검증" 설계 **폐기** → **일회성 프로 IAP / 서버리스**. 위 "수익화 전략" + [DECISIONS.md](DECISIONS.md) 참조. 무료 먼저 출시하고 수익화는 출시 후 추가.
 
-| 항목 | 선택지 | 권장 초기값 |
-|---|---|---|
-| 계정 정책 | (A) 무료도 계정 필수 / (B) 프리미엄 전환 시만 | **B — Anonymous Auth로 식별, 전환 시 Apple/Google 연결** |
-| 구독 모델 | (A) 월/연 구독 / (B) 일회성 결제 / (C) 혼합 | **A — 장기 수익 유리, IAP 심사도 구독이 관대** |
-| 체험판 | (A) 없음 / (B) 7일 free trial | **B — IAP 전환율↑ 보고 많음. StoreKit 자체 지원** |
-| 무료 플랜 제한 | 동시 참가자·재생 시간·기능 중 선택 | 세부는 MVP 출시 후 DAU 데이터로 결정 |
+#### 3-1. 결정 (확정)
+
+| 항목 | 결정 |
+|---|---|
+| 모델 | 일회성 "프로" 잠금해제 (구독 ❌) |
+| 무료/유료 경계 | 2대(호스트+게스트1) / 무제한(3대+) |
+| 광고 | 없음 |
+| 계정 | 불필요 (스토어 계정 기반 복원) |
+| 백엔드 | 자체 서버 0 — `in_app_purchase` 단독 또는 RevenueCat |
+| 가격 | 5,000~9,900원, 출시 후 결정 |
 
 #### 3-2. 기술 스택
 
-- **인증**: `firebase_auth` + Anonymous → Apple/Google 링크 (iOS는 Apple Sign-In 필수, App Store 정책 4.8)
-- **결제**: `in_app_purchase` 플러그인 (StoreKit 2 / Google Play Billing). Firebase가 결제를 받는 게 아님 — 플랫폼 결제 30% 수수료 필수
-- **영수증 검증**: Firebase Functions (Blaze plan 필요). App Store Server API / Google Play Developer API로 검증 후 Firestore `users/{uid}/subscription` 갱신
-- **상태 동기화**: Firestore 구독 상태 → 앱 시작 시 `subscriptionStream`으로 구독 → UI/기능 gating
-- **Analytics**: `firebase_analytics` 핵심 funnel 이벤트
+- **결제**: `in_app_purchase` non-consumable + `restorePurchases()`, 또는 RevenueCat(`purchases_flutter`). 둘 다 자체 서버 0.
+- **Firebase 불필요**: 구독 영수증 검증/Firestore 상태저장 불요. RevenueCat은 anonymous App User ID로 단독 동작(Firebase Auth도 불요).
+- **기능 gating**: 로컬 구매 상태 → Riverpod provider → 연결 대수 제한(무료 2대).
 
-#### 3-3. 구현 순서
+#### 3-3. 구현 순서 (출시 후)
 
-1. Firebase 프로젝트 생성 + iOS/Android 앱 등록 + `firebase_core` 연동. 설정 파일(`GoogleService-Info.plist`, `google-services.json`) `.gitignore` 처리. FlutterFire CLI로 `firebase_options.dart` 생성.
-2. `firebase_auth` + Anonymous Sign-In. 앱 시작 시 자동 로그인, uid 확보.
-3. 설정 화면(`SettingsScreen`)에 계정 섹션 신설 + Apple/Google 링크 버튼 (전환 시 anonymous → federated upgrade).
-4. App Store Connect + Google Play Console에서 IAP 상품 등록 (`synchorus_premium_monthly`, `synchorus_premium_yearly`). 샌드박스 테스트 계정 확보.
-5. `in_app_purchase` 연동 + 구매 플로우 UI. 구매 완료 시 영수증을 Functions로 전송.
-6. Firebase Functions (Node.js TypeScript) — App Store Server API / Google Play Developer API 영수증 검증 + Firestore write. 에뮬레이터로 로컬 테스트.
-7. Firestore 구독 상태 스트림 → Riverpod provider → 기능 gating (예: 참가자 3명 이상, 이퀄라이저, 플레이리스트).
-8. `firebase_analytics` funnel 이벤트 추가 (room_created, premium_upgrade_started, premium_upgrade_completed, churn_cancel).
-9. iOS/Android 심사 제출 전 **IAP restore**, **환불 정책**, **구독 약관 URL** 필수. 취소된 구독의 grace period 처리 검토.
+1. App Store Connect / Google Play Console에 non-consumable 상품 1개 등록(`synchorus_pro`). 샌드박스 테스트 계정 확보.
+2. `in_app_purchase`(또는 RevenueCat) 연동 + 구매/복원 UI — `SettingsScreen` "프로 잠금해제" 섹션.
+3. 로컬 구매 상태 → Riverpod provider → 연결 대수 게이팅. 미결제 시 3대째 연결 시도에 프로 안내.
+4. 심사 필수: IAP **restore** 버튼, 환불 정책, 약관/개인정보 URL.
 
-#### 3-4. 의존성·리스크
+#### 3-4. 리스크
 
-- **Blaze plan 요구**: Functions·Firestore 무료 티어 넘으면 사용량 과금. 출시 초기엔 무료 범위 내 예상.
-- **Apple Developer/Google Play 결제 설정** 시간 소요 (Apple은 세금·은행 정보 심사 1~7일, Google 상대적으로 빠름).
-- **심사 리스크**: 무료로 쓸 수 있는 기능을 지나치게 제한하면 iOS 심사 거절 가능. "동기화 재생" 자체는 무료, 편의 기능만 유료로 설계.
-- **가격 설정 불확실성**: 경쟁 앱 부재라 참고치 부족. A/B 테스트 또는 초기 고정가로 시작 후 데이터 수집.
+- **클라 검증 한계**: `in_app_purchase` 단독은 영수증 로컬 검증 빌트인 없음([flutter#52522]) → 크랙 가능성. 소액 앱은 감수, 우려 시 RevenueCat(검증 대행).
+- **심사**: 핵심 동기화 재생은 무료라 "핵심 기능 과도 제한" 거절 위험 낮음.
 
-#### 3-5. 비용 추정 (월간, 1000 DAU 가정, 2026-04 시점 추정)
+#### 3-5. 비용
 
-- Firebase Auth: 무료 (50K MAU까지)
-- Firestore: 무료 티어 초과 시 read 1M당 ~$0.06, write 1M당 ~$0.18
-- Functions: 2M 호출/월 무료
-- Analytics: 무료
-- **예상**: DAU 1000 × 구독 상태 체크·이벤트 기록으로 월 $1~$5 수준 시작, 사용자 증가 시 재산정
+- **자체 서버 0** → Firebase 과금 없음.
+- **스토어 수수료**: 신규·소규모 **15%** (Apple Small Business Program / Google 구독·SBP). 100만 달러 초과 시 30% 전환(행복한 고민).
+- RevenueCat 쓰면 MTR $2,500까지 무료, 초과분 1%.
 
 ### Phase 4: 확장
 - [ ] WebRTC 전환 (원격 P2P 지원)
