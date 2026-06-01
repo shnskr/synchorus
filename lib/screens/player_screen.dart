@@ -50,6 +50,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // PlayerScreen setState만으로는 sheet 안 위젯이 갱신 안 됨 (별도 element tree).
   // sheet 열려있는 동안만 non-null. whenComplete에서 null로 reset.
   void Function(VoidCallback)? _setSheetState;
+  // 호스트 모드 진입 실패 사유. SnackBar는 sheet에 가려서 안 보이므로 standalone
+  // sheet 안에 inline 표시 (스피커 picker의 _lastError와 동일 패턴). 재진입 시 clear.
+  String? _hostModeError;
   bool get _isController => _mode != PlayerMode.speaker;
   // ignore: unused_element — Phase 4 호스트 시작/종료 로직에서 사용 예정.
   bool get _isHostP2P => _mode == PlayerMode.host;
@@ -302,9 +305,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           final msg = e.toString().contains('No space left')
               ? '저장 공간이 부족합니다. 기기 용량을 확인해주세요.'
               : '파일을 불러올 수 없습니다';
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text(msg)),
-          );
+          _showSnack(msg);
         }
       }
       if (mounted) setState(() {});
@@ -1100,6 +1101,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return id;
   }
 
+  /// SnackBar 표시 헬퍼. hideCurrentSnackBar()로 이전 메시지를 즉시 치우고 새로
+  /// 표시 → 연속 호출 시 큐에 쌓여 옛 메시지가 끝나길 기다리는 적체 방지.
+  void _showSnack(String msg) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.of(context);
+    messenger.hideCurrentSnackBar();
+    messenger.showSnackBar(SnackBar(content: Text(msg)));
+  }
+
   void _showModeSheet() {
     showModalBottomSheet(
       context: context,
@@ -1128,6 +1138,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       },
     ).whenComplete(() {
       _setSheetState = null;
+      // sheet 닫히면 호스트 진입 에러도 비움 — 다음에 열 때 깨끗한 상태.
+      if (mounted && _hostModeError != null) {
+        setState(() => _hostModeError = null);
+      }
     });
   }
 
@@ -1159,6 +1173,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               child: Text('호스트 모드'),
             ),
           ),
+          // 호스트 진입 실패(WiFi 없음/서버 시작 실패)는 inline 표시 — SnackBar는
+          // 이 sheet에 가려서 안 보임 (스피커 picker _lastError와 동일 패턴).
+          if (_hostModeError != null) ...[
+            const SizedBox(height: 8),
+            _buildInlineError(context, _hostModeError!),
+          ],
           const SizedBox(height: 20),
           const Divider(),
           const SizedBox(height: 8),
@@ -1294,14 +1314,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   Future<void> _enterHostMode() async {
     if (_isModeTransitioning) return;
-    setState(() => _isModeTransitioning = true);
+    // 재진입 시 이전 에러 비움 + transitioning 표시. sheet도 rebuild돼 에러가 사라짐.
+    _setStateAndSheet(() {
+      _isModeTransitioning = true;
+      _hostModeError = null;
+    });
     try {
       final ip = await NativeAudioSyncService.getLocalIP();
       if (ip == null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('WiFi 연결이 필요합니다')),
-          );
+          _setStateAndSheet(() => _hostModeError = 'WiFi 연결이 필요합니다');
         }
         return;
       }
@@ -1313,10 +1335,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       try {
         port = await p2p.startHost();
       } catch (e) {
+        // startHost는 disconnect()로 기존 소켓 정리 + ServerSocket.bind(shared:true)라
+        // 포트 점유 충돌은 사실상 안 남. 여기 도달은 드문 예외(권한 등) — 원인을
+        // 단정하지 않고 일반 문구로. 안전망 catch는 유지(예외 시 앱 안 죽게).
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(
-            const SnackBar(content: Text('서버 시작 실패: 포트가 이미 사용 중입니다')),
-          );
+          _setStateAndSheet(() => _hostModeError = '서버를 시작할 수 없습니다');
         }
         return;
       }
@@ -1509,12 +1532,41 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       handler.attachSyncService(audio, isHost: true);
 
       if (reason != null) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(reason)));
+        _showSnack(reason);
       }
     } finally {
       if (mounted) setState(() => _isModeTransitioning = false);
     }
   }
+}
+
+/// BottomSheet 안 inline 에러 박스 (errorContainer 배경 + error_outline 아이콘).
+/// 호스트 모드 진입 실패 + 스피커 picker 연결 실패 공용 — SnackBar는 sheet에
+/// 가려서 안 보이므로 sheet 안에 직접 표시.
+Widget _buildInlineError(BuildContext context, String message) {
+  return Container(
+    padding: const EdgeInsets.all(8),
+    decoration: BoxDecoration(
+      color: Theme.of(context).colorScheme.errorContainer,
+      borderRadius: BorderRadius.circular(4),
+    ),
+    child: Row(
+      children: [
+        Icon(Icons.error_outline,
+            size: 18, color: Theme.of(context).colorScheme.onErrorContainer),
+        const SizedBox(width: 8),
+        Expanded(
+          child: Text(
+            message,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.onErrorContainer,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -1775,30 +1827,7 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
         ],
         if (_lastError != null) ...[
           const SizedBox(height: 8),
-          Container(
-            padding: const EdgeInsets.all(8),
-            decoration: BoxDecoration(
-              color: Theme.of(context).colorScheme.errorContainer,
-              borderRadius: BorderRadius.circular(4),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.error_outline,
-                    size: 18,
-                    color: Theme.of(context).colorScheme.onErrorContainer),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    _lastError!,
-                    style: TextStyle(
-                      fontSize: 13,
-                      color: Theme.of(context).colorScheme.onErrorContainer,
-                    ),
-                  ),
-                ),
-              ],
-            ),
-          ),
+          _buildInlineError(context, _lastError!),
         ],
       ],
     );

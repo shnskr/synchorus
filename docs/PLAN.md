@@ -130,9 +130,10 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
 - ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 + v0.0.97에서 dead route 정리 완료 (HISTORY (112)/(114))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen/RoomLifecycleCoordinator 3개 삭제. RoomLifecycleCoordinator 핵심 기능 이식은 별도 트랙.
-- ⏳ **SnackBar UX 개선** (2026-06-01 보류) — 두 가지 이슈:
-  1. BottomSheet/Dialog가 떠 있을 때 SnackBar가 modal 아래에 가려짐. 옵션: (A) BottomSheet builder를 `Scaffold(body:...)`로 감싸서 자체 ScaffoldMessenger 활성 — modal 안에 SnackBar 표시(추천). (B) modal 닫고 root SnackBar — UX 트레이드오프. (C) `OverlayEntry` 직접 사용 — 자유도 ↑, 코드 ↑.
-  2. SnackBar 연달아 호출 시 큐로 쌓여서 옛 메시지 끝나야 새 메시지 표시. 해결: helper 함수에서 `hideCurrentSnackBar()` 후 `showSnackBar`로 항상 최신 메시지 즉시 대체.
+- ✅ **SnackBar UX 개선 — v0.0.100 (HISTORY (117)) 완료**:
+  1. modal 가림 → 호스트 모드 진입 실패(WiFi 없음/서버 시작 실패)를 inline 에러 박스로 변경(스피커 picker `_lastError`와 동일 패턴, `_buildInlineError` helper 공용). **옵션 A(Scaffold full-wrap)는 폐기** — `isScrollControlled:true` modal에서 Scaffold가 화면 전체 높이로 늘어나는 회귀 때문(사용자 지적). 가림 케이스는 `_enterHostMode` 2곳뿐(스피커 IP/코드 오류는 이미 inline). 포트 충돌 문구는 `shared:true`라 사실상 안 나므로 일반화.
+  2. 큐 적체 → `_showSnack` helper(`hideCurrentSnackBar()` 후 표시)로 해결. `_pickFile`/`_exitSpeakerMode`에 적용.
+  - ✅ 실기기(SM S947N) 검증 통과 — WiFi off 호스트 모드 inline 표시 + sheet 닫힘 시 clear 정상.
 - ⏳ **별도 §H 트랙: 속도 조절** (피치 유지, time stretching). native engine + 동기화 알고리즘 큰 변경. §G G-2/G-3 완료 + 측정 후 진행.
 
 **§G PCM streaming + 하이브리드 시작 패턴** — `docs/SYNC_ALGORITHM_V2.md` §G 명세 + 사용자 합의 완료 (2026-05-11). 결정: Android 사전할당 PCM → ring buffer 60s (10s/50s 분배, Pre-fill 1초, TOO_LONG 제거), 시작/큰 seek = G-2 하이브리드 ready timeout 200ms, G-3 throughput EMA+in-flight 폴링은 측정 선행 후 별도 PR.
