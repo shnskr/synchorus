@@ -33,6 +33,18 @@ class AudioObs {
   /// 호환성: 구버전 호스트는 이 필드 없음 → fromJson에서 0 fallback.
   final double hostOutputLatencyMs;
 
+  /// 호스트의 현재 재생 속도 (x1000, 1000=1.0x).
+  /// audio-tempo는 단발 broadcast(ack 없음)라 WiFi jitter로 유실되면 게스트가
+  /// 호스트와 speed 불일치 상태로 남는다. obs에 매 500ms 호스트 현재 값을 실어
+  /// 게스트가 비교 → 불일치 시 재적용(자가 복구).
+  /// 호환성: 구버전 호스트는 이 필드 없음 → fromJson에서 1000 fallback.
+  final int speedX1000;
+
+  /// 호스트의 현재 transpose (cents). speedX1000과 동일한 자가 복구 용도
+  /// (audio-pitch 단발 유실 대비).
+  /// 호환성: 구버전 호스트는 이 필드 없음 → fromJson에서 0 fallback.
+  final int transposeCents;
+
   const AudioObs({
     required this.seq,
     required this.hostTimeMs,
@@ -42,6 +54,8 @@ class AudioObs {
     required this.sampleRate,
     required this.playing,
     this.hostOutputLatencyMs = 0,
+    this.speedX1000 = 1000,
+    this.transposeCents = 0,
   });
 
   Map<String, dynamic> toJson() => {
@@ -54,6 +68,8 @@ class AudioObs {
         'sampleRate': sampleRate,
         'playing': playing,
         'hostOutputLatencyMs': hostOutputLatencyMs,
+        'speedX1000': speedX1000,
+        'transposeCents': transposeCents,
       };
 
   factory AudioObs.fromJson(Map<String, dynamic> m) => AudioObs(
@@ -66,6 +82,8 @@ class AudioObs {
         playing: m['playing'] as bool,
         hostOutputLatencyMs:
             (m['hostOutputLatencyMs'] as num?)?.toDouble() ?? 0,
+        speedX1000: (m['speedX1000'] as num?)?.toInt() ?? 1000,
+        transposeCents: (m['transposeCents'] as num?)?.toInt() ?? 0,
       );
 
   String encodeLine() => '${jsonEncode(toJson())}\n';

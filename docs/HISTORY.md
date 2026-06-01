@@ -6180,6 +6180,37 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-01 (120) — v0.0.103/104 §H/§I transpose·speed P2P 전파 견고화 (P0 합류 상실 + P1 외삽 speed 반영)
+
+**배경**: HISTORY (119) + PLAN §H "P2P 게스트 sync 미검증" 항목. transpose/speed가 v0.0.91~102로 연달아 들어갔으나 **게스트 동기화 영향은 미측정**. sync 정확도에 영향 주는 8개 영역(anchor / drift / clock offset / outputLatency / transpose·speed / fallback / obs broadcast / 시작·seek)을 멀티에이전트 workflow(Opus, 병렬 조사 → 종합 → 측정계획)로 전수 재조사.
+
+**조사 결론 (관찰 = 코드 근거)**:
+- **sync 알고리즘 자체는 견고** — 실제 seek를 트리거하는 `driftMs`가 `framePos`(HAL DAC 카운터, `oboe_engine.cpp:643-647`) 기반이라 speed 무관 wall rate → rate 비교 자동 상쇄. 호스트·게스트가 같은 speed면 폐루프는 speed≠1.0이어도 견고.
+- 문제는 transpose/speed "전파 플러밍" 3곳 누락 + vf 외삽 1배속 가정.
+
+**fix**:
+- **P0 (확정 버그)** — 늦게 합류한 게스트가 호스트 speed/transpose 상실. native `loadFile`이 cents/speed를 0/1000으로 강제 reset(안전망: `oboe_engine.cpp:205-208`, iOS `AudioEngine.swift:38-41`)하는데, 게스트 `_handleAudioUrl`이 다운로드 *전* 적용(:911/916)만 하고 loadFile *후* 재적용이 없어 덮였음. **v0.0.93 reset 안전망 도입 시 들어온 회귀** (git blame: cents=v0.0.91, speed=v0.0.92, reset=v0.0.93). → loadFile 후 재적용 추가 + 다운로드 전 native 적용 제거(Dart 상태/stream만 유지). **v0.0.103**.
+- **P1-a** — 재생 중 speed 변경 시 anchor stale. audio-tempo 핸들러가 `_resetDriftState` 미호출(audio-url 경로 `:937`과 대조). speed는 vf rate를 바꿔 기존 anchor를 무효화하므로 리셋 추가. transpose는 vf rate 무변경이라 제외. **v0.0.103**.
+- **P1-b** — audio-tempo/pitch 단발 broadcast(ack 없음) 유실 시 복구 부재 + obs에 speed 필드 없어 자가 감지 불가. obs에 `speedX1000`/`transposeCents` 필드 추가(구버전 fallback 1000/0) + 게스트가 매 obs(500ms)마다 불일치 시 재적용(자가 치유). **v0.0.103**.
+- **P1 (외삽 speed 미반영)** — speed≠1.0일 때 vf 외삽이 1배속 가정. anchor `hostContentFrame`(:1613, seek 위치 결정) / fallback `expectedPositionMs` / `_recomputeDrift` `expectedHostVfMs`의 `(경과)*hostFpMs`에 `speedFactor=obs.speedX1000/1000` 곱. **framePos 외삽(anchorHostFrame/expectedHostFrameNow, driftMs용)은 HAL rate라 그대로** — driftMs 견고성 유지. **v0.0.104**.
+
+**측정 (실기기: S26+ R3KL207HBBF 호스트 + S22 R3CT60D20XE 게스트, csv `sync_log_*.csv`)**:
+- ✅ **P0 확정** — v0.0.103, 호스트 1.5x → 게스트도 1.5x 따라감 (fix 전이라면 1.0x default). 청감 + csv `host_vf`/`guest_vf` rate 일치.
+- ✅ **외삽 fix 안정성 개선** — v0.0.104 2배속: anchor_set 16→**1회**, fallback 163→**34개**, drift mean **~2ms**(전체 견고). vfDiff 부호가 fix-무효 예상(양수)과 반대인 음수 → 외삽 speed 보정 작동 정황.
+- **순수 1배속**: vfDiff 작음(대부분 \|v\|<20) = baseline 정상. **순수 2배속**: vfDiff 음수 ~107ms.
+- **가설**: 2배속 vfDiff 잔재 = (obs staleness) × speed 외삽 잔차 (raw `guest_vf - host_vf` 평균 **605ms**, obs가 stale한데 2배속이라 그 사이 게스트가 앞섬). `driftMs`(framePos 기반)는 이 잔차에 둔감 → 청감 OK. **vfDiff가 2배속에서 실제 음향 어긋남을 과대보고**하는 것으로 추정. offset은 매우 안정적(span 1.4ms)이라 offset 노이즈 가설은 데이터로 철회.
+- **전환 순간(특히 2→1 감속)**: vfDiff **양수 스파이크 +200ms대**(전환 구간 양수 99/음수 33). 사용자 청감 관찰("2→1 시 게스트가 앞서 재생")과 일치. **메커니즘**: 호스트가 `audio-tempo(1.0x)` 보내도 게스트는 네트워크 지연 동안 아직 2배속 → 그만큼 앞섬. P1-a anchor 리셋은 재정렬을 시도(anchor_set 14회)하나 전환 순간 위치 점프 자체는 수 초간 잔존. → **전환 스케줄링(다음 트랙, SYNC_ALGORITHM_V2 §I-6)**.
+
+**미검증 / 후속**: P1-b 자가치유(WiFi 교란 시나리오), iOS 실기기, 2배속 장시간 underrun 카운터, 전환 스케줄링.
+
+**검토했으나 안 한 것**: 전환 어긋남 즉시 강행 — schedule-play race 이력(v0.0.47 `_scheduleInProgress`)으로 설계 합의 선행 필요 판단 → §I-6 설계 항목으로.
+
+**변경 파일**: `lib/models/audio_obs.dart`(speed/cents 필드), `lib/services/native_audio_sync_service.dart`(fix 5곳 + 외삽 3곳), `pubspec.yaml` 0.0.102 → 0.0.104.
+
+**빌드**: v0.0.103, v0.0.104
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -210,6 +210,10 @@ class NativeAudioSyncService {
         _playbackSpeedX1000 = v;
         _playbackSpeedController.add(v);
         await _engine.setPlaybackSpeedX1000(v);
+        // P1 fix: speed 변경은 vf 진행 rate를 바꿔 기존 anchor를 stale하게
+        // 만든다 → anchor 리셋해 다음 ok ts에서 새 rate 기준으로 재정렬.
+        // transpose(audio-pitch)는 vf rate 무변경이라 리셋 불필요.
+        _resetDriftState();
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -684,6 +688,8 @@ class NativeAudioSyncService {
       sampleRate: ts.sampleRate,
       playing: _playing,
       hostOutputLatencyMs: ts.safeOutputLatencyMs,
+      speedX1000: _playbackSpeedX1000,
+      transposeCents: _transposeCents,
     );
 
     _p2p.broadcastToAll(obs.toJson());
@@ -903,17 +909,16 @@ class NativeAudioSyncService {
   Future<void> _handleAudioUrl(Map<String, dynamic> data) async {
     var url = data['url'] as String;
     final hostPlaying = data['playing'] as bool? ?? false;
-    // §H Transpose 초기값 — 늦게 들어온 게스트도 호스트 현재 cents 적용.
-    // Dart 상태 + stream도 같이 갱신해야 게스트 UI 표시가 정확 (이전엔 native만 적용).
+    // §H Transpose / §I 속도 초기값 — 늦게 들어온 게스트도 호스트 현재 값 적용.
+    // Dart 상태 + stream을 먼저 갱신해 다운로드 중에도 게스트 UI 표시가 정확.
+    // native engine 적용은 loadFile 뒤로 미룬다 — loadFile이 cents/speed를
+    // 0/1000으로 강제 reset(안전망)하므로 여기서 적용하면 무효화됨(아래 P0 fix).
     final initCents = (data['transposeCents'] as num?)?.toInt() ?? 0;
     _transposeCents = initCents;
     _transposeCentsController.add(initCents);
-    await _engine.setSemitoneCents(initCents);
-    // §I 속도 초기값.
     final initSpeed = (data['playbackSpeedX1000'] as num?)?.toInt() ?? 1000;
     _playbackSpeedX1000 = initSpeed;
     _playbackSpeedController.add(initSpeed);
-    await _engine.setPlaybackSpeedX1000(initSpeed);
 
     // ── 이전 다운로드 취소 ──────────────────────────────────────
     _downloadAborted = true;
@@ -1080,6 +1085,18 @@ class NativeAudioSyncService {
       // loadFile 반환값에서 duration 즉시 계산
       _setDurationFromLoadResult(loadResult);
 
+      // §H/§I P0 fix: native loadFile이 cents/speed를 0/1000으로 강제 reset
+      // (oboe_engine.cpp / AudioEngine.swift 안전망)하므로, 호스트의 현재
+      // transpose/speed를 여기서 재적용해야 늦게 합류한 게스트가 호스트 값을
+      // 따라간다. 다운로드 전 적용은 이 reset에 덮여 무효(v0.0.93 회귀).
+      // 다운로드 중 audio-tempo/pitch를 받았어도 최신 Dart 값이 반영됨.
+      if (_transposeCents != 0) {
+        await _engine.setSemitoneCents(_transposeCents);
+      }
+      if (_playbackSpeedX1000 != 1000) {
+        await _engine.setPlaybackSpeedX1000(_playbackSpeedX1000);
+      }
+
       _audioReady = true;
       _isLoading = false;
       _loadingController.add(false);
@@ -1135,6 +1152,25 @@ class NativeAudioSyncService {
       final transitionToPlaying = _latestObs != null &&
           !_latestObs!.playing && obs.playing;
       _latestObs = obs;
+
+      // §H/§I 자가 치유 (P1 fix): audio-tempo/audio-pitch는 단발 broadcast(ack
+      // 없음)라 WiFi jitter로 유실되면 게스트가 호스트와 speed/cents 불일치로
+      // 남는다. obs(500ms 주기)에 실린 호스트 현재 값과 매번 비교 → 불일치 시
+      // 재적용해 자동 복구. _audioReady일 때만(loadFile 전엔 reset돼 무의미).
+      // 정상 경로(audio-tempo 도달)에선 이미 일치라 skip → 유실 시에만 발동.
+      if (_audioReady) {
+        if (obs.speedX1000 != _playbackSpeedX1000) {
+          _playbackSpeedX1000 = obs.speedX1000;
+          _playbackSpeedController.add(obs.speedX1000);
+          unawaited(_engine.setPlaybackSpeedX1000(obs.speedX1000));
+          _resetDriftState(); // speed rate 변경 → anchor stale
+        }
+        if (obs.transposeCents != _transposeCents) {
+          _transposeCents = obs.transposeCents;
+          _transposeCentsController.add(obs.transposeCents);
+          unawaited(_engine.setSemitoneCents(obs.transposeCents));
+        }
+      }
 
       if (isFirstObs || transitionToPlaying) {
         final fpMs = obs.sampleRate > 0
@@ -1497,8 +1533,13 @@ class NativeAudioSyncService {
     final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
 
     // ms 단위로 통일하여 cross-rate 비교 (호스트 48kHz ↔ 게스트 44.1kHz 등)
+    // v0.0.103: 호스트 콘텐츠(vf)는 wall당 speed배로 진행(oboe_engine.cpp:834,851)
+    // → 외삽 경과시간에 speed 반영. framePos는 HAL rate라 speed 무관이지만
+    // fallback은 vf 기반 정렬이므로 곱해야 함.
+    final speedFactor = obs.speedX1000 / 1000.0;
     final elapsedMs = (hostWallNow - obs.hostTimeMs).toDouble();
-    final expectedPositionMs = obs.virtualFrame / hostFpMs + elapsedMs;
+    final expectedPositionMs =
+        obs.virtualFrame / hostFpMs + elapsedMs * speedFactor;
     final guestPositionMs = ts.virtualFrame / _framesPerMs;
     // _recomputeDrift와 동일하게 outputLatency 비대칭 보정 (v0.0.38).
     final outLatDelta = ts.safeOutputLatencyMs - obs.hostOutputLatencyMs;
@@ -1573,9 +1614,14 @@ class NativeAudioSyncService {
     final anchorHostFrame = obs.framePos +
         ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
 
-    // 콘텐츠 정렬: 호스트 콘텐츠 위치(ms)를 게스트 frame으로 변환하여 seek
+    // 콘텐츠 정렬: 호스트 콘텐츠 위치(ms)를 게스트 frame으로 변환하여 seek.
+    // v0.0.103: vf(콘텐츠)는 호스트가 speed배로 진행(oboe_engine.cpp:834,851)
+    // → 외삽에 speed 반영해야 anchor가 정확한 콘텐츠 위치에 박힌다.
+    // (speed!=1.0에서 anchor가 뒤처진 위치에 박혀 vfDiff 잔재하던 버그 fix.
+    //  위 anchorHostFrame은 framePos=HAL rate라 speed 무관 → 곱하지 않음.)
+    final speedFactor = obs.speedX1000 / 1000.0;
     final hostContentFrame = obs.virtualFrame +
-        ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
+        ((anchorHostWall - obs.hostTimeMs) * hostFpMs * speedFactor).round();
     final hostContentMs = hostContentFrame / hostFpMs;
     // v0.0.38: outputLatency 비대칭을 anchor seek에 베이크인.
     // 게스트가 BT(+200ms), 호스트가 내장(+5ms)이면 outLatDelta = +195ms.
@@ -1727,8 +1773,11 @@ class NativeAudioSyncService {
     // driftMs는 framePos 변화율(rate)만 비교 → anchor 시점의 잘못된 콘텐츠 차이를
     // 못 잡는 "거짓말 패턴" 발생. vfDiffMs는 매 poll virtualFrame을 직접 비교해
     // 절대 위치 어긋남을 노출. 두 값이 어긋나면 anchor가 잘못 박혔다는 신호.
-    final expectedHostVfMs =
-        obs.virtualFrame / hostFpMs + (hostWallNow - obs.hostTimeMs);
+    // v0.0.103: vf 외삽은 호스트 speed배 진행 반영. (위 expectedHostFrameNow의
+    // framePos 외삽은 HAL rate라 speed 무관 → 그대로 — driftMs는 견고.)
+    final speedFactor = obs.speedX1000 / 1000.0;
+    final expectedHostVfMs = obs.virtualFrame / hostFpMs +
+        (hostWallNow - obs.hostTimeMs) * speedFactor;
     final guestVfMs = ts.virtualFrame / _framesPerMs;
     final vfDiffMs = guestVfMs - expectedHostVfMs - currentOutLatDelta;
 

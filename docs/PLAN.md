@@ -124,10 +124,12 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ✅ **v0.0.92 §I 속도 조절 추가 (HISTORY (109))** — SoundTouch setTempo + AVAudioUnitTimePitch.rate, 0.5~2.0x, 5% step, 동일 worker thread 인프라.
 - ✅ **v0.0.93 edge case 검증 + state 누수 fix (HISTORY (110))** — 시나리오 1~9 단독 모드 통과. 검증 중 발견된 회귀(파일 변경/세션 진입 시 native 측 transpose/speed state 잔재) 4 layer reset으로 fix. ±12 semitone 극단 케이스도 통과.
 - ✅ **v0.0.102 연속 변경 무음 fix (HISTORY (119))** — transpose/speed 슬라이더 연속 변경 시 위치는 가는데 소리 안 나던 증상. root cause: pitch/tempo 변경마다 `mST.clear()`로 SoundTouch batch(82ms)를 못 채워 출력 ring이 빔. **B안(clear 생략)** — `setPitchSemiTones`/`setTempo`만 호출. 드래그 중에도 끊김 없이 실시간 변화. 파일 로드는 `mSTReconfigure`가 clear 보장. SM S947N 단독 모드 청감 통과(2배속 연속 포함 무음 없음). PoC가 부드러웠던 건 clear 유무가 아니라 입력 공급 방식(PoC sine self-feed vs 본 앱 PCM callback feed) 차이로 확인.
-- ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정)
+- ✅ **v0.0.103/104 §H/§I P2P 전파 견고화 (HISTORY (120))** — 멀티에이전트 재조사로 transpose/speed의 게스트 sync 영향 전수 분석. **P0**(늦게 합류 게스트 speed/transpose 상실 — loadFile reset 후 재적용 누락 = v0.0.93 회귀) + **P1-a**(speed 변경 시 anchor stale → audio-tempo 핸들러 `_resetDriftState`) + **P1-b**(단발 broadcast 유실 자가치유 — obs에 speedX1000/transposeCents 필드) + **P1 외삽**(vf 외삽 3곳에 speedFactor 곱, framePos 외삽은 HAL rate라 그대로). 실기기(S26+ 호스트 + S22 게스트): P0 ✅, 외삽 안정성 ✅(2배속 anchor_set 16→1, fallback 163→34, drift ~2ms), 1배속/speed고정 청감 OK.
+- ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정) — SoundTouch 큐(~170ms) latency 미반영. 종합 P2.
 - ⏳ 30분 stress + 측정 보고서 — **2배속 장시간 포함**. 현재 underrun(무음) 객관 카운터 없음(`oboe_engine.cpp:840` vf≥ringHead / `862` popped<numFrames) → 측정 전 카운터 추가 선행.
 - ⏳ iOS 실기기 검증
-- ⏳ **P2P 게스트 동기화 실측** — transpose/속도 모두. 속도가 vf 진행 속도 변경이라 drift 영향 가장 큼. **+ v0.0.102 B안(clear 생략)의 speed position↔audio ~170ms 불일치가 게스트 sync에 주는 영향 미검증** — 단독 청감만 OK. 거슬리면 speed만 debounce(A)로 전환 검토.
+- ✅ **P2P 게스트 동기화 실측 — v0.0.103/104 (HISTORY (120)) 핵심 완료**. transpose/속도 게스트 전파 fix(P0/P1-a/P1-b) + 외삽 speed 반영 + 2배속 실측. driftMs(framePos) 견고, 청감 OK. 2배속 vfDiff staleness 잔차는 진단 과대보고로 추정(우선순위 낮음). ⏳ **잔여**: P1-b 자가치유(WiFi 교란 직접 재현) / iOS 실기기 / 2배속 underrun 카운터.
+- ⏳ **전환 스케줄링 (SYNC_ALGORITHM_V2 §I-6, 다음 트랙)** — speed 전환 순간(특히 2→1 감속) 네트워크 지연 동안 게스트가 옛 speed 유지 → vfDiff +200ms 스파이크(실측, 사용자 청감 일치). 호스트 "wall T에 speed S 적용" broadcast로 양쪽 동시 전환. schedule-play race 이력 있어 **설계 합의 선행**.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
 - ✅ **방 만들기/참가 동선 — v0.0.95에서 BottomSheet 통합 + v0.0.97에서 dead route 정리 완료 (HISTORY (112)/(114))**. PlayerScreen AppBar `group_add` → BottomSheet. HomeScreen/RoomScreen/RoomLifecycleCoordinator 3개 삭제. RoomLifecycleCoordinator 핵심 기능 이식은 별도 트랙.

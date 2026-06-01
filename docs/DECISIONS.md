@@ -86,3 +86,5 @@ v2/v3 주요 설계 결정과 그 이유. 신규 결정은 상단에 누적.
 | sync-position 5초 간격 | 드리프트/지터를 주기적으로 잡되, 너무 잦으면 seek 과다 |
 | bestRtt는 로그 전용 | offset 선택 기준으로만 사용, 이후 계산에 미사용 |
 | 블루투스 레이턴시 | engineLatency에 미포함, 수동 슬라이더로 대응 예정 |
+| 게스트 loadFile 후 transpose/speed 재적용 (v0.0.103) | native loadFile이 cents/speed를 0/1000으로 강제 reset(안전망, `oboe_engine.cpp:205-208`/iOS `AudioEngine.swift:38-41`)하므로 호출 측이 재적용해야 함. 다운로드 *전* 적용은 reset에 덮임 → 늦게 합류 게스트가 호스트 speed 상실(v0.0.93 reset 안전망 도입 시 회귀). HISTORY (120) |
+| vf 외삽엔 speed 반영, framePos 외삽은 그대로 (v0.0.104) | speed≠1.0 시 호스트 vf는 wall당 speed배 진행(`oboe_engine.cpp:834,851`)하나 게스트 외삽이 1배속 가정 → anchor가 뒤처진 위치에 박혀 vfDiff 잔재(2배속 실측 -107ms). vf 외삽 3곳(anchor `hostContentFrame`/fallback/`vfDiffMs`)에 `speedFactor=obs.speedX1000/1000` 곱. **framePos 외삽(driftMs)은 HAL DAC 카운터라 speed 무관 wall rate → 자동 상쇄, 곱하면 오히려 깨짐.** HISTORY (120) |
