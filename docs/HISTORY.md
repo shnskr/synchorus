@@ -6233,6 +6233,26 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (122) — v0.0.110 모드 BottomSheet 우측 상단 X(닫기) 버튼 추가
+
+**배경**: 모드 선택/호스트 모드 등 `_showModeSheet` BottomSheet는 배경(barrier) 탭으로 닫히지만, 일부 사용자에겐 직관적으로 보이지 않을 수 있어 명시적 닫기 버튼 요청.
+
+**변경** (`lib/screens/player_screen.dart`):
+- `_showModeSheet`의 `switch (_mode)`(standalone/host/speaker 3모드 공통 진입점, `player_screen.dart:1129~`)를 `Stack`으로 감싸고 우측 상단에 `Positioned` + `IconButton(Icons.close)` 1개 추가.
+- switch 바깥 공통 위치라 **한 곳 수정으로 모드 선택·호스트·스피커 sheet 모두** X 버튼 적용. 누르면 `Navigator.pop(sheetContext)`.
+- 기존 배경 탭 닫기는 그대로 유지(제거 아님, 추가).
+- `Positioned`가 음수 offset(top/right `-8`, 패딩 영역으로 빼냄)이라 `Stack`의 기본 `Clip.hardEdge`면 잘림 → `clipBehavior: Clip.none`. `IconButton`은 `visualDensity: compact`.
+
+**검증**: `flutter analyze lib/screens/player_screen.dart` No issues. 실기기 2대(S22 R3CT60D20XE, S947N R3KL207HBBF) debug 설치 후 사용자 동작 확인 완료.
+
+**변경 파일**: `lib/screens/player_screen.dart`, `pubspec.yaml` 0.0.109 → 0.0.110.
+
+**주의 (동시 작업)**: 같은 워킹트리에 다른 세션의 tempo 디바운스/TCP Nagle 작업(`native_audio_sync_service.dart`/`p2p_service.dart`)이 진행 중 → **본 커밋엔 미포함** (해당 2파일·테스트 assets는 stage 제외).
+
+**빌드**: v0.0.110
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

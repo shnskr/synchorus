@@ -1126,11 +1126,32 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   top: 16,
                   bottom: 16 + MediaQuery.of(sheetContext).viewInsets.bottom,
                 ),
-                child: switch (_mode) {
-                  PlayerMode.standalone => _buildStandaloneSheet(sheetContext),
-                  PlayerMode.host => _buildHostSheet(sheetContext),
-                  PlayerMode.speaker => _buildSpeakerSheet(sheetContext),
-                },
+                // 배경 탭으로도 닫히지만 일부 사용자는 직관적이지 않아 해 우측
+                // 상단에 명시적 X 버튼 추가. switch 바깥 공통 위치라 모드 선택·
+                // 호스트·스피커 sheet 모두 동일하게 적용 (사용자 요청).
+                child: Stack(
+                  // Positioned가 음수 offset(패딩 영역으로 X 버튼을 빼냄)이라
+                  // 기본 Clip.hardEdge면 잘림 → Clip.none.
+                  clipBehavior: Clip.none,
+                  children: [
+                    switch (_mode) {
+                      PlayerMode.standalone =>
+                        _buildStandaloneSheet(sheetContext),
+                      PlayerMode.host => _buildHostSheet(sheetContext),
+                      PlayerMode.speaker => _buildSpeakerSheet(sheetContext),
+                    },
+                    Positioned(
+                      top: -8,
+                      right: -8,
+                      child: IconButton(
+                        icon: const Icon(Icons.close),
+                        onPressed: () => Navigator.pop(sheetContext),
+                        tooltip: '닫기',
+                        visualDensity: VisualDensity.compact,
+                      ),
+                    ),
+                  ],
+                ),
               ),
             );
           },
