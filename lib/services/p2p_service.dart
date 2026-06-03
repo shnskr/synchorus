@@ -347,6 +347,15 @@ class P2PService {
 
   /// 소켓에서 메시지 수신 리스너
   void _listenToSocket(Socket socket, String sourceId, {Function(Map<String, dynamic>)? onFirstMessage}) {
+    // v0.0.107: TCP Nagle off (tcpNoDelay). broadcast(audio-tempo/obs/seek)는 응답
+    // 없는 단방향이라 Nagle + 수신자 delayed-ACK 상호작용으로 ~200ms+ 지연됨
+    // (실측: audio-tempo 전파 256ms vs ping RTT 11ms). 모든 소켓(peer + host)이
+    // 거치는 공통 진입점이라 여기서 한 번 설정 → 전 broadcast 경로 지연 제거.
+    try {
+      socket.setOption(SocketOption.tcpNoDelay, true);
+    } catch (e) {
+      debugPrint('tcpNoDelay 설정 실패: $e');
+    }
     bool isFirst = true;
     // 누적 버퍼 + 라인 시작 오프셋: O(n²) 회피 (#9)
     // List.removeRange 대신 lineStart만 전진시키고, 임계치를 넘으면 한 번에 잘라냄

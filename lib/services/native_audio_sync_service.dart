@@ -17,6 +17,13 @@ const double _seekCorrectionGain = 0.8;
 const Duration _seekCooldown = Duration(milliseconds: 1000);
 const double _defaultFramesPerMs = 48.0; // fallback (실제 sampleRate 미확인 시)
 const double _reAnchorThresholdMs = 200.0;
+// v0.0.108: vfDiff(절대 위치) 중앙값이 이 값 초과 시 anchor 리셋(재정렬).
+// driftMs(rate)는 두 폰이 같은 속도면 0이라 절대 위치 어긋남을 못 잡는 "거짓말
+// 패턴"을 vfDiff로 보완. v0.0.109: vfDiff/speed로 "실제 청감 ms" 정규화 후 비교
+// (vfDiff는 콘텐츠 ms라 실제 어긋남=vfDiff/speed) → 임계가 speed 무관하게 일관.
+// 150 = 실제 청감 150ms. 1배 동일, 2배 staleness(÷2≈53) 미달로 오발 방지,
+// 0.5배 큰 어긋남(×2)도 잡음. acoustic 검증(465ms) HISTORY (120).
+const double _vfDiffReAnchorThresholdMs = 150.0;
 const double _offsetDriftThresholdMs = 5.0; // 앵커 후 offset 변화 허용치
 // ── v0.0.24: drift 노이즈 완화 ──────────────────────────────
 // 단일 ts 샘플로 seek 판단하면 순간 노이즈에 불필요 seek 발생.
@@ -65,6 +72,7 @@ class NativeAudioSyncService {
   // p2p 메시지에 'msgSeq' 동봉 → 게스트 anchor_reset_seek_notify event csv row에
   // 같은 값 기록해 송수신 1:1 매칭. 메시지 손실 vs handler 발화 누락 분리용.
   int _hostSeekMsgSeq = 0;
+  int _hostTempoMsgSeq = 0; // v0.0.106 계측: audio-tempo 전환 시점 매칭용
 
   /// 게스트: 현재 다운로드 세션 ID. 새 audio-url마다 증가, 이전 다운로드 무효화용.
   int _downloadSessionId = 0;
@@ -95,6 +103,7 @@ class NativeAudioSyncService {
   int? _pendingAnchorVerifyInitialCorrection;
   // v0.0.24: 최근 drift 샘플 윈도우 (중앙값 기반 seek 판단용)
   final List<double> _driftSamples = [];
+  final List<double> _vfDiffSamples = []; // v0.0.108: vfDiff re-anchor 중앙값 윈도우
   // 누적 seek 보정 (HAL framePos는 seek 영향 없음 → accum으로 복원)
   int _seekCorrectionAccum = 0;
   int _seekCount = 0;
@@ -105,6 +114,9 @@ class NativeAudioSyncService {
   // seek 시 즉시 target position을 emit하고, 일정 시간 폴링 position을 무시.
   Duration? _seekOverridePosition;
   Timer? _seekOverrideTimer;
+  // §I 전환 anchor 리셋 디바운스 — 드래그/연타 중 연쇄 리셋 방지 (v0.0.105).
+  Timer? _speedAnchorResetTimer;
+  static const int _speedResetDebounceMs = 250;
 
   // ── UI 스트림 ─────────────────────────────────────────────
   final _positionController = StreamController<Duration>.broadcast();
@@ -207,13 +219,18 @@ class NativeAudioSyncService {
       } else if (type == 'audio-tempo' && !_isHost) {
         // §I 속도. 호스트 변경 → 게스트 동일 적용.
         final v = (message['data']?['speedX1000'] as num?)?.toInt() ?? 1000;
+        final msgSeq = (message['data']?['msgSeq'] as num?)?.toInt() ?? 0;
         _playbackSpeedX1000 = v;
         _playbackSpeedController.add(v);
         await _engine.setPlaybackSpeedX1000(v);
-        // P1 fix: speed 변경은 vf 진행 rate를 바꿔 기존 anchor를 stale하게
-        // 만든다 → anchor 리셋해 다음 ok ts에서 새 rate 기준으로 재정렬.
+        // v0.0.106 계측: 수신 시점 기록 (host_tempo와 msgSeq 매칭 → 전파 지연·회복 측정).
+        _logGuestEvent(event: 'guest_tempo_recv', seekMsgSeq: msgSeq);
+        // P1 fix: speed 변경은 vf 진행 rate를 바꿔 기존 anchor를 stale하게 만든다
+        // → anchor 리셋해 재정렬. 단 드래그/연타로 매 수신마다 리셋하면 anchor가
+        // ~100ms 간격으로 계속 깨져 재정렬을 못 함(실측 v0.0.104: 전환 어긋남
+        // 7~13초 지속). → 디바운스: 변경 안정 후 한 번만 리셋(다음 poll 재정렬).
         // transpose(audio-pitch)는 vf rate 무변경이라 리셋 불필요.
-        _resetDriftState();
+        _scheduleSpeedAnchorReset();
       }
     } catch (e) {
       debugPrint('Error handling message ${message['type']}: $e');
@@ -650,10 +667,14 @@ class NativeAudioSyncService {
     _playbackSpeedX1000 = clamped;
     _playbackSpeedController.add(clamped);
     await _engine.setPlaybackSpeedX1000(clamped);
+    // v0.0.106 계측: msgSeq 동봉 + host_tempo 기록 → 게스트 guest_tempo_recv와
+    // msgSeq 매칭으로 전환 시점·전파 지연·재정렬(anchor_set) 시간 측정.
+    final msgSeq = ++_hostTempoMsgSeq;
     _p2p.broadcastToAll({
       'type': 'audio-tempo',
-      'data': {'speedX1000': clamped},
+      'data': {'speedX1000': clamped, 'msgSeq': msgSeq},
     });
+    _logHostEvent(event: 'host_tempo', seekMsgSeq: msgSeq);
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1163,7 +1184,7 @@ class NativeAudioSyncService {
           _playbackSpeedX1000 = obs.speedX1000;
           _playbackSpeedController.add(obs.speedX1000);
           unawaited(_engine.setPlaybackSpeedX1000(obs.speedX1000));
-          _resetDriftState(); // speed rate 변경 → anchor stale
+          _scheduleSpeedAnchorReset(); // speed rate 변경 → anchor stale (디바운스)
         }
         if (obs.transposeCents != _transposeCents) {
           _transposeCents = obs.transposeCents;
@@ -1422,6 +1443,24 @@ class NativeAudioSyncService {
     _fallbackAlignCooldownMs = 0;
     _latestDriftMs = null;
     _driftSamples.clear();
+    _vfDiffSamples.clear();
+  }
+
+  /// §I 전환 anchor 리셋 디바운스 (v0.0.105).
+  /// speed 변경(audio-tempo / obs 자가치유)이 드래그·연타로 연속될 때 매번
+  /// _resetDriftState하면 anchor가 ~100ms 간격으로 계속 깨져 _tryEstablishAnchor가
+  /// 박힐 틈이 없음 → 재정렬 실패 → 전환 어긋남 7~13초 지속(실측 v0.0.104).
+  /// 마지막 변경 후 _speedResetDebounceMs 동안 추가 변경이 없으면(=안정) 한 번만
+  /// 리셋 → 다음 ok ts에서 _tryEstablishAnchor가 최신 obs로 재정렬.
+  void _scheduleSpeedAnchorReset() {
+    _speedAnchorResetTimer?.cancel();
+    _speedAnchorResetTimer = Timer(
+      const Duration(milliseconds: _speedResetDebounceMs),
+      () {
+        _resetDriftState();
+        debugPrint('[SPEED] debounced anchor reset → 다음 poll에서 재정렬');
+      },
+    );
   }
 
   // ═══════════════════════════════════════════════════════════
@@ -1493,6 +1532,7 @@ class NativeAudioSyncService {
           _anchoredOutLatDeltaMs = 0;
           _offsetAtAnchor = null;
           _driftSamples.clear();
+          _vfDiffSamples.clear();
           _logGuestEvent(event: 'anchor_reset_verify_fail');
         }
         _pendingAnchorVerifyTarget = null;
@@ -1743,6 +1783,7 @@ class NativeAudioSyncService {
       _anchorGuestFrame = null;
       _offsetAtAnchor = null;
       _driftSamples.clear();
+      _vfDiffSamples.clear();
       _logGuestEvent(event: 'anchor_reset_offset_drift');
       return;
     }
@@ -1788,6 +1829,15 @@ class NativeAudioSyncService {
     if (_driftSamples.length > _driftMedianWindow) {
       _driftSamples.removeAt(0);
     }
+    // v0.0.108: vfDiff(절대 위치)도 윈도우에 push — 중앙값으로 큰 위치 어긋남 re-anchor 판단.
+    // v0.0.109: vfDiffMs는 "콘텐츠 위치 ms" 차 → 실제 청감 어긋남 = vfDiff / speed.
+    // (0.5배: 콘텐츠 150 = 실제 300ms / 2배: 콘텐츠 150 = 실제 75ms.) speedFactor로
+    // 나눠 "실제 청감 ms"로 정규화 → 임계가 speed 무관하게 일관. 0.5배 큰 어긋남도
+    // 잡고, 2배 staleness 잔차(÷2)는 임계 미달로 오발 방지. (사용자 통찰, HISTORY (120))
+    _vfDiffSamples.add(vfDiffMs / speedFactor);
+    if (_vfDiffSamples.length > _driftMedianWindow) {
+      _vfDiffSamples.removeAt(0);
+    }
 
     // 500ms마다 drift report 전송
     if (ts.wallMs - _lastDriftReportMs >= 500) {
@@ -1809,8 +1859,8 @@ class NativeAudioSyncService {
       );
     }
 
-    // seek 판단 — 큰 drift(≥re-anchor)는 즉시, 중소 drift는 중앙값으로
-    _maybeTriggerSeek(ts.wallMs, driftMs);
+    // seek 판단 — 큰 drift(rate)/vfDiff(위치)는 re-anchor, 중소 drift는 중앙값 seek
+    _maybeTriggerSeek(ts.wallMs, driftMs, vfDiffMs);
   }
 
   /// 정렬된 복사본의 중앙값.
@@ -1824,14 +1874,28 @@ class NativeAudioSyncService {
 
   /// |drift| ≥ 200ms → 앵커 리셋 (호스트 seek 등 큰 점프, 즉시 처리).
   /// |중앙값| ≥ 20ms → seek 보정 (노이즈 완화 위해 최근 N개 중앙값 기준).
-  void _maybeTriggerSeek(int wallMs, double driftMs) {
+  void _maybeTriggerSeek(int wallMs, double driftMs, double vfDiffMs) {
     if (driftMs.abs() >= _reAnchorThresholdMs) {
       // 큰 drift → 앵커 리셋. 다음 poll에서 _tryEstablishAnchor가 재정렬.
       _anchorHostFrame = null;
       _anchorGuestFrame = null;
       _driftSamples.clear(); // 앵커 리셋 시 노이즈 윈도우도 초기화
+      _vfDiffSamples.clear();
       _seekCooldownUntilMs = 0;
       _logGuestEvent(event: 'anchor_reset_large_drift');
+      return;
+    }
+    // v0.0.108: vfDiff(절대 위치) 큰 어긋남 → anchor 리셋(재정렬). driftMs(rate)는
+    // 두 폰이 같은 속도면 0이라 절대 위치 어긋남(거짓말 패턴)을 못 잡음 — vfDiff로 보완.
+    // 중앙값 기준이라 단발 staleness 노이즈는 무시. acoustic 검증(465ms, HISTORY (120)).
+    if (_vfDiffSamples.length >= _driftMedianWindow &&
+        _median(_vfDiffSamples).abs() >= _vfDiffReAnchorThresholdMs) {
+      _anchorHostFrame = null;
+      _anchorGuestFrame = null;
+      _driftSamples.clear();
+      _vfDiffSamples.clear();
+      _seekCooldownUntilMs = 0;
+      _logGuestEvent(event: 'anchor_reset_vfdiff');
       return;
     }
     if (wallMs < _seekCooldownUntilMs) return;
@@ -1947,6 +2011,7 @@ class NativeAudioSyncService {
     _playing = false;
     _playingController.add(false);
     _seekOverrideTimer?.cancel();
+    _speedAnchorResetTimer?.cancel();
     _seekOverridePosition = null;
     _messageSub?.cancel();
     _messageSub = null;

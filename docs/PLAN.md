@@ -128,7 +128,12 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ⏳ Algorithm latency를 `outputLatencyMs`에 반영 (sync 자동 보정) — SoundTouch 큐(~170ms) latency 미반영. 종합 P2.
 - ⏳ 30분 stress + 측정 보고서 — **2배속 장시간 포함**. 현재 underrun(무음) 객관 카운터 없음(`oboe_engine.cpp:840` vf≥ringHead / `862` popped<numFrames) → 측정 전 카운터 추가 선행.
 - ⏳ iOS 실기기 검증
-- ✅ **P2P 게스트 동기화 실측 — v0.0.103/104 (HISTORY (120)) 핵심 완료**. transpose/속도 게스트 전파 fix(P0/P1-a/P1-b) + 외삽 speed 반영 + 2배속 실측. driftMs(framePos) 견고, 청감 OK. 2배속 vfDiff staleness 잔차는 진단 과대보고로 추정(우선순위 낮음). ⏳ **잔여**: P1-b 자가치유(WiFi 교란 직접 재현) / iOS 실기기 / 2배속 underrun 카운터.
+- ✅ **P2P 게스트 동기화 실측 — v0.0.103/104 (HISTORY (120)) 핵심 완료**. transpose/속도 게스트 전파 fix(P0/P1-a/P1-b) + 외삽 speed 반영 + 2배속 실측. driftMs(framePos) 견고, 청감 OK. ⚠️ **정정**: 당시 "2배속 vfDiff staleness 잔차는 진단 과대보고로 추정"이라 적었으나, v0.0.111 acoustic 측정으로 **vfDiff가 진실(거짓말 패턴)이고 framePos/drift가 거짓**이었음이 밝혀짐 (아래 v0.0.111 항목). ⏳ **잔여**: P1-b 자가치유(WiFi 교란 직접 재현) / iOS 실기기 / 2배속 underrun 카운터.
+- ✅ **v0.0.111 거짓말 패턴(vfDiff) re-anchor + speed 정규화 (HISTORY (123))** — 맥북 마이크 acoustic 측정으로 vfDiff = 실제 스피커 시차임을 확정(465ms 일치). vfDiff 중앙값 >150ms 시 anchor 리셋 + speed 정규화(vfDiff/speedFactor). vfDiff max 474→156ms, 2배속 224→23ms. tempo 디바운스(250ms)·계측(msgSeq)·tcpNoDelay 동반. ⏳ **미해결 (별도 트랙 — 한 번에 안 건드림, 다음 세션 하나씩)**:
+  1. **isOffsetStable jitter → anchor 공백** (가장 영향 큼). filtered offset 1.9ms 안정인데 raw RTT jitter(15~30ms)가 `_stableCount` 리셋 → anchor ~20초 안 박힘(그동안 fallback ±240ms). **B안**: filtered offset 기반 stable 판정 + N초 타임아웃 강제 establish + vfDiff 안전망(잘못 박혀도 재정렬).
+  2. **150ms 임계 → 80~100ms 낮춤** (체감상 큼, staleness 마진 고려).
+  3. **host HAL getTimestamp 간헐 실패** (framePos=-1, HISTORY (30) 재발).
+  4. **게스트 engine 재시작 루프** (host seek 연타 + play/pause 토글 막 조작 트리거, "position 동기 표시인데 다른 부분 재생"). 정상 사용 미발생 — 우선순위 낮음.
 - ⏳ **전환 스케줄링 (SYNC_ALGORITHM_V2 §I-6, 다음 트랙)** — speed 전환 순간(특히 2→1 감속) 네트워크 지연 동안 게스트가 옛 speed 유지 → vfDiff +200ms 스파이크(실측, 사용자 청감 일치). 호스트 "wall T에 speed S 적용" broadcast로 양쪽 동시 전환. schedule-play race 이력 있어 **설계 합의 선행**.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가

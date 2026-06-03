@@ -6253,6 +6253,35 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (123) — v0.0.111 거짓말 패턴(vfDiff) re-anchor + speed 정규화 + tempo 디바운스 + 계측
+
+**배경**: transpose/speed(v0.0.91~104) 추가 후 P2P 게스트 싱크 영향이 미측정 상태. 사용자가 "1.5/2배속에서 음정·속도는 맞는데 싱크가 미묘하게 어긋난다"고 관찰 → **거짓말 패턴**(rate=driftMs는 1~2ms로 정상인데 절대 위치는 어긋남, anchor가 잘못 박힌 상태) 의심. 맥북 마이크 acoustic 측정(1kHz bandpass + folding + matched filter, `assets/measure_audio.mp3` 비프음)으로 호스트/게스트 실제 스피커 출력 시차를 직접 측정해 검증.
+
+**관찰 (실측)**:
+- acoustic 측정 시차 ≈ csv `vfDiff` 값과 일치(예: 465ms = vfDiff 465ms). **driftMs(rate)는 1~2ms로 정상이었음** → vfDiff(절대 위치)가 진실, framePos/drift가 "거짓말"이었음 확정. (그동안 vfDiff를 staleness 과대보고로 치부한 Claude 판단이 틀렸고 사용자 청감이 맞았음 — 기록.)
+- vfDiff re-anchor 적용 후 vfDiff max 474→156ms. speed 정규화 후 2배속 224→23ms. anchor가 정상적으로 박힌 상태에선 23ms 수준.
+
+**변경**:
+- `native_audio_sync_service.dart` (+81/-8):
+  - **vfDiff re-anchor (코드 주석 v0.0.108)**: `driftMs`(rate)는 두 폰 속도가 같으면 0이라 절대 위치 어긋남(거짓말 패턴)을 못 잡음 → `_vfDiffSamples` 중앙값이 `_vfDiffReAnchorThresholdMs`(150ms) 초과 시 anchor 리셋(재정렬), `_logGuestEvent('anchor_reset_vfdiff')`. 4개 anchor-reset 사이트에 `_vfDiffSamples.clear()` 추가.
+  - **speed 정규화 (주석 v0.0.109)**: vfDiff는 "콘텐츠 위치 ms"라 실제 청감 어긋남 = `vfDiff/speedFactor` (0.5배 콘텐츠150=실제300ms / 2배=75ms). 정규화 후 push → 임계가 speed 무관하게 일관.
+  - **tempo 디바운스 (주석 v0.0.105)**: speed 연속 변경 시 매번 anchor 리셋하던 것을 `_scheduleSpeedAnchorReset()`(250ms 디바운스)로 — 마지막 변경 후 안정되면 한 번만 리셋.
+  - **계측 (주석 v0.0.106)**: host `setPlaybackSpeedX1000`에 `msgSeq` 동봉 + `host_tempo`/`guest_tempo_recv` 이벤트 로깅 (전파 지연 매칭용).
+- `p2p_service.dart` (+9): **tcpNoDelay (주석 v0.0.107)** — `_listenToSocket` 공통 진입점에 Nagle off. (broadcast 전파 지연 가설 검증용이었으나, ping/audio-tempo가 같은 TCP 소켓이라 전파 자체는 빠르고 지연은 offset/clock 아티팩트였음이 밝혀짐 — Nagle은 원인 아님. 옵션 자체는 무해해 유지.)
+- 코드 주석의 v0.0.105~109는 작업 단위 표기이며 **실제 커밋은 v0.0.111로 묶음**.
+
+**검증**: acoustic + csv로 P0(늦게 합류 speed 상실) fix와 거짓말 패턴 재현·완화 확인. 정상(조작 없이 재생 + speed 변경) 상태에선 anchor 박힘 → 23ms.
+
+**미해결 (별도 트랙 — 한 번에 건드리지 않고 다음 세션에 하나씩, PLAN §H 참조)**:
+- **isOffsetStable jitter**: filtered offset은 1.9ms로 안정인데 raw RTT jitter(15~30ms)가 `_stableCount`를 리셋 → anchor가 길게는 ~20초간 안 박혀 그동안 fallback(±240ms)으로 방치. (사용자가 "1초가 아니라 몇 초 어긋남" 관찰한 실제 원인 = fallback cooldown이 아니라 **anchor 공백**.)
+- **150ms 임계 큼**: 체감상 큼 → 80~100ms로 낮추는 후보(staleness 마진 고려).
+- **host HAL getTimestamp 간헐 실패** (framePos=-1, HISTORY (30) 재발 — 호스트 obs가 거짓 위치를 줌).
+- **게스트 재시작 루프**: host seek 연타 + play/pause 토글 막 조작 시 guest engine start/stop 반복 → "position(vf)은 동기 표시인데 실제 다른 부분 재생" 증상. (csv timeline에서 트리거 식별: host_seek 0.7초에 5번 + host_play/pause 2초에 2번.) 정상 사용에선 미발생.
+
+**빌드**: v0.0.111
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6280,6 +6309,8 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 - [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
 - [ ] **단독 모드 → P2P 전환 시 audio-url 미전파** (2026-05-29 (105) v0.0.88 신규). 단독 모드(WiFi 없음)에서 파일 로드 후 사용자가 WiFi 켜고 방 만들기 누르면 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 해결안: 방 만들기 시점에 `_startFileServer` 재시도 + audio-url broadcast 트리거. 사용자 합의 후 처리.
 - [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
+- [ ] **거짓말 패턴(vfDiff) 잔존 + anchor 공백** (2026-06-03 (123) v0.0.111 부분 대응). vfDiff re-anchor로 max 474→156ms 완화했으나 — (1) `isOffsetStable`이 raw RTT jitter(15~30ms)로 무너져 anchor가 길게 ~20초 안 박히는 공백(그동안 fallback ±240ms 방치), (2) 150ms 임계가 체감상 큼(→80~100ms 낮추는 후보), (3) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결. 다음 세션에 하나씩. 상세 (123) / PLAN §H.
+- [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**
