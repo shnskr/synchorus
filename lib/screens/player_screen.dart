@@ -851,23 +851,33 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             const SizedBox(width: 12),
-            GestureDetector(
-              onLongPress:
-                  (hasAudio && semitone != 0) ? _resetTranspose : null,
-              child: SizedBox(
-                width: 36,
-                child: Center(
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: semitone != 0 ? scheme.primary : null,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
+            // 우측정렬 + tabularFigures: 부호(+/−) 유무·자릿수가 바뀌어도
+            // 오른쪽 끝(아이콘 옆) 기준으로 값 위치가 고정됨.
+            SizedBox(
+              width: 36,
+              child: Text(
+                label,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: semitone != 0 ? scheme.primary : null,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
+            ),
+            // 리셋은 옆 아이콘 버튼으로만 — 값 long press 리셋은 제거.
+            // 아이콘은 항상 같은 자리에 두되 기본값(0)일 땐 비활성
+            // (onPressed=null → disabled 회색). 등장/소멸이 없어 흔들림 없음.
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              tooltip: '리셋',
+              color: scheme.primary,
+              onPressed: (hasAudio && semitone != 0) ? _resetTranspose : null,
             ),
           ],
         ),
@@ -943,22 +953,33 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             const SizedBox(width: 12),
-            GestureDetector(
-              onLongPress: (hasAudio && !isDefault) ? _resetSpeed : null,
-              child: SizedBox(
-                width: 52,
-                child: Center(
-                  child: Text(
-                    label,
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: !isDefault ? scheme.primary : null,
-                      fontFeatures: const [FontFeature.tabularFigures()],
-                    ),
-                  ),
+            // 우측정렬 + tabularFigures: 값 폭이 바뀌어도 오른쪽 끝
+            // (아이콘 옆) 기준으로 위치가 고정됨.
+            SizedBox(
+              width: 52,
+              child: Text(
+                label,
+                textAlign: TextAlign.right,
+                style: TextStyle(
+                  fontSize: 16,
+                  fontWeight: FontWeight.bold,
+                  color: !isDefault ? scheme.primary : null,
+                  fontFeatures: const [FontFeature.tabularFigures()],
                 ),
               ),
+            ),
+            // 리셋은 옆 아이콘 버튼으로만 — 값 long press 리셋은 제거.
+            // 아이콘은 항상 같은 자리에 두되 기본값(1.00x)일 땐 비활성
+            // (onPressed=null → disabled 회색). 등장/소멸이 없어 흔들림 없음.
+            IconButton(
+              icon: const Icon(Icons.refresh),
+              iconSize: 18,
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+              constraints: const BoxConstraints(minWidth: 40, minHeight: 40),
+              tooltip: '리셋',
+              color: scheme.primary,
+              onPressed: (hasAudio && !isDefault) ? _resetSpeed : null,
             ),
           ],
         ),

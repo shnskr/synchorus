@@ -6352,6 +6352,27 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (127) — v0.0.113 transpose/speed 리셋 UI (long press → 항상 보이는 아이콘 버튼)
+
+**배경 (사용자 보고)**: transpose/speed 값을 **꾹 눌러(long press) 리셋**하던 기존 방식의 문제 — (1) 터치 영역이 값 텍스트뿐(transpose `SizedBox(width:36)` / speed `width:52`, 높이 ≈글자높이)이라 좁아 옆 컨트롤이 잘못 눌림, (2) 화면에 단서가 없어 "어디를 눌러야 리셋되는지" 발견 불가. 사용자 표현: "리셋 범위 모르겠고 좁아서 다른 게 눌릴 때가 있다".
+
+**변경** (`player_screen.dart` `_buildTransposeControls`/`_buildSpeedControls`):
+- **명시적 리셋 아이콘(`Icons.refresh`) 추가** — 값 옆에 **항상 표시**. 기본값(transpose 0 / speed 1.00x)일 땐 `onPressed:null`이라 **disabled(회색)**, 값이 바뀌면 활성(primary). 터치 영역 `BoxConstraints(minWidth:40, minHeight:40)`로 확보(기존 좁은 영역 문제 해소).
+- **long press 리셋 제거** — 값의 `GestureDetector(onLongPress)` 삭제, 리셋은 아이콘 버튼으로 일원화. `_resetTranspose`/`_resetSpeed`는 아이콘이 계속 호출.
+- **값 위치 고정** — 값 `Text`를 `Center` → `textAlign:right` + `tabularFigures`로 변경. 부호(+/−) 유무·자릿수(0 / +5 / −12)가 바뀌어도 **오른쪽 끝(아이콘 옆) 기준으로 위치 고정**. 아이콘이 항상 떠 있어 등장/소멸로 인한 레이아웃 흔들림도 제거.
+
+**버전 맥락**: v0.0.113~114는 원래 다른 세션의 tempo/native sync 작업(`native_audio_sync_service.dart`)이 점유했으나 그 미커밋 변경이 폐기(되돌림)되어, 본 UI 작업이 112 다음 **113**을 차지.
+
+**검증**: `flutter analyze lib/screens/player_screen.dart` No issues. 실기기 2대(S22 R3CT60D20XE, S947N R3KL207HBBF) debug 설치 후 사용자 동작 확인 완료("잘된다").
+
+**변경 파일**: `lib/screens/player_screen.dart`, `pubspec.yaml` 0.0.112 → 0.0.113.
+
+**회귀 위험**: 낮음. player UI만 변경, sync/P2P/엔진 로직 무변경.
+
+**빌드**: v0.0.113
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
