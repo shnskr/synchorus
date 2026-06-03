@@ -95,3 +95,19 @@
 - **BT 기기를 검증 매트릭스에 포함** — BT가 outputLatency 변동의 최악 케이스라 1순위 검증 환경. (Android oboe outputLatency가 BT 경로를 정확히 보고하는지는 미확정 — 실측 필요. iOS `AVAudioSession.outputLatency`는 BT 반영 확인.)
 - native rate-bend/latency는 **Android+iOS 동시 구현 + 플랫폼별 framePos/vf speed 동작 실측 검증**.
 - 목표는 sub-ms 보장이 아니라(일반 WiFi 천장) **거짓말 패턴/공백/재입장/진동의 구조적 제거 + 청감 무인지**.
+
+---
+
+## 2026-06-03 진단 실증 + 다음 세션 시작점 (HISTORY (126))
+
+**결함 A를 csv로 실증함** (게스트 "미묘하게 앞섬" 진단, transpose +5 안정 재생):
+- **anchor 경로가 fallback보다 부정확.** anchor 경로 vfDiff −10~−65(변동), 같은 곡에서 fallback 경로는 0~5(정렬). anchor는 establish 시점 오차(seek 도달 빗나감, ANCHOR-VERIFY +47~196)를 baseline에 박고 **곡 내내 지속**, fallback은 **매번 fresh 외삽이라 정확**. = 결함 A "한 번 박기"의 정확한 실증.
+- 방향은 **±변동**(세션1 +46 앞 / 세션2 −65 뒤) — "체계적 한 방향" 아님.
+- ST/outLat 무관(transpose 양쪽 ST 상쇄, delta ~0), drift~0, 시계 동기 좋음(stable 24). 즉 **위치 정렬(anchor) 단독 문제.**
+
+**다음 세션 진입 순서**:
+1. **acoustic 측정 1회** — csv vfDiff 부호가 청감과 어긋나(세션2 −65 vs 청감 "앞") **방향 미확정**. fallback이 진짜 anchor보다 정렬 좋은지 + 게스트 앞/뒤를 ground truth로 확정(v0.0.111 방식). 측정 없는 fix는 v0.0.112 force-establish 폐기 (124)의 재발.
+2. **anchor 주기 재발행 설계** (위 로드맵 🥈) — fallback이 정확한 이유(매번 fresh)를 anchor에 이식: baseline 주기 갱신 + 멱등 재스케줄(seek 반복 회피). **부호 무관 효과**라 1번 결과와 독립적으로 방향이 맞음.
+3. (참고) ANCHOR-VERIFY는 establish~verify 경과(vf 진행)를 안 빼 과대보고 — 임계 낮춤 단독은 비추.
+
+**현재 코드 상태**: v0.0.112(9af5874)까지 커밋. (126)은 진단만(코드 변경 없음). working tree clean에서 시작.

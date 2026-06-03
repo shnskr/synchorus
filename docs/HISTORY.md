@@ -6330,6 +6330,28 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (126) — 게스트 앞섬 진단: anchor가 fallback보다 부정확 (실증, 코드 변경 없음)
+
+**배경**: v0.0.112 (125) 후 사용자 청감 "1배속/2배속 모두 게스트가 미묘하게 앞섬"(+ transpose +5에서도). 호스트 SM-S947N(R3KL207HBBF) csv `sync_log_2026-06-03T15-56-34.csv`(2세션: 15:56 + 16:16 재입장)로 진단.
+
+**실측**:
+- **anchor 경로가 fallback보다 부정확** (핵심): 세션2(16:16, transpose +5 안정 재생) anchor 경로(drift event) vfDiff **−10~−65 변동**, 같은 곡에서 anchor가 깨져 fallback 경로로 가면 vfDiff **0~5 정렬**. 세션1(15:56) anchor 경로는 **+46**. → anchor는 establish 시점 오차를 baseline에 박고 곡 내내 지속, fallback은 **매번 fresh 외삽이라 정확.**
+- **방향 ±변동 → (125)의 "체계적 한 방향 편향" 가설 철회**: 세션1 +46(게스트 앞) / 세션2 −65(게스트 뒤). establish의 seek/외삽 오차가 ±로 출렁이는 것.
+- **ANCHOR-VERIFY +47~196ms가 임계 500 통과**: establish 직후 seek 도달이 target보다 빗나가나 reject 안 됨 → baseline에 박힘. 단 verify diff에 establish~verify 경과(~100ms vf 진행)가 **안 빠져 과대보고**(verify 로직 결함, `native_audio_sync_service.dart:1510-1518`).
+- **ST/outLat 무관 확정**: establish 로그 `outLat delta 3.0/−0.2/1.6`(transpose 양쪽 ST 상쇄). drift~0(rate 정상). offset 69ms stable 24(시계 동기 좋음).
+- **onAudioReady useST vf 진행 = 1배** 확인(`oboe_engine.cpp:864-885`, inputFrames=numFrames@1x) — vf 빠른 진행 아님.
+
+**미확정**: vfDiff 부호 방향 — 청감("게스트 앞") vs csv 세션2(−65 "게스트 뒤") **불일치**. acoustic 측정((120) 방식)으로 ground truth 확정 필요.
+
+**다음 세션 시작점** (SYNC_REDESIGN 결함 A):
+1. **acoustic 1회로 부호/정렬 확정**: fallback이 진짜 anchor보다 정렬 좋은지 + 게스트 앞/뒤. (csv 부호 혼란 해소, v0.0.111처럼 ground truth.)
+2. → **anchor 주기 재발행**(결함 A 근본) 설계: baseline을 fallback처럼 자주 갱신 + 멱등 재스케줄(seek 반복 회피). **부호/방향 무관하게** establish 오차 지속 차단.
+- **작은 패치(ANCHOR-VERIFY 임계 낮춤)는 비추**: verify 경과 미보정 + seek 반복 부작용 + 측정 없는 fix 위험(v0.0.112 force-establish 폐기 (124) 교훈).
+
+**빌드**: 코드 변경 없음 (진단만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
