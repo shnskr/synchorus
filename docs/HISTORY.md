@@ -6211,6 +6211,28 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (121) — v0.0.109 자동측정(AutoMeasureScreen) 제거
+
+**배경**: `--dart-define=AUTO_MEASURE_MODE=host|guest`로 두 기기를 호스트/게스트로 **자동 연결·재생·종료**하던 측정 자동화 화면. 더 안 쓰기로 결정 → 코드 제거. 단 **수동 측정 인프라(CSV 로거·measure_audio.mp3)는 유지**.
+
+**제거**:
+- `lib/measurement/auto_measure_screen.dart` 삭제 (디렉토리 제거). HOST: 방 자동 생성 → 게스트 대기 → assets mp3 로드 → syncPlay → durationSec 후 syncPause → 앱 종료. GUEST: discovery → 첫 방 자동 입장 → 호스트 따라가기 → 종료.
+- `lib/main.dart`: `import 'measurement/...'`, `_autoMeasureMode`/`_autoMeasureDurationSec` const 2개, `home:` 진입 분기 제거 → `home: const PlayerScreen()`.
+
+**유지 (의도적, 사용자 요청)**:
+- `SyncMeasurementLogger` (CSV) — 호스트 세션마다 계속 `sync_log_*.csv` 기록. `native_audio_sync_service.dart:183-185`의 `_logger.start()`는 `if (isHost)`만 보고 호출(AUTO_MEASURE 게이트 없음) → **일반 빌드 호스트도 기록**. 당분간 수동 측정에 계속 사용.
+- `assets/measure_audio.mp3` + `pubspec.yaml` 등록 — 단 자동측정이 유일 사용처였어서 **이제 코드 미참조**(APK 11MB 잔존). 향후 제거 가능, 일단 보존.
+
+**검증**: `flutter analyze lib/main.dart` No issues. `AutoMeasure`/`auto_measure` 잔여 참조 0 (lib/test grep).
+
+**변경 파일**: `lib/main.dart`, `lib/measurement/auto_measure_screen.dart`(삭제), `pubspec.yaml` 0.0.104 → 0.0.109.
+
+**주의 (동시 작업)**: 같은 워킹트리에 진행 중인 tempo 디바운스/TCP Nagle 작업(`native_audio_sync_service.dart`/`p2p_service.dart`, 0.0.105~108)이 있어 **본 커밋엔 미포함**. pubspec version은 그 작업이 올려둔 값 위에 109로 bump.
+
+**빌드**: v0.0.109
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
