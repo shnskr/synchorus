@@ -6305,6 +6305,29 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 1. **재입장 시 clock sync ~8초 지연** (rawOff=0/rtt=0) — 재입장 틀어짐의 진짜 root cause 후보. ping/pong 재개가 왜 늦는지 미상.
 2. **vfDiff 40~95ms 진동** — 거짓말 패턴 잔존, 150ms 임계 미달 방치.
 
+**빌드**: 폐기(미커밋)
+
+---
+
+### 2026-06-03 (125) — v0.0.112 SoundTouch latency를 outputLatency에 반영 (SYNC_REDESIGN 결함 B)
+
+**배경**: transpose/speed ON이면 vf(보고 위치)는 콜백이 즉시 진행하나 실제 PCM은 SoundTouch(TDStretch+RateTransposer) + worker batch를 거쳐 수백 ms 뒤 DAC 도달. `getLatestTimestamp`의 outputLatencyMs가 HAL `calculateLatencyMillis`만 넣어(`oboe_engine.cpp:567-570`) SoundTouch 항이 빠짐 → P2P anchor 비대칭 보정 부정확. (v0.0.112 번호는 폐기된 force-establish (124)에서 재사용 — 미커밋 폐기라 충돌 없음.)
+
+**변경**:
+- `oboe_engine.cpp`: (1) 멤버 `mStLatencyFrames`. (2) worker(stWorkerLoop)가 reconfigure/pitch/tempo 변경 시 `mST.getSetting(SETTING_INITIAL_LATENCY)`(rate 의존 정확 frame, `SoundTouch.cpp:453`)로 갱신 — worker 단독이라 thread-safe. (3) `getLatestTimestamp`가 useST(cents≠0||speed≠1000) && stereo && HAL latency 유효 시 outputLatencyMs에 `(INITIAL_LATENCY + worker batch 4096)/SR*1000` 가산. 정적 항만(out-ring 동적 점유는 anchor 출렁임 우려로 제외).
+- `native_audio_service.dart`: `safeOutputLatencyMs` 상한 500→700. Dart anchor/fallback 무수정 — 비대칭 보정이 자동 적용.
+
+**실측** (호스트 SM-S947N(R3KL207HBBF) csv `sync_log_2026-06-03T15-56-34.csv`, 게스트 SM-S901N(R3CT60D20XE)):
+- **ST 반영 확인** ✅: speed OFF `out_lat_guest=0.00`, 2배속 `~274ms`(HAL+ST), 중간 203~239.
+- **회귀 없음**: OFF 구간 영향 0 (청감 OK).
+- **정상 2배속 정렬 좋음**: drift median 0.24ms, p90 6.12ms.
+
+**발견 (미해결, 다음 트랙)**:
+1. **게스트 체계적 앞섬** (사용자 청감 + csv 일치): **1배속**(seq23-51, out_lat 7-8) `vfDiff 40~46ms` + **2배속**(seq211) `vfDiff 92ms`(청감 ~46ms) 모두 drift~0인데 게스트가 **한 방향으로 일관되게 앞선 위치**. 거짓말 패턴 잔여 + 150ms 임계 미달이라 re-anchor 방치. **임계 낮춤(80~100)으로도 46ms는 미달 — 못 잡음.** 한 방향 편향이라 anchor establish 외삽/식 어딘가 체계적 오차 의심 → 진단 필요.
+2. **전환 과도기 ST 비대칭 베이크** (v0.0.112 부작용): speed 전환 직후 한쪽만 ST 켜진 순간 anchor 박으면 비대칭(195ms) baked(seq150 `deltaAnc=195.20`) → 양쪽 ST 동기화되며 drift 194 스파이크 → seek 회복. anchor establish 시 ST 안정 가드로 후속 보완.
+
+**빌드**: v0.0.112
+
 ---
 
 #### 미해결 이슈

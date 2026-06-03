@@ -136,6 +136,8 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
   4. **게스트 engine 재시작 루프** (host seek 연타 + play/pause 토글 막 조작 트리거, "position 동기 표시인데 다른 부분 재생"). 정상 사용 미발생 — 우선순위 낮음.
   5. **🆕 재입장 시 clock sync ~8초 지연** (2026-06-03 (124) 실측, 재입장 틀어짐의 진짜 root cause 후보). 게스트 재입장 후 ping/pong이 ~8초간 미작동(csv rawOff=0/rtt=0) → offset 못 구함 → anchor 못 박고 fallback만. **다음 세션 1순위 진단**: 재입장 시 SyncService 재시작/핸드셰이크 흐름이 왜 지연되는지 (carry over 안 됨? listener 재등록 지연? 초기 핸드셰이크 미재개?).
   6. **🆕 vfDiff 40~95ms 진동** (2026-06-03 (124) 재입장 후, drift 0~4ms = 거짓말 패턴). 150ms 미달이라 vfDiff re-anchor 미발동 → 방치. 위 2번(임계 80~100 낮춤)으로 일부 잡히나, 진동 자체(40↔90 왕복) 원인은 별도 — obs 신선도/외삽 톱니 의심.
+- ✅ **v0.0.112 SoundTouch latency 반영 (HISTORY (125))** — `SETTING_INITIAL_LATENCY`를 outputLatency에 가산(transpose/speed ON 시). ST 반영 확인 + 정상 2배속 정렬 좋음(drift median 0.24). ⏳ **미해결**: (가) **게스트 체계적 앞섬** — 1배속 vfDiff 46 + 2배속 92(청감 46)이 **한 방향 편향**(게스트 앞섬). 임계 낮춤(80~100)으로도 46은 미달 → 안 잡힘. anchor establish 외삽/식 편향 진단 필요. **다음 1순위.** (나) 전환 과도기 ST 비대칭 베이크 스파이크(195ms → seek 회복).
+- 📋 **전체 로드맵: [SYNC_REDESIGN.md](SYNC_REDESIGN.md)** — anchor 주기 재발행 / 미세 보정층 / 시계동기 강화 우선순위.
 - ⏳ **전환 스케줄링 (SYNC_ALGORITHM_V2 §I-6, 다음 트랙)** — speed 전환 순간(특히 2→1 감속) 네트워크 지연 동안 게스트가 옛 speed 유지 → vfDiff +200ms 스파이크(실측, 사용자 청감 일치). 호스트 "wall T에 speed S 적용" broadcast로 양쪽 동시 전환. schedule-play race 이력 있어 **설계 합의 선행**.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가

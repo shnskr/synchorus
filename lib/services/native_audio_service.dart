@@ -42,11 +42,14 @@ class NativeTimestamp {
   /// wallAtFramePosNs를 밀리초로 변환.
   int get wallMs => wallAtFramePosNs ~/ 1000000;
 
-  /// drift 공식에 적용할 안전한 값. null/음수/500ms 초과는 0으로 무시.
+  /// drift 공식에 적용할 안전한 값. null/음수/700ms 초과는 0으로 무시.
   /// (OS 보고 비정상 시 보정 자체가 노이즈가 되지 않도록 차단.)
+  /// v0.0.112: 상한 500→700. transpose/speed ON일 때 native가 SoundTouch 파이프라인
+  /// latency(~수백ms)를 HAL latency에 더해 보고하므로(SYNC_REDESIGN 결함 B),
+  /// 정상값이 500을 넘을 수 있어 상향. 700 초과는 여전히 outlier로 차단.
   double get safeOutputLatencyMs {
     final v = outputLatencyMs;
-    if (v == null || v < 0 || v > 500) return 0.0;
+    if (v == null || v < 0 || v > 700) return 0.0;
     return v;
   }
 

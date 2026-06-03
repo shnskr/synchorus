@@ -136,13 +136,17 @@ public:
         std::vector<float> outBuf(kSTWorkerBatchFrames * 2u);
         while (mSTWorkerRunning.load(std::memory_order_acquire)) {
             // SoundTouch reconfigure / pitch 변경 — worker 단독 호출.
-            if (mSTReconfigure.exchange(false, std::memory_order_acq_rel)) {
+            const bool didReconfigure =
+                mSTReconfigure.exchange(false, std::memory_order_acq_rel);
+            if (didReconfigure) {
                 mST.clear();
                 mST.setSampleRate(mSTSampleRate.load(std::memory_order_acquire));
                 mST.setChannels(2);
                 mSTOutRing.clear();
             }
-            if (mPitchDirty.exchange(false, std::memory_order_acq_rel)) {
+            const bool didPitch =
+                mPitchDirty.exchange(false, std::memory_order_acq_rel);
+            if (didPitch) {
                 // §H B실험 (v0.0.102): clear 생략 — 연속 변경(슬라이더 드래그) 중에도
                 // 소리 끊김 없이 실시간 피치 변화. clear하면 SoundTouch batch(82ms) +
                 // 입력 ring 재충전 동안 무음이라, 연속 변경 시 멈출 때까지 무음이었음.
@@ -151,13 +155,23 @@ public:
                 mST.setPitchSemiTones(
                     mSemitoneCents.load(std::memory_order_acquire) / 100.0f);
             }
-            if (mTempoDirty.exchange(false, std::memory_order_acq_rel)) {
+            const bool didTempo =
+                mTempoDirty.exchange(false, std::memory_order_acq_rel);
+            if (didTempo) {
                 // §H B실험 (v0.0.102): clear 생략 (pitch와 동일 의도).
                 // ※ speed 주의 — vf(재생 위치)는 새 속도로 진행하나 mSTOutRing의 옛 속도
                 //   출력이 먼저 소비돼 ~170ms position↔audio 불일치 가능. 청감/P2P sync
                 //   확인 대상. 별로면 speed만 debounce(A)로 전환.
                 mST.setTempo(
                     mPlaybackSpeedX1000.load(std::memory_order_acquire) / 1000.0f);
+            }
+            // v0.0.112: 설정 변경 시 SoundTouch 파이프라인 latency 갱신(SYNC_REDESIGN
+            // 결함 B). SETTING_INITIAL_LATENCY는 TDStretch+RateTransposer를 rate 의존
+            // 합산한 frame 수(SoundTouch.cpp:453). worker 단독 호출이라 thread-safe.
+            if (didReconfigure || didPitch || didTempo) {
+                mStLatencyFrames.store(
+                    mST.getSetting(SETTING_INITIAL_LATENCY),
+                    std::memory_order_release);
             }
             // input ring에서 batch 만큼 pop.
             const size_t inAvail = mSTInRing.available();
@@ -595,6 +609,25 @@ public:
             mLatDiagCount = 0;
         }
 
+        // v0.0.112: transpose/speed ON이면 SoundTouch 파이프라인 latency를 HAL
+        // latency에 더한다(SYNC_REDESIGN 결함 B). vf는 콜백이 즉시 진행하나 실제
+        // PCM은 SoundTouch(INITIAL_LATENCY) + worker batch를 거쳐 늦게 DAC 도달 →
+        // P2P anchor 비대칭 보정이 이 항까지 봐야 정렬됨. 정적 항만 반영(out-ring
+        // 동적 점유는 anchor 출렁임 우려로 1단계 제외). HAL latency 유효(>=0) 시에만 가산.
+        {
+            const int cents = mSemitoneCents.load(std::memory_order_acquire);
+            const int spd = mPlaybackSpeedX1000.load(std::memory_order_acquire);
+            const int32_t outCh = mStream->getChannelCount();
+            if (outCh == 2 && (cents != 0 || spd != 1000) &&
+                *outOutputLatencyMs >= 0 && mDecodedSampleRate > 0) {
+                const int stFrames =
+                    mStLatencyFrames.load(std::memory_order_acquire);
+                *outOutputLatencyMs +=
+                    (stFrames + static_cast<int>(kSTWorkerBatchFrames)) *
+                    1000.0 / mDecodedSampleRate;
+            }
+        }
+
         int64_t framePos = 0;
         int64_t timeNs = 0;
         oboe::Result result = mStream->getTimestamp(
@@ -972,6 +1005,11 @@ private:
     // §I 속도. mPlaybackSpeedX1000: 1.0배속 = 1000, 0.5 = 500, 2.0 = 2000 (정수
     // atomic 사용 — float atomic 미지원 환경 회피). 적용 시 / 1000.0f.
     std::atomic<int> mPlaybackSpeedX1000{1000};
+    // v0.0.112: SoundTouch 파이프라인 latency(frame). transpose/speed ON일 때 vf는
+    // 콜백이 즉시 진행하나 실제 PCM은 SoundTouch(INITIAL_LATENCY)+worker batch를 거쳐
+    // 늦게 DAC 도달 → P2P sync outputLatency에 가산해 정렬 보정(SYNC_REDESIGN 결함 B).
+    // worker가 설정 변경 시 SETTING_INITIAL_LATENCY(rate 의존)로 갱신, getLatestTimestamp가 읽음.
+    std::atomic<int> mStLatencyFrames{0};
     std::atomic<bool> mPitchDirty{false};
     std::atomic<bool> mTempoDirty{false};
     std::atomic<bool> mSTReconfigure{false};
