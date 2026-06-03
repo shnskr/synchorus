@@ -6282,6 +6282,31 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-03 (124) — v0.0.112 강제 establish 시도 → 재입장 악화로 폐기 (미커밋)
+
+**배경**: PLAN §H 미해결 1번(isOffsetStable jitter anchor 공백) 착수. 가설: "EMA offset은 수렴했는데 raw RTT jitter로 stable 판정만 막혀 anchor가 영영 안 박힘" → N초(8초) 타임아웃 강제 establish + ANCHOR-VERIFY(v0.0.81)/vfDiff(v0.0.111) 안전망.
+
+**구현 (폐기됨)**: `_forceEstablishTimeoutMs=8000`, anchor 미설정 8초 경과 시 `_tryEstablishAnchor(force:true)`로 isOffsetStable 가드만 우회. `git restore`로 v0.0.111 복원, 미커밋.
+
+**실측** (게스트 SM-S901N(R3CT60D20XE)에 v0.0.112 설치 / 호스트 SM-S947N(R3KL207HBBF)이 csv 기록 — **csv는 호스트가 drift-report 수신해 기록**, `native_audio_sync_service.dart:218` `drift-report && _isHost` + `:776` 주석. csv 내용은 게스트가 보낸 sync 동작):
+- **A 첫 입장 정상**: guest_start(off=65, rtt=23) → `anchor_set` 즉시. 회귀 없음.
+- **B 재입장 악화** (csv `sync_log_2026-06-03T14-45-54.csv`):
+  - seq49 guest_start **rawOff=0, rtt=0** — clock sync(ping/pong) 미작동.
+  - seq49~70 (~8초) **rawOff=0/rtt=0 지속** — offset을 못 구하는 상태.
+  - seq66 **`anchor_set_forced` (rawOff=0)** — **offset 미측정 상태에서 강제 establish** → 틀린 위치에 고정.
+  - seq114~148 **vfDiff 40~95ms 진동, drift 0~4ms** (거짓말 패턴, 150ms 미달이라 vfDiff re-anchor 미발동) → 청감 "계속 틀어짐".
+  - (seq50 vfDiff -33521ms는 재입장 순간 초기 위치 차 → 다음 샘플 seq51에서 즉시 -5ms 보정. 정상 동작, 문제 아님.)
+
+**가설 철회**: "offset 수렴, 판정만 막힘"은 jitter 환경 가정인데, **재입장 직후엔 offset 자체가 없음(rawOff=0/rtt=0)**. force가 그 상태에서 박아 오히려 악화. 안전망(vfDiff 150ms)도 진동폭(40~95ms)이 임계 미달이라 못 잡음.
+
+**결정**: 폐기. 효과(jitter 환경)는 재현 못 해 미확인 + 부작용(재입장 악화)만 확인.
+
+**새 발견 (다음 트랙 후보 — PLAN §H 반영)**:
+1. **재입장 시 clock sync ~8초 지연** (rawOff=0/rtt=0) — 재입장 틀어짐의 진짜 root cause 후보. ping/pong 재개가 왜 늦는지 미상.
+2. **vfDiff 40~95ms 진동** — 거짓말 패턴 잔존, 150ms 임계 미달 방치.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

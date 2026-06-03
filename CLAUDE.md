@@ -16,6 +16,7 @@
 - 구현 계획·PoC 플랜·다음 세션 후보: [docs/PLAN.md](docs/PLAN.md)
 - 라이프사이클·용어: [docs/LIFECYCLE.md](docs/LIFECYCLE.md)
 - 알고리즘 v2 디자인 (작업 시): [docs/SYNC_ALGORITHM_V2.md](docs/SYNC_ALGORITHM_V2.md)
+- **싱크+엔진 재설계 로드맵**: [docs/SYNC_REDESIGN.md](docs/SYNC_REDESIGN.md) — 2026-06-03 멀티에이전트 조사 결과. anchor 한 번 박기(결함 A) + SoundTouch latency 미반영(결함 B) + 하이브리드 3층 + 우선순위 로드맵. 싱크/엔진 큰 변경 전 필독
 - PoC (네이티브 엔진 격리 프로젝트): [poc/README.md](poc/README.md) — 격리 사유, 본 앱과 매핑, 재실행 방법
 
 ## 작업 완료 후

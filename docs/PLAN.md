@@ -130,10 +130,12 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - ⏳ iOS 실기기 검증
 - ✅ **P2P 게스트 동기화 실측 — v0.0.103/104 (HISTORY (120)) 핵심 완료**. transpose/속도 게스트 전파 fix(P0/P1-a/P1-b) + 외삽 speed 반영 + 2배속 실측. driftMs(framePos) 견고, 청감 OK. ⚠️ **정정**: 당시 "2배속 vfDiff staleness 잔차는 진단 과대보고로 추정"이라 적었으나, v0.0.111 acoustic 측정으로 **vfDiff가 진실(거짓말 패턴)이고 framePos/drift가 거짓**이었음이 밝혀짐 (아래 v0.0.111 항목). ⏳ **잔여**: P1-b 자가치유(WiFi 교란 직접 재현) / iOS 실기기 / 2배속 underrun 카운터.
 - ✅ **v0.0.111 거짓말 패턴(vfDiff) re-anchor + speed 정규화 (HISTORY (123))** — 맥북 마이크 acoustic 측정으로 vfDiff = 실제 스피커 시차임을 확정(465ms 일치). vfDiff 중앙값 >150ms 시 anchor 리셋 + speed 정규화(vfDiff/speedFactor). vfDiff max 474→156ms, 2배속 224→23ms. tempo 디바운스(250ms)·계측(msgSeq)·tcpNoDelay 동반. ⏳ **미해결 (별도 트랙 — 한 번에 안 건드림, 다음 세션 하나씩)**:
-  1. **isOffsetStable jitter → anchor 공백** (가장 영향 큼). filtered offset 1.9ms 안정인데 raw RTT jitter(15~30ms)가 `_stableCount` 리셋 → anchor ~20초 안 박힘(그동안 fallback ±240ms). **B안**: filtered offset 기반 stable 판정 + N초 타임아웃 강제 establish + vfDiff 안전망(잘못 박혀도 재정렬).
+  1. **isOffsetStable jitter → anchor 공백** (가장 영향 큼). filtered offset 1.9ms 안정인데 raw RTT jitter(15~30ms)가 `_stableCount` 리셋 → anchor ~20초 안 박힘(그동안 fallback ±240ms). ⚠️ **v0.0.112 타임아웃 강제 establish 시도 → 폐기 (HISTORY (124))**: 재입장 시엔 offset 자체가 없는(rawOff=0/rtt=0) 상태라 force가 틀린 위치에 박아 악화. "offset은 있고 판정만 막힘" 가정이 재입장엔 안 맞았음. 재시도 시 **force 조건에 offset 신선도(rtt>0) 가드 필수**, 또는 아래 5번(clock sync 지연)을 먼저 해결.
   2. **150ms 임계 → 80~100ms 낮춤** (체감상 큼, staleness 마진 고려).
   3. **host HAL getTimestamp 간헐 실패** (framePos=-1, HISTORY (30) 재발).
   4. **게스트 engine 재시작 루프** (host seek 연타 + play/pause 토글 막 조작 트리거, "position 동기 표시인데 다른 부분 재생"). 정상 사용 미발생 — 우선순위 낮음.
+  5. **🆕 재입장 시 clock sync ~8초 지연** (2026-06-03 (124) 실측, 재입장 틀어짐의 진짜 root cause 후보). 게스트 재입장 후 ping/pong이 ~8초간 미작동(csv rawOff=0/rtt=0) → offset 못 구함 → anchor 못 박고 fallback만. **다음 세션 1순위 진단**: 재입장 시 SyncService 재시작/핸드셰이크 흐름이 왜 지연되는지 (carry over 안 됨? listener 재등록 지연? 초기 핸드셰이크 미재개?).
+  6. **🆕 vfDiff 40~95ms 진동** (2026-06-03 (124) 재입장 후, drift 0~4ms = 거짓말 패턴). 150ms 미달이라 vfDiff re-anchor 미발동 → 방치. 위 2번(임계 80~100 낮춤)으로 일부 잡히나, 진동 자체(40↔90 왕복) 원인은 별도 — obs 신선도/외삽 톱니 의심.
 - ⏳ **전환 스케줄링 (SYNC_ALGORITHM_V2 §I-6, 다음 트랙)** — speed 전환 순간(특히 2→1 감속) 네트워크 지연 동안 게스트가 옛 speed 유지 → vfDiff +200ms 스파이크(실측, 사용자 청감 일치). 호스트 "wall T에 speed S 적용" broadcast로 양쪽 동시 전환. schedule-play race 이력 있어 **설계 합의 선행**.
 - ⏳ 시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)
 - ⏳ Crossfade(Option C) — 현재 transition click 매우 미세 (음악에선 묻힘), 필요 시 추가
