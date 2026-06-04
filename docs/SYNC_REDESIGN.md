@@ -133,4 +133,22 @@
 
 **측정 방법 교훈**: vfDiff는 offset 의존 외삽값 → offset 불안정 시 ground truth 아님. **anchor 박힘 여부(drift vs fallback 비율) + raw `guest_vf−host_vf` + acoustic 교차 검증 필수.**
 
-**현재 코드 상태**: v0.0.114 커밋(47a2f2b, realign + 톱니fix). 0.0.113은 (127) UI(다른 세션). **톱니fix 효과 미검증**(offset 불안정 측정).
+**현재 코드 상태**: v0.0.114 커밋(47a2f2b, realign + 톱니fix). 0.0.113은 (127) UI(다른 세션).
+
+---
+
+## 2026-06-05 (129) — offset 정상 재측정: 톱니fix 검증 성공 + 다음 타겟 확정
+
+(128) 정정 후 measure_audio transpose+5 재측정(측정3 점프 회복 상태). **offset 정상**(filtered 192, 변동 2.3ms, anchor drift 317 vs fallback 48) 확보 → 드디어 신뢰 가능한 측정.
+
+**검증 결과**:
+- ✅ **톱니fix(virtualFrame 시점 정합) 유효 확정** — vfDiff -19.5 일정(p10/p90 -20.1/-18.1), ±50 톱니 사라짐. (128) "미검증"을 offset 정상 상태에서 완료.
+- ✅ **"offset 고치면 500ms 잡힌다" 실증** — offset 정상되니 측정3의 500ms 어긋남 사라지고 vfDiff -19.5(작음). offset이 root 확정.
+- 청감 교차: position "호스트 앞" = vfDiff -19.5 일치. **음향 "게스트 앞"(일관)** = vfDiff와 반대 → outputLatency 비대칭(게스트 출력지연 ~20ms 작은데 csv 미반영).
+
+**다음 세션 진입 순서 (확정)**:
+1. **B (monotonic 전환, offset 점프 면역)** — 측정3 wall 점프 재발 방지. **`CLOCK_BOOTTIME`/`mach_continuous_time`** 사용(현재 `CLOCK_MONOTONIC`/`mach_absolute_time`은 deep sleep 중 멈춤, 검증 완료). ping/pong + 재생 정렬 전반 monotonic 치환 — wall 사용처 전수조사 + 설계 선행. EMA min-RTT 로직은 점프 없어지면 그대로 둬도 됨.
+2. **음향 outputLatency 비대칭 (결함 B)** — 가장 체감되는 잔존. csv `out_lat`가 실제 음향 지연 비대칭(~20ms)을 과소보고. SoundTouch/HAL latency. acoustic로 부호 확정 후 보정.
+3. **vfDiff -19.5 position 편향** — seek 임계(20ms) 바로 아래라 방치. 임계/보정 검토.
+
+**현재 코드 상태**: v0.0.114 커밋(47a2f2b + bf0d47d 정정 + 측정4 검증). 톱니fix·realign 검증 완료, offset 점프/outputLatency 비대칭 미해결.

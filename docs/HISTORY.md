@@ -6423,6 +6423,29 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (129) — v0.0.114 offset 정상 재측정: 톱니fix 검증 성공 + 음향 outputLatency 비대칭 (코드 변경 없음)
+
+**배경**: (128) 정정 후속. 측정3의 wall 점프 offset 오염이 회복된 상태에서 재측정 (measure_audio transpose+5, 3분, 호스트 S947N R3KL207HBBF + 게스트 S901N R3CT60D20XE).
+
+**[관문1] offset 정상 확인** — filtered offset 192(변동 **2.3ms**), raw 192.3 일치, anchor 잘 박힘(**drift 317 vs fallback 48**, 측정3는 97 vs 255로 반대였음). 측정3 점프가 같은 앱 세션 내 EMA 수렴으로 이미 회복된 상태.
+
+**[관문2] 톱니fix(47a2f2b) 검증 성공** — vfDiff **-19.5 일정**(p10/p90 -20.1/-18.1), **±50 톱니 사라짐**. 측정1(톱니fix 전, offset 정상이었으나 ±50 톱니)과 대조 → virtualFrame 시점 정합 fix 유효 확정. (128)에서 "측정 무효"였던 검증을 offset 정상 상태에서 완료.
+
+**사용자 가설 실증** — "offset만 고치면 측정3의 500ms도 잡힌다"가 확인됨. offset 정상되니 raw 500ms 어긋남 사라지고 vfDiff -19.5(작음). **offset이 root 확정.**
+
+**청감 교차 (사용자)**:
+- **position "호스트 미묘 빠름"** = vfDiff -19.5(호스트가 콘텐츠 위치 앞) **일치 ✅**.
+- **음향 "게스트 앞"(처음~끝 일관)** ↔ vfDiff(호스트 앞) **반대 방향** → **outputLatency 비대칭** 단서. position은 호스트가 앞인데 소리는 게스트가 먼저 = 게스트 스피커 출력 지연이 호스트보다 ~20ms 작은데 csv `out_lat`(host 205.6 / guest 204.0, delta -1.6)이 못 잡음. 결함 B/HAL 과소보고 영역. ⚠️ 음향 부호는 20ms(인지 경계)라 acoustic 확정 필요.
+
+**잔존 (다음 트랙)**:
+1. **음향 outputLatency 비대칭** (결함 B) — 가장 체감되는 잔존. csv outputLatency가 실제 음향 지연 비대칭(~20ms)을 과소보고.
+2. **vfDiff -19.5 position 편향** — seek 임계(20ms) 바로 아래라 "정렬됨"으로 방치(seek_count 0).
+3. **offset 점프 재발 방지** — 측정3 같은 wall 점프는 **B(monotonic 전환)** 로 면역. ⚠️ 단 `CLOCK_MONOTONIC`/`mach_absolute_time`(현재 oboe/iOS)은 deep sleep 중 멈추므로(검증 완료), suspend도 견디는 **`CLOCK_BOOTTIME`/`mach_continuous_time`** 사용 필수.
+
+**코드 변경 없음** (측정/검증만). 커밋: 47a2f2b(톱니fix) + bf0d47d(정정) 유지.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
