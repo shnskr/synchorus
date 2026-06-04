@@ -6403,6 +6403,14 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 → **±50/±100ms 랜덤 톱니 완전 제거.** virtualFrame 시점 정합 가설 실증.
 
+**⚠️ 정정 (2026-06-04, 사용자 청감 + raw csv 재분석 — 위 "톱니 제거 성공" 판정 무효)**:
+- 측정3 중 사용자 청감으로 **게스트가 ~500ms 어긋남**(measure_audio 비프가 1초 주기 중 정반대로 들림). csv `vfDiff`(±42)와 정면 모순.
+- raw `guest_vf − host_vf` = **+250~512ms** (외삽 무관 콘텐츠 위치 차, seq 48~348 내내) → **청감과 일치.** `vfDiff`(외삽 후 ±42)가 거짓이었음.
+- 원인: **측정3는 offset(clock) 불안정**(anchor 거의 안 박힘 — drift 97 vs fallback 255, `anchor_set` 2회). offset이 부정확하면 외삽이 실제 500ms를 ±42로 **지워버림**. **`seek_count = 0`**(게스트 3분간 보정 seek 0회) = 거짓 vfDiff를 "정렬됨"으로 오판해 어긋남 방치. **= 거짓말 패턴 재확인 (offset 부정확 시 vfDiff 통째 거짓).**
+- 따라서 위 "톱니 제거" 판정은 **무효** — 거짓 vfDiff를 보고 내린 오판. 톱니fix(virtualFrame 시점 정합)·realign은 코드상 유효하나 **offset 안정 상태에서만 효과 검증 가능**, 측정3로는 판정 불가.
+- **진짜 발목 = offset/clock sync 불안정** (미해결 #1 `isOffsetStable` jitter / #5 재입장 clock sync 지연). 그동안 vfDiff 기반 분석(톱니 포함)은 모두 "offset 안정" 가정 위에서만 유효했음 — 그 토대가 무너지면 vfDiff가 통째 거짓. **다음 1순위로 격상.**
+- 교훈: vfDiff는 offset 의존 외삽값이라 **offset 불안정 시 ground truth 아님.** anchor 박힘 여부(drift vs fallback 비율) + raw `guest_vf−host_vf` + acoustic으로 교차 검증 필수.
+
 **잔존 (다음 트랙 — 별개 이슈)**:
 1. **+16ms vfDiff 일정 편향** (median 측정1 +2.4 → 측정3 +15.9, fallback도 +8.2). 톱니(랜덤)가 사라지니 그 아래 깔려있던 일정 bias가 드러남 — 보정 과조정 vs 진짜 편향 미확정(acoustic 또는 보정 수식 재검토 필요). 일정해서 톱니보다 다루기 쉬움.
 2. **이번 측정 anchor 거의 안 박힘** (drift 97 vs fallback 255, `anchor_set` 2회). offset 불안정(`isOffsetStable` 실패)으로 establish 못 함 = (123) #1 jitter / #5 clock sync 지연 영역, **톱니fix와 무관한 환경 이슈.** 이번 WiFi/시계 상태 탓 추정.

@@ -124,8 +124,13 @@
    - 진단: transpose 0/+5 둘 다 톱니(SoundTouch 무관) + obs_age 무관(외삽 거리 무관)으로 원인 좁힘.
    - 측정(transpose +5, 3분): drift vfDiff 30-60ms **148→0개**, >60 **11→0개**, min/max ∓108→∓27. **±50/±100 톱니 제거.**
 
-**다음 세션 진입 순서 (잔여)**:
-1. **+16ms vfDiff 일정 편향** (median 측정1 +2.4 → 측정3 +15.9, fallback도 +8.2). 톱니(랜덤)가 사라지니 드러난 일정 bias. **보정 과조정 vs 진짜 편향** 미확정 → virtualFrame 보정 수식 재검토 또는 acoustic로 부호/크기 확정. 일정 편향이라 톱니보다 다루기 쉬움. **1순위.**
-2. **anchor establish 공백** (이번 측정 drift 97 vs fallback 255, `anchor_set` 2회). offset 불안정(`isOffsetStable` raw RTT jitter) → 결함 A 약점 4 "isOffsetStable jitter 강건화"(로드맵 🥉) + 재입장 clock sync ~8초 지연(미해결 #5)이 본질. 톱니fix와 무관한 환경/jitter 트랙.
+**⚠️ 정정 (사용자 청감 + raw csv — 위 "톱니 제거" 무효)**: 측정3는 offset 불안정(anchor 안 박힘, drift 97 vs fallback 255, `anchor_set` 2회)으로 `vfDiff`(±42)가 **거짓**이었음. raw `guest_vf−host_vf` = **+250~512ms**로 게스트 실제 ~500ms 어긋남(청감 일치, measure_audio 비프 정반대, `seek_count=0` = 보정 0회). offset 부정확 시 외삽이 실제 500ms를 ±42로 지움 = **거짓말 패턴 재확인**. 톱니fix·realign은 코드상 유효하나 offset 안정 상태에서만 검증 가능 — 측정3 판정 불가.
 
-**현재 코드 상태**: v0.0.114까지 커밋 (realign + 톱니fix). 0.0.113은 (127) UI 작업(다른 세션)이 점유.
+**다음 세션 진입 순서 (정정)**:
+1. **offset/clock sync 안정화 (진짜 1순위, 격상)** — anchor가 안 박히는 근본(`isOffsetStable` raw RTT jitter = 결함 A 약점 4 / 미해결 #1) + 재입장 clock sync ~8초 지연(#5). **offset이 부정확하면 vfDiff가 통째 거짓이 되어 모든 sync 판단이 무너짐**(측정3 실증). 이게 토대 — 잡혀야 vfDiff를 믿고 톱니fix·realign 효과도 검증 가능.
+2. **톱니fix·realign 재검증** — offset 안정 상태에서 ±50 톱니가 실제 줄었는지 재측정.
+3. **+16ms vfDiff 편향** — offset 정상에서 재측정 후 판단 (측정3 +16은 offset 거짓 산물이라 무의미).
+
+**측정 방법 교훈**: vfDiff는 offset 의존 외삽값 → offset 불안정 시 ground truth 아님. **anchor 박힘 여부(drift vs fallback 비율) + raw `guest_vf−host_vf` + acoustic 교차 검증 필수.**
+
+**현재 코드 상태**: v0.0.114 커밋(47a2f2b, realign + 톱니fix). 0.0.113은 (127) UI(다른 세션). **톱니fix 효과 미검증**(offset 불안정 측정).
