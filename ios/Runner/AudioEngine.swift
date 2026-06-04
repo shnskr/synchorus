@@ -296,6 +296,9 @@ class AudioEngine {
         // 정지 또는 timestamp 무효 시에도 virtualFrame/sampleRate/totalFrames/wallMs는
         // 유효 → ok=false라도 반환해야 호스트 UI seek바·_skipSeconds 동작 + 게스트
         // 측 fallback alignment 가능 (v0.0.43, 이전엔 ok=false만 반환했음).
+        // v0.0.114: Android(oboe)와 달리 vf(getVirtualFrame=playerNode lastRenderTime)와
+        // framePos/timeNs(outputNode lastRenderTime)가 같은 렌더 사이클 시각이라 시점
+        // 정합됨 → Android의 virtualFrame→timeNs 정렬 보정이 iOS엔 불필요(vfDiff 톱니 무발생).
         let vf = getVirtualFrame()
         let totalFrames = Int64(audioFile?.length ?? 0)
         let wallNowNs = Int64(Date().timeIntervalSince1970 * 1_000_000_000)

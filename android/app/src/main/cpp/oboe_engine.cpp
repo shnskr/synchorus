@@ -553,8 +553,12 @@ public:
         int64_t* outVirtualFrame,
         double* outOutputLatencyMs) {
 
-        // virtualFrame은 항상 유효 (오디오 콜백이 매 프레임 갱신)
-        *outVirtualFrame = mVirtualFrame.load(std::memory_order_relaxed);
+        // virtualFrame은 항상 유효 (오디오 콜백이 매 프레임 갱신).
+        // v0.0.114: 일단 현재값(마지막 콜백 시점)을 담아둔다. getTimestamp 성공 시
+        // 아래에서 framePos와 같은 시점(timeNs)으로 보정 — 실패(fallback) 경로에선
+        // 이 현재값을 그대로 사용한다.
+        const int64_t vfNow = mVirtualFrame.load(std::memory_order_relaxed);
+        *outVirtualFrame = vfNow;
 
         // wall clock도 항상 제공 (fallback sync에 사용)
         struct timespec wallTs, monoTs;
@@ -680,6 +684,22 @@ public:
         *outFramePos = framePos;
         *outTimeNs = timeNs;
         *outWallAtFramePosNs = wallNow - (monoNow - timeNs);
+
+        // v0.0.114 (톱니 fix): virtualFrame을 framePos와 같은 시점(timeNs)으로 정렬.
+        // mVirtualFrame(vfNow)은 마지막 콜백 시점(~현재)이지만 framePos/wallAtFramePos는
+        // HAL timeNs(DAC 출력 = 버퍼 깊이만큼 과거) 시점. 시점이 어긋난 채 게스트가
+        // vfDiff를 외삽하면 HAL 지연(monoNow-timeNs)을 이중 카운트해 ±수십ms 톱니가 됨
+        // (HISTORY (126) 후속 진단: drift는 framePos↔wall 정합이라 멀쩡, vfDiff만 톱니).
+        // vfNow에서 (monoNow-timeNs) 동안의 콘텐츠 진행분을 빼 timeNs 시점 값으로 되돌린다.
+        // 진행 rate = decodedSampleRate × speed (vf는 파일 rate 단위, 재생은 speed배).
+        const int64_t halDelayNs = monoNow - timeNs;
+        if (halDelayNs > 0 && mDecodedSampleRate > 0) {
+            const int spd = mPlaybackSpeedX1000.load(std::memory_order_acquire);
+            const double contentFramesPerNs =
+                mDecodedSampleRate * (spd / 1000.0) / 1e9;
+            *outVirtualFrame =
+                vfNow - static_cast<int64_t>(halDelayNs * contentFramesPerNs);
+        }
         return true;
     }
 

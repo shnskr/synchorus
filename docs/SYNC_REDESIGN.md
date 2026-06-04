@@ -111,3 +111,21 @@
 3. (참고) ANCHOR-VERIFY는 establish~verify 경과(vf 진행)를 안 빼 과대보고 — 임계 낮춤 단독은 비추.
 
 **현재 코드 상태**: v0.0.112(9af5874)까지 커밋. (126)은 진단만(코드 변경 없음). working tree clean에서 시작.
+
+---
+
+## 2026-06-04 (128) — realign + virtualFrame 시점 정합: 톱니 근본 fix 완료 (v0.0.114)
+
+(126)에서 "진입 순서 1. acoustic 측정 → 2. anchor 주기 재발행"으로 잡았으나, 측정이 어려워 **2(주기 재발행=realign)부터 진행** → 측정 중 (126) "±수십ms 변동"의 진짜 원인을 코드로 규명·해결.
+
+**진행 결과**:
+1. **realign (결함 A 거친 정렬층, 로드맵 🥈 구현)** — vfDiff 중앙값 >60ms 시 anchor 유지한 채 baseline을 현재 호스트 위치로 fresh 재정렬. fallback의 "매 주기 fresh 보정" 비결 이식. 150ms `anchor=null` 리셋(establish 공백) 대체.
+2. **virtualFrame 시점 정합 (톱니 근본 fix)** — (126)의 ±수십ms 변동(톱니)의 진짜 원인 = `getLatestTimestamp`에서 `virtualFrame`(마지막 콜백 ~현재)과 `wallMs`(=`wallAtFramePos`, framePos의 HAL `timeNs` 과거 시점)의 **시점 불일치**. 게스트 vfDiff 외삽이 HAL 지연(`monoNow-timeNs`)을 이중 카운트 → 톱니. **drift(framePos↔wall 정합)가 멀쩡한 게 증거.** fix: Android `oboe_engine.cpp`에서 virtualFrame을 `(monoNow-timeNs)×decodedRate×speed`만큼 빼 timeNs 시점으로 정렬. iOS는 vf/framePos 둘 다 lastRenderTime 기반이라 이미 정합(보정 불필요).
+   - 진단: transpose 0/+5 둘 다 톱니(SoundTouch 무관) + obs_age 무관(외삽 거리 무관)으로 원인 좁힘.
+   - 측정(transpose +5, 3분): drift vfDiff 30-60ms **148→0개**, >60 **11→0개**, min/max ∓108→∓27. **±50/±100 톱니 제거.**
+
+**다음 세션 진입 순서 (잔여)**:
+1. **+16ms vfDiff 일정 편향** (median 측정1 +2.4 → 측정3 +15.9, fallback도 +8.2). 톱니(랜덤)가 사라지니 드러난 일정 bias. **보정 과조정 vs 진짜 편향** 미확정 → virtualFrame 보정 수식 재검토 또는 acoustic로 부호/크기 확정. 일정 편향이라 톱니보다 다루기 쉬움. **1순위.**
+2. **anchor establish 공백** (이번 측정 drift 97 vs fallback 255, `anchor_set` 2회). offset 불안정(`isOffsetStable` raw RTT jitter) → 결함 A 약점 4 "isOffsetStable jitter 강건화"(로드맵 🥉) + 재입장 clock sync ~8초 지연(미해결 #5)이 본질. 톱니fix와 무관한 환경/jitter 트랙.
+
+**현재 코드 상태**: v0.0.114까지 커밋 (realign + 톱니fix). 0.0.113은 (127) UI 작업(다른 세션)이 점유.

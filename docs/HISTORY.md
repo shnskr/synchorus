@@ -6373,6 +6373,48 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-04 (128) — v0.0.114 anchor vfDiff realign + virtualFrame 시점 정합 (톱니 근본 fix, 결함 A)
+
+**배경**: (126) 진단("게스트 미묘하게 앞섬" = anchor 경로 vfDiff ±수십ms, fallback보다 부정확)의 후속 fix. 두 변경을 0.0.114에 묶음 (realign은 원래 0.0.113이었으나 (127) UI 작업이 113을 가져가 폐기·재작업).
+
+**변경 1 — vfDiff realign (`native_audio_sync_service.dart`)**:
+- vfDiff(절대 위치) 중앙값이 임계(`_vfDiffRealignThresholdMs = 60`) 초과 시, anchor를 유지한 채 baseline(`_anchorHostFrame`/`_anchorGuestFrame`/`_offsetAtAnchor`/`_anchoredOutLatDeltaMs`)을 현재 호스트 위치로 fresh 재정렬(seek). fallback이 정확한 비결(매 주기 fresh 절대 보정)을 anchor 경로에 이식. v0.0.108~112의 150ms `anchor=null` 리셋(establish 공백) 대체 — `_maybeTriggerSeek`의 vfDiff 150 분기 제거, `_recomputeDrift`의 realign 분기로 이동(`anchor_realign_vfdiff` 이벤트).
+- 측정1(0.0.113 realign 단독, transpose +5)에서 16회 발동 확인. 단 ±50ms 톱니는 여전 → realign이 원인 아님이 드러남(아래 변경 2).
+
+**변경 2 — virtualFrame 시점 정합 (톱니 근본 fix, `oboe_engine.cpp`)**:
+- **±50/±100ms 톱니의 진짜 원인 = virtualFrame 시점 불일치.** `getLatestTimestamp`에서 `virtualFrame`은 마지막 콜백 시점(~현재, `mVirtualFrame.load`)이지만 `framePos`/`wallAtFramePos`는 HAL `timeNs`(DAC 출력 = 버퍼 깊이만큼 과거) 시점. 게스트가 vfDiff를 외삽할 때 이미 "현재" 값인 virtualFrame에 "과거(framePos시점)→현재" 경과를 또 더해 **HAL 지연(`monoNow-timeNs`)을 이중 카운트** → 그 지연이 콜백 위상에 따라 출렁여 톱니. **drift(framePos↔wall 정합)가 멀쩡한 게 결정적 증거** (`native_audio_service.dart:43` `wallMs = wallAtFramePosNs`).
+- fix: virtualFrame에서 `(monoNow-timeNs) × decodedSampleRate × speed`(파일 rate, speed배 재생)를 빼 **timeNs 시점 값으로 되돌림**. getTimestamp 성공 시에만, 실패(fallback)면 현재값 유지.
+- **iOS는 보정 불필요** — `vf`(playerNode lastRenderTime)와 `framePos`/`timeNs`(outputNode lastRenderTime)가 같은 렌더 사이클 시각이라 이미 정합. 사유 주석만 추가(`AudioEngine.swift`).
+
+**진단 과정 (관찰 사실)**:
+- transpose **0/+5 두 측정 모두 ±50 톱니** → SoundTouch(batch ~82ms) 가설 기각. (transpose +5에선 음수쪽 톱니만 추가, +방향 주범은 transpose 무관.)
+- `obs_age` 버킷별 |vfDiff| 무관(age<200 35.6 ~ 600-800 22.6) → "obs 500ms 이산성/stale 외삽"(Explore 1차 가설) **기각**. 외삽 거리 문제면 age 비례해야 함.
+- fallback이 타이트한 건 외삽이 정확해서가 아니라 vfDiff>30마다 적극 seek로 톱니를 억제하기 때문(anchor·fallback 외삽 수식은 동일).
+
+**측정 결과** (호스트 S947N R3KL207HBBF + 게스트 S901N R3CT60D20XE, transpose +5, 3분):
+
+| 지표 | 측정1 (0.0.113 realign) | 측정3 (0.0.114 톱니fix) |
+|---|---|---|
+| drift vfDiff 30-60ms 구간 | 148개 | **0개** |
+| >60ms | 11개 | **0개** |
+| min/max | -107.8 / +102.8 | **-27.2 / +19.3** |
+| p10 / p90 | -51.2 / +51.6 | -25.2 / +17.1 |
+| realign 발동 | 16회 | 0회 (톱니 없으니 미발동) |
+
+→ **±50/±100ms 랜덤 톱니 완전 제거.** virtualFrame 시점 정합 가설 실증.
+
+**잔존 (다음 트랙 — 별개 이슈)**:
+1. **+16ms vfDiff 일정 편향** (median 측정1 +2.4 → 측정3 +15.9, fallback도 +8.2). 톱니(랜덤)가 사라지니 그 아래 깔려있던 일정 bias가 드러남 — 보정 과조정 vs 진짜 편향 미확정(acoustic 또는 보정 수식 재검토 필요). 일정해서 톱니보다 다루기 쉬움.
+2. **이번 측정 anchor 거의 안 박힘** (drift 97 vs fallback 255, `anchor_set` 2회). offset 불안정(`isOffsetStable` 실패)으로 establish 못 함 = (123) #1 jitter / #5 clock sync 지연 영역, **톱니fix와 무관한 환경 이슈.** 이번 WiFi/시계 상태 탓 추정.
+
+**변경 파일**: `native_audio_sync_service.dart`, `oboe_engine.cpp`, `ios/Runner/AudioEngine.swift`(주석), `pubspec.yaml` 0.0.113 → 0.0.114.
+
+**검증**: `flutter analyze` No issues, debug 빌드/설치(S947N+S901N) OK, 실측 톱니 제거 확인.
+
+**빌드**: v0.0.114
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

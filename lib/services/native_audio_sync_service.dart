@@ -17,13 +17,15 @@ const double _seekCorrectionGain = 0.8;
 const Duration _seekCooldown = Duration(milliseconds: 1000);
 const double _defaultFramesPerMs = 48.0; // fallback (실제 sampleRate 미확인 시)
 const double _reAnchorThresholdMs = 200.0;
-// v0.0.108: vfDiff(절대 위치) 중앙값이 이 값 초과 시 anchor 리셋(재정렬).
-// driftMs(rate)는 두 폰이 같은 속도면 0이라 절대 위치 어긋남을 못 잡는 "거짓말
-// 패턴"을 vfDiff로 보완. v0.0.109: vfDiff/speed로 "실제 청감 ms" 정규화 후 비교
-// (vfDiff는 콘텐츠 ms라 실제 어긋남=vfDiff/speed) → 임계가 speed 무관하게 일관.
-// 150 = 실제 청감 150ms. 1배 동일, 2배 staleness(÷2≈53) 미달로 오발 방지,
-// 0.5배 큰 어긋남(×2)도 잡음. acoustic 검증(465ms) HISTORY (120).
-const double _vfDiffReAnchorThresholdMs = 150.0;
+// v0.0.113 (결함 A 수정): vfDiff(절대 위치) 중앙값이 이 값 초과 시 anchor를 유지한 채
+// baseline을 현재 호스트 위치로 fresh 재정렬(seek). fallback이 정확한 비결(매 주기
+// fresh 절대 위치 보정)을 anchor 경로에 이식 — establish 빗나감(±수십ms)이 곡 내내
+// 잔존하던 결함 A 해소 (SYNC_REDESIGN, HISTORY (126)). v0.0.108~112의 150ms 리셋
+// (anchor=null→establish 공백)을 대체. 실제 적용은 _recomputeDrift의 realign 분기.
+// driftMs(rate)는 두 폰이 같은 속도면 0이라 절대 위치 어긋남("거짓말 패턴")을 못 잡음 →
+// vfDiff로 보완. v0.0.109: vfDiff/speed로 "실제 청감 ms" 정규화 후 비교 → 임계 speed 무관.
+// 60 = fallback 임계(30, 단발)보다 보수적 (anchor는 5샘플 중앙값이라 지연 보상). 튜닝 대상.
+const double _vfDiffRealignThresholdMs = 60.0;
 const double _offsetDriftThresholdMs = 5.0; // 앵커 후 offset 변화 허용치
 // ── v0.0.24: drift 노이즈 완화 ──────────────────────────────
 // 단일 ts 샘플로 seek 판단하면 순간 노이즈에 불필요 seek 발생.
@@ -1859,8 +1861,36 @@ class NativeAudioSyncService {
       );
     }
 
-    // seek 판단 — 큰 drift(rate)/vfDiff(위치)는 re-anchor, 중소 drift는 중앙값 seek
-    _maybeTriggerSeek(ts.wallMs, driftMs, vfDiffMs);
+    // v0.0.113 결함 A 수정: vfDiff(절대 위치) 중앙값이 임계 초과 시, anchor를 유지한 채
+    // baseline을 현재 호스트 위치로 fresh 재정렬(seek). fallback이 정확한 비결(매 주기
+    // fresh 절대 보정)을 anchor 경로에 이식 — establish 빗나감(±수십ms, HISTORY (126))이
+    // 곡 내내 잔존하던 결함 A 해소. driftMs(rate)는 거짓말 패턴이라 못 잡음 → vfDiff로.
+    // anchor=null 리셋(establish 공백) 대신 baseline만 fresh 재박기 → 공백/gate 대기 없음.
+    if (_vfDiffSamples.length >= _driftMedianWindow &&
+        ts.wallMs >= _seekCooldownUntilMs &&
+        _median(_vfDiffSamples).abs() >= _vfDiffRealignThresholdMs) {
+      // establish와 동일 공식으로 현재 호스트 콘텐츠 절대 위치를 fresh 재계산.
+      // (expectedHostVfMs = 호스트 vf 외삽 콘텐츠 ms, currentOutLatDelta = outLat 비대칭)
+      final targetGuestVf = (expectedHostVfMs * _framesPerMs).round() +
+          (currentOutLatDelta * _framesPerMs).round();
+      final currentEffective = ts.framePos + _seekCorrectionAccum;
+      final correction = targetGuestVf - currentEffective;
+      unawaited(_engine.seekToFrame(targetGuestVf));
+      _seekCorrectionAccum += correction;
+      // baseline을 현재 시점으로 fresh 재박기 (anchor 유지 — null 공백 없음).
+      _anchorHostFrame = expectedHostFrameNow.round();
+      _anchorGuestFrame = ts.framePos + _seekCorrectionAccum;
+      _offsetAtAnchor = offset;
+      _anchoredOutLatDeltaMs = currentOutLatDelta;
+      _driftSamples.clear();
+      _vfDiffSamples.clear();
+      _seekCooldownUntilMs = ts.wallMs + _seekCooldown.inMilliseconds;
+      _logGuestEvent(event: 'anchor_realign_vfdiff');
+      return;
+    }
+
+    // seek 판단 — 큰 drift(rate)는 re-anchor, 중소 drift는 중앙값 seek
+    _maybeTriggerSeek(ts.wallMs, driftMs);
   }
 
   /// 정렬된 복사본의 중앙값.
@@ -1874,28 +1904,17 @@ class NativeAudioSyncService {
 
   /// |drift| ≥ 200ms → 앵커 리셋 (호스트 seek 등 큰 점프, 즉시 처리).
   /// |중앙값| ≥ 20ms → seek 보정 (노이즈 완화 위해 최근 N개 중앙값 기준).
-  void _maybeTriggerSeek(int wallMs, double driftMs, double vfDiffMs) {
+  /// v0.0.113: vfDiff(절대 위치) 보정은 _recomputeDrift의 realign으로 이동
+  /// (anchor=null 리셋 대신 baseline fresh 재박기로 establish 공백 제거).
+  void _maybeTriggerSeek(int wallMs, double driftMs) {
     if (driftMs.abs() >= _reAnchorThresholdMs) {
-      // 큰 drift → 앵커 리셋. 다음 poll에서 _tryEstablishAnchor가 재정렬.
+      // 큰 drift(rate 폭주) → 앵커 리셋. 다음 poll에서 _tryEstablishAnchor가 재정렬.
       _anchorHostFrame = null;
       _anchorGuestFrame = null;
       _driftSamples.clear(); // 앵커 리셋 시 노이즈 윈도우도 초기화
       _vfDiffSamples.clear();
       _seekCooldownUntilMs = 0;
       _logGuestEvent(event: 'anchor_reset_large_drift');
-      return;
-    }
-    // v0.0.108: vfDiff(절대 위치) 큰 어긋남 → anchor 리셋(재정렬). driftMs(rate)는
-    // 두 폰이 같은 속도면 0이라 절대 위치 어긋남(거짓말 패턴)을 못 잡음 — vfDiff로 보완.
-    // 중앙값 기준이라 단발 staleness 노이즈는 무시. acoustic 검증(465ms, HISTORY (120)).
-    if (_vfDiffSamples.length >= _driftMedianWindow &&
-        _median(_vfDiffSamples).abs() >= _vfDiffReAnchorThresholdMs) {
-      _anchorHostFrame = null;
-      _anchorGuestFrame = null;
-      _driftSamples.clear();
-      _vfDiffSamples.clear();
-      _seekCooldownUntilMs = 0;
-      _logGuestEvent(event: 'anchor_reset_vfdiff');
       return;
     }
     if (wallMs < _seekCooldownUntilMs) return;
