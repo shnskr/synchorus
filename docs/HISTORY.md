@@ -6472,6 +6472,23 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (131) — v0.0.116 scheduleStart/cancelSchedule dead path 삭제 (NTP 예약 재생 제거)
+
+**배경**: (130) monotonic 전환 후 데드코드 정리. scheduleStart(NTP 예약 재생, v0.0.47)는 v0.0.48에서 보류 + "다음 세션 재활용" 명목으로 dead path 보존됐으나, **재도입 검토 결과 폐기 결정** (사용자 합의). 근거: ① 실패 원인(메시지 race/sequence ordering/outputLatency 비대칭, HISTORY (43) 2413 — "NTP schedule 자체는 정확히 작동, 문제는 race+latency")이 **monotonic과 무관** → 시계 개선이 부활 명분 안 됨, ② "주기 동시 정렬" 역할은 v0.0.114 `realign`이 이미 대체, ③ SYNC_REDESIGN 로드맵은 *anchor 폐기 말고 주기 재발행* 방향이라 NTP 전면(anchor 의존 제거)과 반대.
+
+**삭제 (3계층 전수)**:
+- **Dart**: `native_audio_service.scheduleStart/cancelSchedule` + `native_audio_sync_service._scheduleFromObs/_handleSchedulePlay/_handleSchedulePause` + schedule-play/schedule-pause 메시지 핸들러 + `_scheduleInProgress`/`_scheduleBufferMs`.
+- **Android**: `oboe_engine.cpp` scheduleStart/cancelSchedule 함수 + onAudioReady 콜백 안 예약 판정 블록 + `mScheduledStart*` 필드 3개 + JNI `nativeScheduleStart/nativeCancelSchedule`. `MainActivity.kt`/`NativeAudio.kt` 핸들러·선언.
+- **iOS**: `AudioEngine.swift` scheduleStart/cancelSchedule + `AppDelegate.swift` case 2개.
+
+**검증**: flutter analyze 통과 + APK 빌드 OK (Dart 미사용 잔재 0). iOS 빌드는 macOS 필요 — 코드 삭제만, 다음 iOS 작업 시 검증.
+
+**잔여 데드코드 (다음 후보)**: `nowAsHostTime`(sync_service, 사용처 0) + wall 병행 경로(monotonic 검증 끝나면 제거) + prewarm/coolDown(NTP 관련, 사용 여부 확인 후).
+
+**커밋**: v0.0.116.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

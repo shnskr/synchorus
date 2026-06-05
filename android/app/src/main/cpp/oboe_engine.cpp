@@ -755,43 +755,6 @@ public:
         return mPlaybackSpeedX1000.load(std::memory_order_acquire);
     }
 
-    /// NTP-style 예약 재생 (v0.0.47). data callback 안에서 wall clock과 비교 →
-    /// 예약 시각 도달 시 정상 출력 시작 (그 전엔 silent + vf 동결).
-    /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
-    bool scheduleStart(int64_t wallEpochMs, int64_t fromFrame) {
-        if (!mFileLoaded) {
-            LOGE("scheduleStart: no file loaded");
-            return false;
-        }
-
-        // 시작 frame 미리 갱신 (silent 동안 동결됨, 도달 시 +elapsed 보정)
-        int64_t clamped = std::max(int64_t(0), std::min(fromFrame, mDecodedTotalFrames));
-        mVirtualFrame.store(clamped, std::memory_order_relaxed);
-        mScheduledStartFromFrame.store(clamped, std::memory_order_relaxed);
-
-        // 시작 wall ns 등록
-        mScheduledStartWallNs.store(wallEpochMs * 1000000LL, std::memory_order_release);
-        mScheduledStartActive.store(true, std::memory_order_release);
-
-        // stream 보장 (없으면 새로 open + start, 있으면 resume)
-        bool ok = start();
-        if (!ok) {
-            mScheduledStartActive.store(false, std::memory_order_relaxed);
-            LOGE("scheduleStart: start() failed");
-            return false;
-        }
-        LOGI("scheduleStart: wallMs=%lld fromFrame=%lld",
-             static_cast<long long>(wallEpochMs),
-             static_cast<long long>(clamped));
-        return true;
-    }
-
-    /// 진행 중인 schedule 취소 + 출력 정지 (pause 모델).
-    bool cancelSchedule() {
-        mScheduledStartActive.store(false, std::memory_order_relaxed);
-        return stop();
-    }
-
     bool seekToFrame(int64_t newFrame) {
         if (!mFileLoaded) return false;
         int64_t clamped = std::max(
@@ -844,37 +807,6 @@ public:
             memset(audioData, 0,
                    static_cast<size_t>(numFrames * outCh) * sizeof(float));
             return oboe::DataCallbackResult::Continue;
-        }
-
-        // NTP-style 예약 재생 (v0.0.47): 시작 wall time 도달 전엔 silent + vf 동결.
-        // 도달 시 elapsed만큼 vf 보정 후 active=false → 정상 출력.
-        if (mScheduledStartActive.load(std::memory_order_acquire)) {
-            struct timespec ts;
-            clock_gettime(CLOCK_REALTIME, &ts);
-            int64_t nowWallNs =
-                static_cast<int64_t>(ts.tv_sec) * 1000000000LL + ts.tv_nsec;
-            int64_t startWallNs =
-                mScheduledStartWallNs.load(std::memory_order_relaxed);
-            if (nowWallNs < startWallNs) {
-                // 아직 시작 시각 안 됨 → silent
-                memset(audioData, 0,
-                       static_cast<size_t>(numFrames * outCh) * sizeof(float));
-                return oboe::DataCallbackResult::Continue;
-            }
-            // 시작 시각 도달 — elapsed만큼 frame 보정 후 active=false
-            int64_t elapsedNs = nowWallNs - startWallNs;
-            int64_t elapsedFrames =
-                elapsedNs * mDecodedSampleRate / 1000000000LL;
-            int64_t fromFrame =
-                mScheduledStartFromFrame.load(std::memory_order_relaxed);
-            mVirtualFrame.store(fromFrame + elapsedFrames,
-                               std::memory_order_relaxed);
-            mScheduledStartActive.store(false, std::memory_order_release);
-            LOGI("scheduledStart fired: elapsedNs=%lld elapsedFrames=%lld vf=%lld",
-                 static_cast<long long>(elapsedNs),
-                 static_cast<long long>(elapsedFrames),
-                 static_cast<long long>(fromFrame + elapsedFrames));
-            // 그 다음 정상 출력 코드 그대로 진행 (아래로 떨어짐)
         }
 
         const bool muted = mMuted.load(std::memory_order_relaxed);
@@ -975,10 +907,6 @@ private:
     // prewarm 상태에서 콜백을 무음 + vf 동결 모드로 만드는 플래그. (v0.0.44)
     std::atomic<bool> mPrewarmIdle{false};
     // NTP-style 예약 재생 (v0.0.47). active=true이면 콜백이 wall clock과 비교해
-    // mScheduledStartWallNs 도달 전엔 silent + vf 동결, 도달 후 elapsed 보정 후 정상 출력.
-    std::atomic<bool> mScheduledStartActive{false};
-    std::atomic<int64_t> mScheduledStartWallNs{0};
-    std::atomic<int64_t> mScheduledStartFromFrame{0};
     std::mutex mLock;
 
     // getTimestamp 실패 원인 진단용. logcat 폭주를 막기 위해 연속 실패(streak)
@@ -1378,20 +1306,6 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeStop(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().stop() ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_synchorus_synchorus_NativeAudio_nativeScheduleStart(
-    JNIEnv* /*env*/, jobject /*thiz*/, jlong wallEpochMs, jlong fromFrame) {
-    return engine().scheduleStart(
-        static_cast<int64_t>(wallEpochMs), static_cast<int64_t>(fromFrame))
-        ? JNI_TRUE : JNI_FALSE;
-}
-
-JNIEXPORT jboolean JNICALL
-Java_com_synchorus_synchorus_NativeAudio_nativeCancelSchedule(
-    JNIEnv* /*env*/, jobject /*thiz*/) {
-    return engine().cancelSchedule() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT jlongArray JNICALL

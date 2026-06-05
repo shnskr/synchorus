@@ -35,11 +35,6 @@ const int _driftMedianWindow = 5;        // ~500ms (poll 100ms 기준)
 // 500ms 유지로 원상복구 후 재현 여부 확인. 재현 안 되면 B가 원인, 재현 시 C/A 의심.
 const double _obsBroadcastIntervalMs = 500.0;
 // v0.0.47: NTP-style 예약 재생 buffer (ms). 호스트 syncPlay/syncSeek 시점부터 양쪽
-// 동시 출력 시작까지의 여유. broadcast RTT(~10~20ms) + 메시지 처리 + native 예약 등록 +
-// stream 시작 latency(저가형 oboe ~100~수백ms 가능) + 마진. 200ms은 일반 LAN에서 안전.
-// 사용자 체감 "버튼 누르고 잠깐 후 재생"이지만 음악 동기 앱 특성상 무시 수준.
-const int _scheduleBufferMs = 200;
-
 // v0.0.81: ANCHOR-VERIFY 임계 — anchor 박힌 100ms 후 ts.virtualFrame이 targetGuestVf와
 // 이 임계 넘게 차이나면 anchor 무효화 + 다음 obs 도착 시 재시도. 큰 seek 직후 native가
 // 정확히 도달 못 한 경우(seek race / 디코드 wait 등) 영구 잔재 자동 회복.
@@ -198,10 +193,6 @@ class NativeAudioSyncService {
         await _handleAudioUrl(message['data']);
       } else if (type == 'seek-notify' && !_isHost) {
         _handleSeekNotify(message);
-      } else if (type == 'schedule-play' && !_isHost) {
-        await _handleSchedulePlay(message['data']);
-      } else if (type == 'schedule-pause' && !_isHost) {
-        await _handleSchedulePause(message['data']);
       } else if (type == 'audio-request' && _isHost) {
         _handleAudioRequest(message['_from']);
       } else if (type == 'state-request' && _isHost) {
@@ -561,7 +552,7 @@ class NativeAudioSyncService {
       vf = 0;
     }
 
-    // play 직전 position 캡처 (scheduleStart 후 첫 poll까지 seek bar 0:00 점프 방지)
+    // play 직전 position 캡처 (재생 시작 후 첫 poll까지 seek bar 0:00 점프 방지)
     if (sr > 0) {
       final pos = Duration(milliseconds: (vf * 1000 / sr).round());
       _seekOverridePosition = pos;
@@ -572,9 +563,7 @@ class NativeAudioSyncService {
       });
     }
 
-    // v0.0.48 롤백: NTP 예약 재생 보류, v0.0.45 동작 회복.
-    // (NTP 코드 인프라는 보존 — 다음 세션 재활용. _engine.scheduleStart / cancelSchedule
-    // 와 schedule-play/schedule-pause 메시지 핸들러 모두 dead path로 남김.)
+    // 호스트도 engine.start 직접 (NTP 예약 재생 scheduleStart는 v0.0.115에서 제거).
     final ok = await _engine.start();
     if (!ok) return;
     _playing = true;
@@ -1213,8 +1202,7 @@ class NativeAudioSyncService {
         );
       }
 
-      // v0.0.48 롤백: schedule-play 호스트 broadcast 안 함 → audio-obs 기반으로만
-      // 게스트 재생 시작/정지. v0.0.45 동작.
+      // 게스트 재생 시작/정지는 audio-obs 기반 (NTP schedule-play는 v0.0.115에서 제거).
       // v0.0.69: framePos>0 sanity gate. 호스트 ts 간헐 실패(framePos=-1) 중인
       // stub obs를 신뢰하면 호스트 무음인데 게스트만 단독 재생 발생(HISTORY (81)).
       // framePos<=0 obs는 startPlayback 보류, 다음 정상 obs(<=500ms 후) 도달 시 시작.
@@ -1231,95 +1219,6 @@ class NativeAudioSyncService {
     } catch (e) {
       debugPrint('audio-obs parse error: $e');
     }
-  }
-
-  // v0.0.47: schedule 진행 중 race 방지. _handleSchedulePlay와 _scheduleFromObs가
-  // 동시 호출되면 둘 다 scheduleStart → 호스트와 다른 fromVf로 시작 → 큰 drift.
-  bool _scheduleInProgress = false;
-
-  /// v0.0.47: 합류 게스트의 자체 schedule 계산. (v0.0.48에서 호출 비활성화 — NTP 재도입 시 재활용)
-  /// 호스트 obs로부터 현재 호스트 콘텐츠 위치 외삽 → 200ms 후 양쪽 시작 위치 계산.
-  // ignore: unused_element
-  Future<void> _scheduleFromObs() async {
-    if (_playing || _scheduleInProgress) return;
-    final obs = _latestObs;
-    if (obs == null || !_sync.isSynced) return;
-    _scheduleInProgress = true;
-
-    // _playing은 schedule 등록 직전 set — race 방지 (await yield 동안 다른 메시지가
-    // _scheduleFromObs/_handleSchedulePlay 다시 호출 못 함).
-    _playing = true;
-    _playingController.add(true);
-
-    try {
-      final guestNowMs = DateTime.now().millisecondsSinceEpoch;
-      final hostNowMs = guestNowMs + _sync.filteredOffsetMs.round();
-      final hostFpMs =
-          obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
-      final hostContentFrameNow = obs.virtualFrame +
-          ((hostNowMs - obs.hostTimeMs) * hostFpMs).round();
-      final hostContentFrameAtStart =
-          hostContentFrameNow + (_scheduleBufferMs * hostFpMs).round();
-      final startGuestWallMs = guestNowMs + _scheduleBufferMs;
-
-      debugPrint(
-          '[GUEST] scheduleFromObs startWallMs=$startGuestWallMs '
-          'fromVf=$hostContentFrameAtStart hostOffset=${_sync.filteredOffsetMs.round()}');
-
-      final ok = await _engine.scheduleStart(
-          startGuestWallMs, hostContentFrameAtStart);
-      if (!ok) {
-        _playing = false;
-        _playingController.add(false);
-        return;
-      }
-      _resetDriftState();
-    } finally {
-      _scheduleInProgress = false;
-    }
-  }
-
-  /// v0.0.47: 호스트의 schedule-play 메시지 처리. wall time 변환 후 native schedule 등록.
-  /// 호스트가 정확한 fromVf 보내므로 _scheduleFromObs보다 정확. race 시 우선.
-  Future<void> _handleSchedulePlay(Map<String, dynamic>? data) async {
-    if (data == null || !_audioReady) return;
-    final hostStartWallMs = (data['startWallMs'] as num?)?.toInt();
-    final fromVf = (data['fromVf'] as num?)?.toInt();
-    if (hostStartWallMs == null || fromVf == null) return;
-
-    // 진행 중이면 잠깐 대기 — 마지막 schedule-play가 이김 (멱등). 단순화 위해 reentrant 허용.
-    _scheduleInProgress = true;
-    // _playing을 await 전 set — _handleAudioObs의 _scheduleFromObs 호출 차단
-    _playing = true;
-    _playingController.add(true);
-
-    try {
-      final guestStartWallMs =
-          hostStartWallMs - _sync.filteredOffsetMs.round();
-      debugPrint(
-          '[GUEST] schedule-play hostWallMs=$hostStartWallMs '
-          'guestWallMs=$guestStartWallMs fromVf=$fromVf '
-          'offset=${_sync.filteredOffsetMs.round()}');
-
-      final ok = await _engine.scheduleStart(guestStartWallMs, fromVf);
-      if (!ok) {
-        _playing = false;
-        _playingController.add(false);
-        return;
-      }
-      _resetDriftState();
-    } finally {
-      _scheduleInProgress = false;
-    }
-  }
-
-  /// v0.0.47: 호스트의 schedule-pause 메시지 처리. 즉시 정지.
-  Future<void> _handleSchedulePause(Map<String, dynamic>? data) async {
-    debugPrint('[GUEST] schedule-pause');
-    if (!_playing) return;
-    _playing = false;
-    _playingController.add(false);
-    await _engine.cancelSchedule();
   }
 
   // ═══════════════════════════════════════════════════════════

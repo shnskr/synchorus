@@ -11,8 +11,6 @@ object NativeAudio {
     external fun nativeCoolDown(): Boolean
     external fun nativeStart(): Boolean
     external fun nativeStop(): Boolean
-    external fun nativeScheduleStart(wallEpochMs: Long, fromFrame: Long): Boolean
-    external fun nativeCancelSchedule(): Boolean
     external fun nativeGetTimestamp(): LongArray
     external fun nativeSeekToFrame(newFrame: Long): Boolean
     external fun nativeGetVirtualFrame(): Long

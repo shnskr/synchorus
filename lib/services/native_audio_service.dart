@@ -149,23 +149,6 @@ class NativeAudioService {
     return await _channel.invokeMethod<bool>('stop') ?? false;
   }
 
-  /// NTP-style 예약 재생 (v0.0.47).
-  /// [wallEpochMs]: 시작할 wall clock 시각 (ms epoch).
-  /// [fromFrame]: 시작할 콘텐츠 frame (sample rate는 파일 sr 기준).
-  /// 양쪽이 같은 wallEpochMs를 약속해 동시 출력 시작 → anchor 의존 제거.
-  /// iOS는 `AVAudioPlayerNode.play(at:)`, Android는 oboe 콜백 안에서 wall 비교.
-  Future<bool> scheduleStart(int wallEpochMs, int fromFrame) async {
-    return await _channel.invokeMethod<bool>('scheduleStart', {
-      'wallEpochMs': wallEpochMs,
-      'fromFrame': fromFrame,
-    }) ?? false;
-  }
-
-  /// 진행 중인 schedule 취소 (호스트 syncPause 등).
-  Future<bool> cancelSchedule() async {
-    return await _channel.invokeMethod<bool>('cancelSchedule') ?? false;
-  }
-
   /// 타임스탬프 조회 (sync용).
   Future<NativeTimestamp?> getTimestamp() async {
     final result = await _channel.invokeMethod<Map>('getTimestamp');
