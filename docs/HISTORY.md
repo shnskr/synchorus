@@ -6632,6 +6632,12 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 **청감**: 사용자 "대체로 OK" — vfDiff -26인데도 청감 무영향 → **결함 A 잔재(-5~-26ms)가 청감 임계 아래**.
 
+**왜 어떤 점프(seek) 방식도 -5를 못 고치나 (후속 논의, close의 진짜 근거)**: 측정한 1단계는 사실 설계 합의(SYNC_REDESIGN `:282` "0점은 자주 fresh, **seek는 차이 클 때만** = 기존 메커니즘이 알아서")와 어긋난 **"realign 매번 seek 동반"판**이었음 — 1단계 MVP(`:287`)가 "기존 seek 로직 재사용"으로 적혀 통찰(`:282` 분리)과 모순. 진짜 합의판(숫자만 갱신, seek 분리)을 따져도 -5는 못 고침. **세 갈래 다 막힘:**
+- **숫자만 갱신**(합의판): vfDiff(절대 위치)는 anchor를 **안 씀**(`:1727-1728`, 게스트 virtualFrame을 호스트 외삽과 직접 비교) → baseline 숫자 갱신해도 게스트가 안 움직여 **vfDiff(-5) 불변**. 게다가 기존 drift seek(`:1826` `|medianDrift|≥20`)는 baseline 갱신마다 drift 0 리셋(`:1788 _driftSamples.clear()`)으로 **죽고**, -5는 애초 drift에 **안 보임**(거짓말 패턴 — 측정에서 drift ±2~5 정상인데 vfDiff -26). = 악화는 없으나 못 고침.
+- **seek 동반**(측정한 구현): self-seek 음수 편향 -26 **악화**.
+- **rate-bend**(2단계): 점프 없이 부드럽게 = 유일한 깨끗한 해법, native+Dart 큰 비용.
+즉 작은 0점 오차(-5)는 **vfDiff(절대 위치) 문제인데 기존 보정은 전부 drift(rate) 기반(`:1813`/`:1826`, vfDiff 안 봄 `:1810`)이라 못 보고, vfDiff 기반으로 잡으려면 점프(seek)는 거칠어 악화·임계 낮추면 떨림** → rate-bend 아니면 불가.
+
 **결정 (사용자 합의)**: **1단계 롤백(`git restore`) + 트랙 보류(close)**. 효용<비용 — 청감 무영향 + seek 기반 접근 실패(할수록 해로움) + 2단계 rate-bend는 native+Dart 큰 비용. baseline(v0.0.120, anchor 한 번 박기)이 현재 최선이라 유지. (결함 B 음향 11ms 비대칭 close와 동형 판단.) **재개조건**: BT 등 큰 비대칭 경로 체감 시 / 다른 큰 이슈 해결 후 마지막 병목 시 → 그땐 seek가 아니라 **2단계 rate-bend**(SoundTouch setTempo ±0.05%, 점프 없는 미세보정)로.
 
 **측정 인프라 유지**: `scripts/analyze_anchor.sh`(event별 vfDiff 분포), `measurements/realign2s_2026-06-05.csv` / `realign5s_2026-06-05.csv` / baseline `manual_2026-06-05_181705.csv`·`182028_s12.csv`.

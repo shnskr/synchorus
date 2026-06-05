@@ -310,6 +310,8 @@ v0.0.120(offset 안정화, #1) 후 1단계 재측정 — 1차 롤백 사유(offs
 
 **realign 빈도↑ = vfDiff 악화** (2초 -26 → 5초 -15 → ∞/baseline -5 = 주기↑일수록 baseline 수렴). offset 3개 측정 모두 안정이라 신뢰 가능(측정 아티팩트 아님). raw: realign 직후 vfDiff가 음수로 점프 후 다음 realign까지 고정 + 그동안 drift(rate) ±2~5 정상 = **거짓말 패턴**(baseline이 어긋난 자리에 박힘, rate는 맞음). **self-seek가 매번 음수 편향으로 박는 게 root** — establish(처음, accum≈0)는 -5로 정확한데 주기 realign(accum 누적)만 악화 = framePos 실이동 + accum 가상보정 **이중카운트 가설**(native virtualFrame/framePos 관계 미확정).
 
+**왜 점프 방식 자체가 막히나 (close의 진짜 근거)**: 측정 1단계는 합의(`:282` "seek는 차이 클 때만, 기존 메커니즘이 알아서")와 달리 realign이 **매번 seek 동반**(1단계 MVP `:287`이 통찰과 모순). 합의판(숫자만 갱신, seek 분리)을 따져도 못 고침 — vfDiff(절대 위치)는 **anchor 독립**(`:1727-1728`)이라 숫자만 갱신하면 게스트가 안 움직여 -5 불변 + 기존 drift seek(`:1826`)는 baseline 갱신마다 drift 0 리셋(`:1788 clear`)으로 죽음 + -5는 drift에 안 보임(거짓말 패턴). 즉 -5는 vfDiff 문제인데 **기존 보정은 전부 drift(rate) 기반**(`:1813`/`:1826`, vfDiff 안 봄 `:1810`) → 점프(seek)로는 악화/떨림, **rate-bend(#5)만 깨끗**. 세 갈래(숫자만=무해무익 / seek=악화 / rate-bend=큰비용) 다 막혀 close.
+
 **결정 (사용자 합의)**: seek 기반 1단계 **실패 확정** → **트랙 보류(close)**. 청감 "대체로 OK"(vfDiff -26인데 무영향 = 잔재 청감 임계 아래) + seek 접근은 할수록 해로움 + 2단계 rate-bend는 native+Dart 큰 비용 → **효용<비용**. baseline(v0.0.120, anchor 한 번 박기)이 현재 최선이라 유지. **결함 B 음향 11ms close (132)와 동형.** **재개조건**: BT 등 큰 비대칭 경로 체감 시 / 다른 큰 이슈 해결 후 마지막 병목 시 → 그땐 **seek 아닌 2단계 rate-bend**로.
 
 ### 2단계 (보류 — 결함 A 재개 시 진입점, seek 대신 rate-bend)
