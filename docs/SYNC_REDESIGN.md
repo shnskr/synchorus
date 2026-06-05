@@ -84,8 +84,8 @@
 ### 🥉 3. isOffsetStable jitter 강건화 (결함 A 약점 4)
 - winMinRaw 비교 임계(2ms) vs reject 노이즈(±15ms) 미스매치 해소: RTT outlier reject를 window median 기반으로, stable "5회 연속 0 리셋"을 누적 감점식으로 완화. **(v0.0.112 force-establish는 offset 결핍 상태에서 박지 말 것 — (124) 폐기 교훈.)**
 
-### 4. vfDiff 임계 80~100ms + 지속 가드 (40~95ms 진동)
-- `_vfDiffReAnchorThresholdMs` 150→80~100, 단발 staleness 오발 방지 위해 "연속 N회 초과 시만" 발동.
+### 4. vfDiff 임계 80~100ms + 지속 가드 — ⚠️ 진동 동기 소멸 (2026-06-05 (138))
+- 원 동기였던 "40~95ms 진동"((124))은 v0.0.118/119 fix 후 재측정에서 **재현 안 됨 → close** (HISTORY (138), 재입장 5회 폭 3~6ms). 임계 자체는 코드상 이미 realign 60(`_vfDiffRealignThresholdMs`) / reset 200(`_reAnchorThresholdMs`)으로 분화(v0.0.114). 잔존 동기는 (125) "게스트 체계적 앞섬 40~46ms"(결함 A, 임계 낮춰도 미달)뿐 → 결함 A 트랙(🥈2, (136) close)에 흡수.
 
 ### 5. 미세 정렬층 (결함 A 미세 정렬, 중장기)
 - 정수 샘플 add/drop → SoundTouch/AVAudioUnitTimePitch ±0.05% rate-bend 폐루프. **Android+iOS 동시 구현 필수.**

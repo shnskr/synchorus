@@ -6662,6 +6662,38 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-05 (138) — ② 재입장 vfDiff 진동 재측정: 40~95 진동 소멸 확정(v0.0.118/119 효과) → 트랙 close + fallback obs 의존성 분석
+
+**배경**: PLAN §H 미해결 #6 "vfDiff 40~95ms 진동"((124) 재입장 후 관찰)이 v0.0.118(ring overwrite)/v0.0.119(resume 0:00) 두 청감 버그 fix 후에도 남는지 깨끗하게 재측정. (124) 측정은 그 두 버그 + force-establish(폐기)로 오염 의심이었음.
+
+**측정** (호스트 SM-S947N(R3KL207HBBF) csv 기록, 게스트 S22 SM-S901N(R3CT60D20XE), v0.0.120, 재입장 5회, `measurements/reentry_2026-06-05.csv`):
+
+| 입장 | drift vfDiff mean | range | 폭 |
+|---|---|---|---|
+| #1 | -7.5 | [-9.4, -5.5] | 3.9 |
+| #2 | -22.1 | [-24.4, -21.2] | 3.2 |
+| #3 | -13.4 | [-15.6, -11.2] | 4.5 |
+| #4·5 | -14.5 | [-17.5, -11.1] | 6.4 |
+
+**결과 (관찰 사실)**:
+1. ✅ **40~95 진동 소멸** — 각 재입장 구간 내 vfDiff 폭 **3~6ms**(왕복 없음). (124) "40↔90 진동" 재현 안 됨. **v0.0.118/119가 (124) 진동의 진짜 원인이었음 확인** (PLAN §H #6 "두 fix 오염" 가설 적중).
+2. ✅ **재입장 clock sync 지연 없음** — anchor가 매 재입장 ~5초(10 seq) 내 박힘, offset **stdev 0.62 / span 2.9ms**. (124) "8초 rawOff=0"은 (134) 측정 아티팩트 결론 재확인 (guest_start row rawOff=0/rtt=0은 lastRaw/Rtt 컬럼 미충전일 뿐, anchor_set rtt 8~18로 정상).
+3. ✅ **fallback 거대 spike 무해** — `-14850~-195563ms` outlier가 정확히 각 재입장 직후 **첫 fallback 1개씩**(seq4/58/170/283), 다음 샘플 즉시 복구. (124) "초기 위치차, 문제 아님" 패턴.
+4. ⚠️ **결함 A 잔재 또렷** — 입장마다 anchor baseline -7/-22/-13/-14로 제각각. 입장#2 시계열: anchor 박히기 전 fallback -1.76~-2.76(정확) → anchor_set 후 -22 편향 고정. (126)/(136) "anchor가 fallback보다 부정확" 재현.
+
+**청감 (사용자)**: 전체적으로 "싱크 틀어진지 모를 정도로 좋음" + 재입장 즉시 싱크 잡음. 측정 최대 -22ms도 두 스피커 동시성 인지 임계(~20-30ms+) 안.
+
+**fallback obs 의존성 분석 (코드, fallback-only 전환 가능성 검토)**: 사용자 통찰 "측정상 fallback이 더 정확하니 fallback-only?" 검증.
+- **가설 정정**: "anchor는 obs 독립"은 부정확 — **둘 다 obs를 외삽 기준으로 씀**(`:1700`/`:1725` vs `:1473`/`:1486`).
+- **차이 = obs 사용 방식**: fallback(`_fallbackAlignment:1466`)은 매 보정마다 obs 절대 위치로 게스트를 **직접 seek**(obs null이면 정지 `:1474`, stale obs면 옛 위치로 잘못 seek = HISTORY (98) 실증, seek cooldown 1초 `:1521`로 방어). anchor/drift(`:1696`)는 obs를 **rate(변화율) 비교**(driftMs `:1716`)에 써 stale obs에 견고(`:1723`), 게스트 위치는 anchor baseline+자체 rate로 진행 → obs 주기/유실과 무관하게 매끄러움.
+- **fallback-only 리스크**: ① obs 500ms 주기인데 fallback은 100ms poll마다 정렬 → 사이 stale 외삽, ② obs 유실/혼잡 WiFi 시 잘못 seek, ③ 30ms↑ 점프(seek) 보정이라 자주 발동 시 글리치. → 저지연 WiFi에선 fallback이 정확하나 환경 흔들리면 anchor 강건. **anchor main이 합리적**. 결함 A 진짜 해법은 fallback-only가 아니라 anchor establish 정확도/주기 갱신(rate-bend, (136) close).
+
+**결정**: **② 진동 트랙 close** — 40~95 진동 소멸 확정(v0.0.118/119 효과). 결함 A 잔재(-7~-22)는 청감 OK + (136) close 유지(rate-bend 큰 비용) → **현 baseline(v0.0.120, anchor main) 유지**.
+
+**빌드**: 측정만, 코드 변경 없음 — **v0.0.120 유지**.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6689,7 +6721,7 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 - [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
 - [ ] **단독 모드 → P2P 전환 시 audio-url 미전파** (2026-05-29 (105) v0.0.88 신규). 단독 모드(WiFi 없음)에서 파일 로드 후 사용자가 WiFi 켜고 방 만들기 누르면 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 해결안: 방 만들기 시점에 `_startFileServer` 재시도 + audio-url broadcast 트리거. 사용자 합의 후 처리.
 - [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
-- [ ] **거짓말 패턴(vfDiff) 잔존 + anchor 공백** (2026-06-03 (123) v0.0.111 부분 대응). vfDiff re-anchor로 max 474→156ms 완화했으나 — (1) `isOffsetStable`이 raw RTT jitter(15~30ms)로 무너져 anchor가 길게 ~20초 안 박히는 공백(그동안 fallback ±240ms 방치), (2) 150ms 임계가 체감상 큼(→80~100ms 낮추는 후보), (3) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결. 다음 세션에 하나씩. 상세 (123) / PLAN §H.
+- [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73%(RTT 양극화, WiFi doze 의심, (135) 잔여, 별개 트랙), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
 - [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
 
 **안정성**
