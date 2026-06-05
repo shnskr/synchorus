@@ -211,3 +211,56 @@ Dart FFI `now()`와 native `getTimestamp`의 timeNs가 **반드시 같은 clock 
 - **ns JSON 전송**: BOOTTIME ns는 부팅 후 경과(작음) → 2^53(=104일) 안전. wall epoch ns보다 안전. 우려 시 세션 baseline 빼서 전송.
 - **EMA min-RTT 로직**: 점프 없어지면 그대로 둬도 됨 (PLAN.md:150). isOffsetStable jitter(결함 A 약점 4)는 별개 트랙.
 - 이 전환은 **결함 A/B와 독립** — offset 토대를 단단히 해 vfDiff 신뢰성 확보(측정3 거짓말 패턴 재발 방지). 토대 다진 뒤 결함 A(anchor 주기 재발행)·결함 B(음향 outputLatency 비대칭) 진행.
+
+---
+
+## 2026-06-05 (132) — acoustic 측정: 결함 B 정체 확정 = HAL 출력단 비대칭 (SoundTouch 무관)
+
+> (129)가 "음향 outputLatency 비대칭(결함 B)"로 지목한 타겟을, monotonic 안정(v0.0.115) 상태에서 맥북 마이크 acoustic 측정으로 ground truth 확정. **측정 절차/인프라/방법론 교훈 = HISTORY (132). 측정 코드 = `scripts/acoustic/`.**
+
+### 측정 결론 (실측, transpose 0/1.0 = SoundTouch bypass, S947N 호스트 + S22 게스트)
+- 음향 시차 **~11ms 고정**(음속보정 후, **호스트 출력이 먼저**) — rec2 12.0 / rec5 12.6.
+- vf_diff −28→−6.8 **출렁임**(재생 position 외삽) ↔ 음향 고정 → **음향은 재생오차(position)가 아님**.
+- monotonic offset 2.7ms 안정 → **클럭차 아님**(이미 보정됨). drift_ms(framePos=HAL DAC)≈0 → **DAC 레벨까지 sync 정확**.
+- ∴ **음향 11ms = framePos(DAC) 이후 → 스피커 출력단의 고정 지연 비대칭.** csv `out_lat_*_raw`(Oboe `calculateLatencyMillis`)가 DAC 이후를 못 잡음(부호도 반대: delta g−h −2.6) → 보정 안 됨. (33-2) "calculateLatencyMillis가 BT codec/radio·DAC 이후 못 잡음"과 일치.
+
+### ⚠️ 용어 정리 — "결함 B" 두 가지를 분리
+| | **결함 B-ST** (이 문서 §결함B 원래 정의) | **결함 B-HAL** (이번 측정 확정, 신규) |
+|---|---|---|
+| 정체 | SoundTouch 단계(TDStretch+batch+ring) latency 미반영 | HAL DAC→스피커 출력단 하드웨어/드라이버 지연 비대칭 |
+| 조건 | transpose/speed **ON** | **OFF(bypass)에서도 상존** |
+| 처리 | v0.0.112 `SETTING_INITIAL_LATENCY` 부분 반영 | **미처리** |
+| 크기 | rate 의존(수백 ms) | ~11ms (이 기기쌍, 음향 실측) |
+
+→ 이번 11ms는 SoundTouch와 **독립**(bypass 측정). PLAN/(129)에서 "결함 B"로 뭉뚱그린 건 **결함 B-HAL**을 가리킴.
+
+### 보정 설계 (초안) — ⚠️ 구현 보류(아래 "결정" 참조), 재개 시 출발점
+1. **보정값 성격 (가장 큰 결정)**: acoustic은 두 기기 *상대* 출력지연차만 줌(쌍 11ms). 단일 기기 절대값은 분해 불가(loopback 단독 측정 없이는).
+   - **(A) 기기쌍+역할 상수**: "S947N=host일 때 host +11ms" 하드코딩. 단순·즉효. 역할/기기 바뀌면 무효 → 재측정.
+   - **(B) 기기별 절대 보정 테이블**: 모델명/식별자 → 출력지연 보정값 DB. 역할 무관 일반화. 단 절대값 분해가 필요(추가 측정 설계) + 기기 커버리지 문제.
+   - **(C) 앱 내 자동 acoustic 캘리브레이션**: 한쪽 폰 마이크로 상대방+자기 출력 녹음 → 자동 보정((33-2) 옵션 C). 근본적·범용. 큰 작업.
+2. **적용 위치**: ① native `out_lat_*_raw`에 보정 가산(Oboe 값 교정) vs ② Dart anchor 공식 `safeOutputLatencyMs` 비대칭 보정(`native_audio_sync_service.dart:1669` 영역)에 상수 추가. — 결함 B-ST의 `SETTING_INITIAL_LATENCY` hook과 합칠지도 검토.
+3. **부호**: 호스트 출력이 ~11ms **빠름** → 호스트 outputLatency를 +11ms **크게** 잡아(=실제 더 늦게 도달하는 것처럼) 호스트 재생을 11ms 늦춰 정렬. (역으로 게스트 −11ms도 동치, 절대 분해 안 되면 상대만.)
+4. **캘리브레이션 트리거**: 수동 1회 측정 → 상수 커밋(MVP) vs 앱 내 버튼/자동.
+
+### 미해결/리스크
+- **경로 의존성**: 11ms는 유선/내장스피커 기준. BT(codec/radio)·기기마다 다를 것((33-2)/(33-3) BT 케이스 = calculateLatencyMillis 부정확 최악). 보정 상수의 일반성 미검증.
+- **측정 정밀도**: 현재 2점(rec2/rec5) + 음속보정(거리 추정) 오차 ±1~2ms. 상수 확정 전 3~5회 반복 + 거리 정밀 측정 권장.
+- **절대 분해 불가**: acoustic 쌍 측정은 상대값만 → "어느 기기가 기준(0)인가" 미정. (B)로 가려면 기준 기기 1대 loopback 절대 측정 필요.
+- **iOS**: `AVAudioSession.outputLatency`는 BT 반영(문헌) — Android와 보고 의미/정확도 다를 수 있어 iOS 별도 acoustic 필요.
+
+### 결정 (2026-06-05) — 보정 구현 **보류 (close)**. 진단·인프라만 보존.
+사용자 합의로 보정 구현 트랙 종료. 사유:
+- **효용 작음**: 11ms는 인지 경계(청감 "미묘", 큰 어긋남은 monotonic이 이미 해결).
+- **비용 큼 + 산출물 불완전**: 동적 보정엔 앱 내 acoustic 캘리브레이션이 필요한데, 그 측정 자체가 반향·거리·노이즈로 흔들림(이번 4회 실패가 증거) → **"측정해 보정했는데 측정오차로 또 틀어지는" 악순환** 위험.
+- **outputLatency 본질적 불확실**: OS 보고든 acoustic이든 경로·코덱·환경에 휘둘림 → 완벽 보정은 환상, 11ms 위해 큰 인프라 떠안는 건 ROI 안 맞음.
+- **더 큰 미해결 우선**: isOffsetStable jitter→anchor 공백 ±240ms(#1), 재입장 clock sync ~8초(#5)가 체감 좌우.
+
+**보정 논의에서 확정한 설계 원칙 (재개 시 준수)**:
+- **"값" 하드코딩 금지 → "값 받는 통로"만**: sync가 보정값을 저장소/동적 소스에서 읽기. 코드엔 메커니즘만, 값은 측정/설정/원격으로 주입.
+- **값은 `(기기 × 출력경로)` 단위로 변동**: 같은 경로(내장스피커끼리)는 안정(rec2 12.0/rec5 12.6 실증), 경로 전환(내장↔BT↔이어폰)에서 크게 변함(BT 코덱/연결마다 수십~수백ms). → 경로별 캐싱 + 경로전환 감지(OS가 알려줌).
+- 최종 값 소스 = **앱 내 acoustic 캘리브레이션**(원리·스크립트 이번 검증 완료, native/Dart 이식만 남음).
+
+**재개 트리거**:
+1. BT 스피커 등 **비대칭이 수십~수백ms로 커지는 경로**에서 실제 체감될 때.
+2. anchor 공백·재입장 등 **큰 이슈를 다 잡고 11ms가 마지막 병목**이 될 때.

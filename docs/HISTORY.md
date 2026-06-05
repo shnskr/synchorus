@@ -6489,6 +6489,41 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (132) — acoustic 측정으로 결함 B(출력단 지연 비대칭) 실재 확정 + 측정 인프라 구축 (코드 변경 없음)
+
+**배경**: (129)/(130) 후속. monotonic 전환(v0.0.115)으로 offset이 안정된 상태에서, 남은 "미묘한 음향 어긋남"의 정체(결함 B = outputLatency 비대칭)를 맥북 마이크 acoustic 측정으로 ground truth 확정. 호스트 SM-S947N(R3KL207HBBF) + 게스트 SM-S901N/S22(R3CT60D20XE).
+
+**측정 인프라 (신규, `scripts/acoustic/`)**:
+- `gen_chirp.py` → `measure_chirp.mp3`: **5ms chirp(1k→4kHz sweep), 1초 주기, 15분 mp3**. chirp은 pulse-compression으로 matched-filter peak가 순톤/임펄스보다 날카로움(sub-ms). 1k~4kHz는 폰 스피커/마이크 안전대역. mp3 320k 인코딩(두 폰 동일 왜곡이라 상대 시차 불변, round-trip self-test로 −15ms 정확 복원 확인).
+- `analyze.py`: 녹음 wav ⨯ chirp template **matched filter(correlate+hilbert envelope)** → 1초 주기마다 2-peak(host/guest). self-test로 ±부호·음속보정 검증 통과.
+- 녹음: `ffmpeg -f avfoundation -i ":0"` 맥북 내장 마이크 → wav. 입력게인 35(클리핑 방지).
+- 동시에 호스트 `sync_log_*.csv` 기록(일반 빌드 호스트 상시 로깅) → 음향과 csv 교차.
+
+**방법론 교훈 (관찰 사실)**:
+- **녹음 timebase 0.877배 압축** — ffmpeg avfoundation이 맥북 마이크 실제 delivery rate를 48000으로 잘못 태깅(60초 명령 → 52.6초 출력). measure_chirp의 **정확한 1.0초 주기를 anchor로 chirp 실측주기(877ms)로 자동 캘리브레이션**(`time_scale=1.0/P_meas`) → 재생은 48kHz 폰 클럭(정확)이라 보정 가능. ⚠️ 처음 "1.15배속 재생" 가설은 **오진** → 사용자 "1배속 맞다" + 녹음길이 단서로 철회.
+- **transpose/speed ON 시 chirp 들쭉날쭉** — SoundTouch는 85ms(`kSTWorkerBatchFrames=4096`) batch로 처리(`SEQUENCE_MS=82`)인데 5ms chirp+995ms 무음과 안 맞아 pitch-shift가 transient를 뭉갬/누락. (116) H-1 동일 메커니즘. **측정은 transpose 0/1.0배=SoundTouch bypass(`oboe_engine.cpp:822`)라 무관** — chirp 정상 출력.
+- **진폭 기반 host/guest 식별은 반향장에서 실패** — 호스트 3cm/게스트 50cm(거리비 16배)인데 진폭비 1.42뿐 = 방 반향이 거리효과를 죽임. 음소거 식별(rec3/4)도 진폭 변동(폰 미고정)으로 실패.
+- **부호 확정 = "볼륨 조정한 폰 추적" 교차검증** (핵심 트릭): rec2(호스트 볼륨↓)와 rec5(원복)에서 **나중 peak 진폭 불변(0.75→0.82=게스트, 볼륨 안 건드림)** + **먼저 peak만 0.56→0.99 변함(호스트, 볼륨 조정)** → **먼저 도착 peak=호스트** 확정. 진폭 절대값 안 쓰므로 반향 무관.
+
+**핵심 발견 — 결함 B 실재 확정 (실측)**:
+| 구간 | 음향 시차 | csv vf_diff | drift_ms(framePos) | offset_ms | out_lat H/G |
+|---|---|---|---|---|---|
+| rec2 12:20 | **+12.0ms**(host먼저) | −28.2 | −0.9 | (기준) | 10.1/8.6 |
+| rec5 12:52 | **+12.6ms** | **−6.8** | +1.8 | +2.7ms | 10.3/7.7 |
+
+- **음향 시차 ~12ms 고정** ↔ vf_diff −28→−6.8 **출렁임**(21ms) → 음향은 재생 position 외삽(vf_diff)을 **안 따라감 = 재생오차 아님** (사용자 통찰).
+- **monotonic offset 2.7ms만 변동**(안정) → 클럭차는 sync가 보정 → 음향 12ms는 **클럭차도 아님**.
+- **drift_ms(framePos=HAL DAC) ≈ 0** → DAC 레벨까지 sync 정확.
+- ∴ **음향 12ms = framePos(DAC) 이후 → 스피커 출력단의 고정 지연 비대칭 = 결함 B**. csv `out_lat`(Oboe `calculateLatencyMillis`)가 DAC 이후를 못 잡음((33-2)와 일치). 음속보정 후 **~11ms, 호스트 출력이 게스트보다 빠름**. csv out_lat delta(g−h) −2.6ms는 **부호도 반대로 과소보고**.
+
+**정정**: 측정 중 `결함B = emit_dt + vf_diff`로 계산한 건 **무효** — vf_diff가 음향과 독립(출렁이는데 음향 고정)이라 쓰면 안 됨. **결함 B = 음향 잔차 ~11ms 자체**(framePos drift≈0 기준).
+
+**측정 데이터**: `measurements/acoustic/rec{2,5}.wav` + `rec{2,5}_synclog.csv`. (rec1 무효=음악+2배속 오선택, rec3/4 무효=음소거 진폭변동.)
+
+**다음**: 보정 구현은 **보류(close, 사용자 합의)** — 11ms 인지경계(효용↓) + 동적 캘리브레이션 비용·측정오차 악순환(이번 4회 실패) + outputLatency 본질적 불확실 + 더 큰 이슈(anchor 공백 ±240ms/재입장 8초) 우선. 진단·인프라만 보존. 재개조건/설계원칙("값 박지 말고 통로", 경로별 캐싱)은 SYNC_REDESIGN (132) "결정" 참조.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
