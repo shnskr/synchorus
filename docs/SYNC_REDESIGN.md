@@ -264,3 +264,44 @@ Dart FFI `now()`와 native `getTimestamp`의 timeNs가 **반드시 같은 clock 
 **재개 트리거**:
 1. BT 스피커 등 **비대칭이 수십~수백ms로 커지는 경로**에서 실제 체감될 때.
 2. anchor 공백·재입장 등 **큰 이슈를 다 잡고 11ms가 마지막 병목**이 될 때.
+
+---
+
+## 2026-06-05 — 결함 A 거친 정렬층 = anchor 주기 재발행 (1단계 설계 합의)
+
+> 사용자와 개념 합의 완료(이 세션 대화). 결함 A "anchor 한 번 박고 믿기"의 해법. `native_audio_sync_service.dart`.
+
+### 문제 재확인 (실측 근거)
+- anchor establish는 게스트를 호스트 위치로 **seek + 그 시점의 환산값(offset/외삽/outLatDelta)을 baseline에 베이크인**(`:1586-1592`). 이후 `_recomputeDrift`는 **"baseline 대비 변화분(driftMs, rate)"만** 봄 → baseline의 절대 오차(0점 오차)는 driftMs로 안 보임("거짓말 패턴", `:1719`).
+- **0점 오차의 출처 = 호스트가 아니라 게스트의 환산**: ① offset(clock sync ±오차, 수렴 중이면 더 큼) ② 500ms 묵은 obs 외삽 ③ outputLatency 비대칭(BT 분단위 ±30~70ms 출렁) ④ self-seek 도달 오차. **호스트 obs 데이터는 정확**, 게스트가 그걸 자기 시간축으로 옮기는 한 순간의 환산이 박혀 굳음.
+- 환산 오차는 **체계적 편향이 아니라 랜덤**(HISTORY (126): anchor 세션마다 vfDiff +46/−65로 흩어짐, fallback은 0~5로 정확). → **매번 fresh 환산하는 fallback이 한 번 박는 anchor보다 정확**(실측). anchor는 안정성(변화분 보정)을 얻는 대신 0점 오차를 못 잡음.
+- **현 v0.0.114 realign의 한계**: vfDiff 중앙값 ≥ **60ms**일 때만 baseline fresh 재정렬(`:1772-1793`). 그런데 결함 A 잔재는 **vfDiff −19.5ms로 일정**(톱니fix 후, PLAN "seek 임계 20 바로 아래라 방치") → 60 임계를 절대 안 넘어 **영구 잔존**. 반응적(틀어진 뒤)이라 "일정한 작은 편향"을 못 잡음.
+
+### 핵심 통찰 (개념 합의)
+- 고칠 건 **폴링 빈도(이미 100ms 충분)가 아니라 "0점(baseline)을 다시 박는 빈도"**.
+- 현재 "0점 박기 = seek 무조건 동반"(`:1586`, `:1781`)이라 "자주 박기 = 자주 seek = 떨림"으로 묶임. → **분리**: 0점은 자주 fresh, seek(게스트 실제 이동)는 차이 클 때만.
+- 단 **seek 없이 baseline 숫자만 갱신하면 실제 어긋남은 안 줄음**(게스트 안 움직이니). 어긋남을 실제로 줄이려면 seek(점프) 또는 rate-bend(속도 미세조정). → 작은 어긋남의 부드러운 흡수 = **rate-bend**(2단계).
+
+### 1단계 MVP (이번 구현, 사용자 선택 — rate-bend 없이 Dart만)
+- **realign을 시간 주기로도 발동**: 기존 `vfDiff ≥ 60ms`(반응적) **OR** `마지막 realign 후 N초 경과`(주기적, `_realignIntervalMs` 초기값 측정 후 확정 ~2000ms). 주기 발동이 vfDiff −19.5 같은 **일정 편향을 교정** → anchor 경로 vfDiff를 fallback 수준(0~5)으로.
+- realign 동작은 기존 로직 재사용(`:1777-1791`): 현재 호스트 콘텐츠 절대 위치로 fresh 재정렬(seek + baseline fresh) + `_seekCooldown`(1초).
+- **진동 방지** (사용자 우려 = 핵심 리스크): (a) `_seekCooldown` 1초로 연속 seek 차단 (b) **establish 오차를 한 번 fresh 정렬로 0 근처로 만들면 이후 주기 realign은 어긋남이 작아 seek 빈도가 자연히 ↓**. seek는 ring 재충전 + `getTimestamp` ErrorInvalidState(ts.ok=false, HISTORY (134))를 동반 → 그 직후 보정 금지가 cooldown의 본 목적.
+- **측정**: realign 발동 빈도(주기 vs vfDiff 분리 — event `anchor_realign_periodic`/`anchor_realign_vfdiff`), seek 도달 정확도, vfDiff 분포(주기 realign 전후), 청감 떨림. `_realignIntervalMs`·임계는 측정으로 튜닝.
+
+### 1단계 측정 결과 + 롤백 (2026-06-05) — 두 트랙 얽힘 확인, #1 선행 결정
+구현(realign 2초 주기 `_realignIntervalMs=2000` + cooldown 1초) 후 2분 측정(호스트 S947N + 게스트 S901N):
+- `anchor_realign_periodic` **31회 발동** — 주기 발동 메커니즘 자체는 작동.
+- ⚠️ **offset 불안정이 지배**: `fallback` **109회**(isOffsetStable=false) vs anchor(drift) 126회 — 2분 내내 offset이 자주 unstable = **별도 트랙 #1(isOffsetStable jitter)**.
+- realign 직후 vfDiff **−8~−46 톱니**(2초마다: realign event vfDiff=0은 `_logGuestEvent` placeholder, 실제는 다음 drift event가 −8/−33/−38/−46로 제각각). self-seek 오차로 의심되나 — **offset 불안정이라 vfDiff 신뢰 불가**(HISTORY (128) 교훈: vfDiff는 offset 의존 외삽값). → **효과 미확정**. 청감도 사용자가 집중 안 해 불명("대체로 OK").
+- anchor mean −27 vs fallback median −9: 이 환경에선 anchor가 더 나빠 보이나 **vfDiff 거짓 가능성으로 단정 불가**.
+
+**결정 (사용자 합의)**: 1단계 **롤백**(미커밋 코드 제거 — `git restore`). 사유: 효과 미확정 + self-seek 역효과 가능성 + **두 트랙 얽힘**(isOffsetStable jitter가 offset을 흔들어 anchor 측정을 오염 → 깨끗한 평가 불가). **"하나씩 확실히"** 원칙으로 #1을 먼저 분리해 풀기로.
+- **다음 순서**: ① **#1 isOffsetStable jitter 해결 → offset 안정화** (fallback 지배 해소, vfDiff 신뢰 회복) → ② anchor 주기 재발행 **재측정**(이 설계 그대로 재적용 — 개념·1단계·2단계 모두 유효). 측정 토대(offset 안정)를 먼저 다진 뒤 anchor를 평가해야 self-seek 오차 여부도 진짜로 가려짐.
+
+### 2단계 (보류 — 1단계 측정 후 판단)
+- **rate-bend 미세 정렬층**: 작은 어긋남을 seek(점프) 대신 SoundTouch `setTempo`(Android)/`AVAudioUnitTimePitch.rate`(iOS) ±0.05%로 흡수 → 점프 0 = 진동 원천 차단(ts.ok 불안정·ring 재충전 없음). vfDiff를 폐루프 입력으로. native + Dart 작업이라 1단계 효과 측정 후 착수.
+
+### 리스크/메모
+- 주기 realign이 매번 seek면 떨림 → `_realignIntervalMs`(주기)와 cooldown(1초)의 비율이 관건. 주기 < cooldown이면 cooldown이 빈도 상한. 측정으로 최적.
+- self-seek 검증 무력화(결함 A 약점 2)는 1단계에서 그대로 — realign 직후 driftMs는 정의상 ~0. ANCHOR-VERIFY(`:1411`)가 seek 도달 오차 감시 유지.
+- 별도 트랙(isOffsetStable jitter, 150ms 임계)은 이 트랙과 독립.
