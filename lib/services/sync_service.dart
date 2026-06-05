@@ -419,21 +419,6 @@ class SyncService {
     });
   }
 
-  /// 호스트 시간을 로컬 시간으로 변환
-  int hostTimeToLocal(int hostTimeMs) {
-    return hostTimeMs - _offsetMs;
-  }
-
-  /// 로컬 시간을 호스트 시간으로 변환
-  int localTimeToHost(int localTimeMs) {
-    return localTimeMs + _offsetMs;
-  }
-
-  /// 동기화된 "지금" 시간 (호스트 기준)
-  int get nowAsHostTime {
-    return MonotonicClock.nowMs() + _offsetMs;
-  }
-
   void dispose() {
     _messageSub?.cancel();
     _messageSub = null;

@@ -6483,7 +6483,7 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 **검증**: flutter analyze 통과 + APK 빌드 OK (Dart 미사용 잔재 0). iOS 빌드는 macOS 필요 — 코드 삭제만, 다음 iOS 작업 시 검증.
 
-**잔여 데드코드 (다음 후보)**: `nowAsHostTime`(sync_service, 사용처 0) + wall 병행 경로(monotonic 검증 끝나면 제거) + prewarm/coolDown(NTP 관련, 사용 여부 확인 후).
+**잔여 데드코드**: ✅ `nowAsHostTime`+`localTimeToHost`/`hostTimeToLocal` dead 삭제(v0.0.117, 사용처 0). prewarm/coolDown은 **유지** — coolDown이 iOS `unload()`(방 나가기)에서 실사용이라 dead 아님(2321 "dead 유지"는 오기), prewarm의 mPrewarmIdle도 stream 생성 공통 경로와 얽힘. ⏳ wall 병행 경로만 iOS 검증 후 제거.
 
 **커밋**: v0.0.116.
 
