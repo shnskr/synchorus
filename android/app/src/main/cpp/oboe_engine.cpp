@@ -1105,6 +1105,22 @@ private:
                 if (mDecodeSeekTarget.load(std::memory_order_relaxed) >= 0) {
                     continue; // 다음 루프 첫 머리에서 seek 처리
                 }
+                // v0.0.118 (133) ring overwrite fix: wait_for가 50ms timeout으로 깨면
+                // predicate(ring 가득) 충족 여부와 무관하게 여기 도달한다. ring이 여전히
+                // 가득(head-tail>=cap)인데 그냥 입력/출력 단계로 가면 chunk를 더 decode해
+                // head가 cap을 넘어 진행 → ring은 modular(vf%cap)라 옛 frame이 미래 frame
+                // PCM으로 덮어써짐. callback이 tail을 advance하는 정상 재생 중엔 안 터지나,
+                // callback이 tail 동결인 동안(prewarm idle / pause)엔 head가 폭주해 vf 위치에
+                // 엉뚱한 PCM이 박힘 → "시크바≠소리"(HISTORY (133) 실측: 호스트 prewarm 22초
+                // → head-tail이 cap+45만frame=10초 초과). timeout 깨움의 본래 목적인 seek
+                // 반응성은 위 seekTarget 체크가 이미 처리하므로, 가득이면 한 chunk도 더 안 채움.
+                {
+                    const int64_t head = mRingHead.load(std::memory_order_relaxed);
+                    const int64_t tail = mRingTail.load(std::memory_order_relaxed);
+                    if ((head - tail) >= mRingCapacityFrames) {
+                        continue; // ring 가득 — tail advance(재생/시크) 전까지 decode 멈춤
+                    }
+                }
             }
 
             // ---- 입력 단계: extractor → codec ----

@@ -6524,6 +6524,39 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (133) — v0.0.118 ring buffer overwrite fix (prewarm/pause 중 decode 폭주 → 시크바≠소리)
+
+**배경**: 재입장 8초 진단(별도 트랙)을 위해 실기기 2대(호스트 SM-S947N(R3KL207HBBF) + 게스트 SM-S901N(R3CT60D20XE)) 측정 중, 사용자가 **실제 음악** 재생에서 신규 버그 발견 — "시크바가 가리키는 위치와 실제 들리는 소리가 다른 곡 구간". (재입장 8초 트랙은 이 버그가 끼어들어 측정 미완 — csv rawOff/rtt가 `startPeriodicSync` 전용 컬럼이라 "8초간 clock sync 미작동은 측정 아티팩트일 수 있다"는 가설까지만 세움. 다음 트랙.)
+
+**증상 (사용자 관찰)**:
+- 호스트가 엉뚱한 구간 재생(게스트는 정상 위치) 또는 양쪽 다 시크바≠소리. **실제 소리가 다름**(무음 아님).
+- 트리거: **오래 정지(pause) 후 재생** 또는 재생 시작 전 긴 대기(prewarm). 정지 길수록 심함.
+- 호스트 심함, 게스트 경미. ~20초 후 자가 회복.
+
+**진단** (native `[VF-DIAG]` 임시 로그 추가 → 재현 → 분석):
+- ring buffer = content frame 윈도우 `[mRingTail, mRingHead)`, 저장은 modular `frame % cap` (`oboe_engine.cpp` callback `vf % capFrames`). 시크바=vf, 소리=ring[vf%cap] PCM. invariant `head − tail <= cap`.
+- **실측**: 호스트 첫 poll `vf=480 head=3101807 tail=0 cap=2646000` → **head−tail=3,101,807 > cap=2,646,000 (invariant 위반, 10초 초과, prewarm 22초)**. 게스트 `head−tail=2,650,223`(0.1초 초과)뿐 → **"호스트만 심함" 정확히 일치**.
+- modular overwrite: decode가 frame 0→3,101,807 순서로 채우며 **frame 0 위치(ring[0])가 frame 2,646,000(60초)으로 덮어써짐**. `vf=480`(0.01초) 읽으면 ring[480]=frame 2,646,480=**60초 PCM** → 시크바 0초인데 60초 소리.
+- **회복**: 재생 시작 후 callback이 tail advance(`vf−behind`) → head 폭주분 따라잡아 head−tail이 cap으로 수렴 → vf 위치 정상화 (~20초).
+
+**root cause**: `decodeLoop`의 `wait_for(50ms timeout, predicate=head-tail<cap)`가 **timeout으로 깨면 predicate 충족 여부와 무관하게 입력/출력 단계로 진행** → ring 가득인데도 chunk를 더 decode해 head가 cap 초과. 정상 재생 중엔 callback이 tail advance해 head−tail<cap 유지라 무해하나, **callback이 tail 동결인 동안(prewarm idle `mPrewarmIdle`, pause)** head 폭주 → modular overwrite. ring 도입(v0.0.76 `f7e4dfa`) 이래 잠복.
+
+**왜 그동안 안 잡혔나 (교훈)**:
+- 회귀/측정에 **비프·chirp 등 단일톤** 사용 → 전 구간 동일 파형이라 위치 어긋나도 같은 소리 → 무감지.
+- drift/vfDiff 측정도 **vf(보고 위치) 기반** → ring 실제 PCM 내용물 어긋남은 안 보임. 동기 측정은 계속 "정상". **실제 음악 청감으로만 발견.** → 합성음 측정 ≠ 실제 음악 청감 회귀.
+
+**fix** (`oboe_engine.cpp` decodeLoop): `wait_for` 직후 abort/seekTarget 체크 다음에 `(head-tail) >= cap`이면 `continue`(decode skip). timeout 본래 목적(seek 반응성)은 위 seekTarget 체크가 이미 처리하므로 안전. callback이 tail을 advance(재생/시크)하기 전까진 한 chunk도 더 안 채움.
+
+**검증** (호스트 SM-S947N + 게스트 SM-S901N):
+- 청감: 정지 38초 후 재생 → "시크바=소리" 정상.
+- logcat: pause 38초 후 `start(resume): head=2646016 tail=0` → **head−tail=2,646,016 = cap에서 정확히 멈춤(폭주 0)**. fix 전 prewarm 22초 `head−tail=3.1M`과 대조.
+
+**진단 로그 처리**: native `[VF-DIAG]`(poll/pause/resume/decode-seek) + 재입장 트랙 Dart `[REJOIN-DIAG]` 임시 로그는 검증 후 **전부 제거**(커밋엔 fix만).
+
+**빌드**: v0.0.118
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
