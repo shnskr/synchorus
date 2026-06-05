@@ -6694,6 +6694,30 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-05 (139) — offset reject ~73% close: 품질 게이트(무해) + 완화 역효과, 환경 탓 (코드 변경 없음)
+
+**배경**: "싱크 잔여 마무리" 트랙 마지막 항목. PLAN §H #1 잔여 reject ~73%((135) 관찰: periodic sync 통과 27/100, RTT 9~11 vs >30 양극화). close인지 코드 완화인지 판정.
+
+**코드 분석** (`sync_service.dart` startPeriodicSync):
+- reject = raw RTT > `_rejectThresholdMs`(30) 샘플 폐기(`:314-317`). 주석 명시 "window/EMA/stable 모두 변화 0" → **reject 자체는 무해**(품질 게이트). 비대칭 노이즈가 RTT에 비례(±RTT/2)해 RTT 큰 샘플은 rawOffset 부정확 → 거르는 게 맞음.
+- 통과분(27%)만으로 offset EMA(alpha 0.1, min-RTT 샘플 `:336/346`) 유지 → ② 측정에서 **offset stdev 0.62/span 2.9ms = 안정**. reject 높아도 offset 흔들림 없음.
+- reject 높음 → good 샘플(≤20, stable 타이밍 `:355`) 띄엄띄엄 → stable 잠깐 false → fallback↑((138) fallback 45%). **단 fallback도 정확(입장#2 -1.76) + 청감 OK** → 무영향.
+
+**reject 73% = 환경 탓**: RTT 양극화(9~11 vs >30)는 WiFi 절전(doze)/간섭으로 일부 ping 응답 간헐 지연. **코드 버그 아님.**
+
+**완화 옵션 평가 (모두 기각)**:
+- reject 임계 30↑ → RTT 30~50 noisy 샘플 유입 → **offset 품질↓**(현재 안정 깨짐). 역효과.
+- ping 주기 1초↓ → 통과 빈도↑이나 **p2p 트래픽↑**(호스트 부담, 사용자 기존 우려) + offset 이미 안정이라 효용 작음.
+- RTT median 기반 동적 임계(SYNC_REDESIGN 🥉3) → 복잡도↑, offset 안정한 현 상태선 **효용<비용**.
+
+**결정 (close)**: reject는 무해한 품질 게이트, 높은 건 환경 탓, offset/청감 영향 없음((138) 확인), 완화는 다 역효과/효용<비용 → **close**. (메모 `feedback_dynamic_over_hardcoded` "효용<비용이면 close" 원칙 일치 — 동적 임계도 효용<비용.) **재개조건**: WiFi 매우 나빠 good 샘플 5초+ 장기 공백 → fallback 의존도↑ → fallback의 obs stale 약점((138)) 노출로 청감 틀어질 때.
+
+**빌드**: 코드 변경 없음 — **v0.0.120 유지**.
+
+→ **"싱크 잔여 마무리" 트랙 종료** (② 진동 close (138) + ③ 임계 stale/분화 + ① reject close (139)).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6721,7 +6745,7 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 - [ ] **호스트 빠른 seek 연타 시 게스트 vfDiff -197초 영구 잔재** (2026-05-17 (100) 후속 측정 발견 → 2026-05-25 (102) **v0.0.85 진단 측정 결과 재현 실패, 의심 가설 3가지 모두 부정**). 원 관찰: csv `sync_log_2026-05-17T17-44-45.csv` seq 324~342에 vfDiff -197초 19초+ 지속, drift_ms ±5ms (sync 정확), 게스트 syncSeek 자체 발화 누락. v0.0.85에서 `seek_msg_seq` csv 컬럼 + `[SEEK-NOTIFY]` logcat 태그 추가 후 측정: host_seek 256회 ↔ anchor_reset_seek_notify 256회 1:1 매칭(메시지 손실 0) + 게스트 handler 모두 발화 + 큐 모델 native 처리 OK + vfDiff 영구 잔재 0건. 가능성: race 의존성(확률적) 또는 환경 의존성(맥북 핫스팟 저latency vs 일반 WiFi). **진단 인프라 유지 + 자연 재발 trigger 발견 시 root cause 분리 가능**. 일반 WiFi 환경 재측정 + 자연 재발 대기. 상세 분석 HISTORY (102).
 - [ ] **단독 모드 → P2P 전환 시 audio-url 미전파** (2026-05-29 (105) v0.0.88 신규). 단독 모드(WiFi 없음)에서 파일 로드 후 사용자가 WiFi 켜고 방 만들기 누르면 `_currentUrl == null`이라 게스트가 들어와도 audio-url 못 받음. 해결안: 방 만들기 시점에 `_startFileServer` 재시도 + audio-url broadcast 트리거. 사용자 합의 후 처리.
 - [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
-- [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73%(RTT 양극화, WiFi doze 의심, (135) 잔여, 별개 트랙), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
+- [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73% → ✅ **close (139)**(RTT>30 품질 게이트라 무해, 환경 탓, 완화 다 역효과), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
 - [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
 
 **안정성**
