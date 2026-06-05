@@ -75,8 +75,9 @@
 - `SETTING_INITIAL_LATENCY` 정적 항 반영 + 500→700ms 상한. native 한 곳 + Dart 무수정. transpose/speed 정렬 즉시 개선, acoustic 측정 가능. **리스크 최저, ROI 최고, 독립적.**
 - 동반(저비용): `mSTInRing.push` 반환값 검사(입력 유실 가시화), underrun 경로별 카운터(관측성), `setBufferSizeInFrames(2*burst)` 명시.
 
-### 🥈 2. anchor 주기 재발행 (결함 A 거친 정렬층)
+### 🥈 2. anchor 주기 재발행 (결함 A 거친 정렬층) — ✅ 시도 → **보류(close), 2026-06-05 (136)**
 - 호스트가 `(P, T, rate)` 주기 broadcast + 게스트 멱등 재스케줄. **Dart-only, 리스크 낮음.** 외삽 staleness + 재입장 + 합류 동시 완화.
+- ⚠️ **1단계(seek 기반 realign) 실측 실패 → close**: realign 빈도↑ = vfDiff 악화(2초 -26 / 5초 -15 / baseline -5), self-seek가 매번 음수 편향으로 박음. 청감 무영향이라 효용<비용. **재개 시 seek 아닌 #5 rate-bend로.** 상세 ↓ "2차 재측정 + 트랙 보류(close)" / HISTORY (136).
 
 ### 🥉 3. isOffsetStable jitter 강건화 (결함 A 약점 4)
 - winMinRaw 비교 임계(2ms) vs reject 노이즈(±15ms) 미스매치 해소: RTT outlier reject를 window median 기반으로, stable "5회 연속 0 리셋"을 누적 감점식으로 완화. **(v0.0.112 force-establish는 offset 결핍 상태에서 박지 말 것 — (124) 폐기 교훈.)**
@@ -298,7 +299,20 @@ Dart FFI `now()`와 native `getTimestamp`의 timeNs가 **반드시 같은 clock 
 **결정 (사용자 합의)**: 1단계 **롤백**(미커밋 코드 제거 — `git restore`). 사유: 효과 미확정 + self-seek 역효과 가능성 + **두 트랙 얽힘**(isOffsetStable jitter가 offset을 흔들어 anchor 측정을 오염 → 깨끗한 평가 불가). **"하나씩 확실히"** 원칙으로 #1을 먼저 분리해 풀기로.
 - **다음 순서**: ① **#1 isOffsetStable jitter 해결 → offset 안정화** (fallback 지배 해소, vfDiff 신뢰 회복) → ② anchor 주기 재발행 **재측정**(이 설계 그대로 재적용 — 개념·1단계·2단계 모두 유효). 측정 토대(offset 안정)를 먼저 다진 뒤 anchor를 평가해야 self-seek 오차 여부도 진짜로 가려짐.
 
-### 2단계 (보류 — 1단계 측정 후 판단)
+### 2차 재측정 + 트랙 보류(close) (2026-06-05, HISTORY (136))
+v0.0.120(offset 안정화, #1) 후 1단계 재측정 — 1차 롤백 사유(offset 거짓)가 해소되어 깨끗한 평가 가능. realign 주기 발동(vfDiff≥60 OR N초) 구현(v0.0.121), 주기 2초/5초 스윕 측정(호스트 S947N + 게스트 S901N, 1배속, 평상시).
+
+| 주기 | realign 횟수 | drift vfDiff med | offset stdev |
+|------|-------------|------------------|--------------|
+| baseline (realign 0) | 0 | **-4.83 / -5.42** | 1.0~1.2 |
+| 5초 | 19 | **-15.05** | 0.38 |
+| 2초 | 70 | **-26.38** | 0.51 |
+
+**realign 빈도↑ = vfDiff 악화** (2초 -26 → 5초 -15 → ∞/baseline -5 = 주기↑일수록 baseline 수렴). offset 3개 측정 모두 안정이라 신뢰 가능(측정 아티팩트 아님). raw: realign 직후 vfDiff가 음수로 점프 후 다음 realign까지 고정 + 그동안 drift(rate) ±2~5 정상 = **거짓말 패턴**(baseline이 어긋난 자리에 박힘, rate는 맞음). **self-seek가 매번 음수 편향으로 박는 게 root** — establish(처음, accum≈0)는 -5로 정확한데 주기 realign(accum 누적)만 악화 = framePos 실이동 + accum 가상보정 **이중카운트 가설**(native virtualFrame/framePos 관계 미확정).
+
+**결정 (사용자 합의)**: seek 기반 1단계 **실패 확정** → **트랙 보류(close)**. 청감 "대체로 OK"(vfDiff -26인데 무영향 = 잔재 청감 임계 아래) + seek 접근은 할수록 해로움 + 2단계 rate-bend는 native+Dart 큰 비용 → **효용<비용**. baseline(v0.0.120, anchor 한 번 박기)이 현재 최선이라 유지. **결함 B 음향 11ms close (132)와 동형.** **재개조건**: BT 등 큰 비대칭 경로 체감 시 / 다른 큰 이슈 해결 후 마지막 병목 시 → 그땐 **seek 아닌 2단계 rate-bend**로.
+
+### 2단계 (보류 — 결함 A 재개 시 진입점, seek 대신 rate-bend)
 - **rate-bend 미세 정렬층**: 작은 어긋남을 seek(점프) 대신 SoundTouch `setTempo`(Android)/`AVAudioUnitTimePitch.rate`(iOS) ±0.05%로 흡수 → 점프 0 = 진동 원천 차단(ts.ok 불안정·ring 재충전 없음). vfDiff를 폐루프 입력으로. native + Dart 작업이라 1단계 효과 측정 후 착수.
 
 ### 리스크/메모

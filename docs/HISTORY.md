@@ -6612,6 +6612,34 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (136) — anchor 주기 재발행(결함 A 1단계) 재측정: seek 기반 realign 실패 확정 → 트랙 보류(close)
+
+v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불안정 → vfDiff 거짓")가 해소되어 **SYNC_REDESIGN 결함 A "anchor 주기 재발행" 1단계 재측정**.
+
+**구현 (v0.0.121, 측정 후 롤백)**: `_recomputeDrift`의 realign 발동을 `vfDiff 중앙값 ≥ 60ms`(반응적) **OR** `마지막 realign 후 N초 경과`(주기적)로 확장. event `anchor_realign_periodic` 분리. `_realignIntervalMs`(2초/5초 스윕) + `_lastRealignMs`(establish 시점 설정 → 즉발 방지). 발동 타이밍은 `ts.wallMs`(게스트 로컬)이라 네트워크 무관 — obs는 외삽의 기준점일 뿐, 외삽은 매 100ms poll(`native_audio_service.dart:203`)마다, obs broadcast는 500ms.
+
+**측정 (호스트 S947N + 게스트 S901N, 1배속, seek/pause 없이 평상시 2~3분):**
+
+| 주기 | realign 횟수 | drift vfDiff med | signed | offset stdev |
+|------|-------------|------------------|--------|--------------|
+| baseline (realign 0) | 0 | **-4.83 / -5.42** | -8 / -17.5 | 1.0~1.2 |
+| 5초판 | 19 | **-15.05** | -17.42 | 0.38 |
+| 2초판 | 70 | **-26.38** | -26.08 | 0.51 |
+
+**결론 (관찰 사실)**: realign 빈도↑ = vfDiff **악화**. 2초(-26) → 5초(-15) → ∞/baseline(-5)로 **주기↑ = baseline 수렴**. offset은 3개 측정 모두 안정(stdev 0.4~1.2)이라 측정 신뢰 가능 = 측정 아티팩트 아님. raw 패턴: **realign 직후 vfDiff가 음수로 점프 후 다음 realign까지 고정**(예: seq35 realign→seq36~39 -49.5 고정, seq50→-33.8 고정). 그동안 **drift(rate)는 ±2~5ms로 정상** = 전형적 "거짓말 패턴"(baseline이 어긋난 자리에 박힘, rate는 맞음).
+
+**root cause (가설, 미확정)**: realign의 self-seek가 매번 **음수 편향**으로 박음. establish(처음, `_seekCorrectionAccum`≈0)는 -5로 정확한데 주기 realign(accum 누적 상태)만 악화 → seek 실이동(framePos)과 가상보정(accum) **이중 카운트** 의심. native `virtualFrame`/`framePos`/accum 관계는 미확정. (`seek_count=0`은 realign seek가 `_maybeTriggerSeek`의 `_seekCount++`(`:1868`)를 안 거치는 별도 경로라 카운터 미반영일 뿐, seek 자체는 발생.)
+
+**청감**: 사용자 "대체로 OK" — vfDiff -26인데도 청감 무영향 → **결함 A 잔재(-5~-26ms)가 청감 임계 아래**.
+
+**결정 (사용자 합의)**: **1단계 롤백(`git restore`) + 트랙 보류(close)**. 효용<비용 — 청감 무영향 + seek 기반 접근 실패(할수록 해로움) + 2단계 rate-bend는 native+Dart 큰 비용. baseline(v0.0.120, anchor 한 번 박기)이 현재 최선이라 유지. (결함 B 음향 11ms 비대칭 close와 동형 판단.) **재개조건**: BT 등 큰 비대칭 경로 체감 시 / 다른 큰 이슈 해결 후 마지막 병목 시 → 그땐 seek가 아니라 **2단계 rate-bend**(SoundTouch setTempo ±0.05%, 점프 없는 미세보정)로.
+
+**측정 인프라 유지**: `scripts/analyze_anchor.sh`(event별 vfDiff 분포), `measurements/realign2s_2026-06-05.csv` / `realign5s_2026-06-05.csv` / baseline `manual_2026-06-05_181705.csv`·`182028_s12.csv`.
+
+**빌드**: v0.0.121 측정 후 롤백(미커밋) → **v0.0.120 유지**
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
