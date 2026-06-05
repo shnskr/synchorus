@@ -1396,10 +1396,11 @@ class NativeAudioSyncService {
         if (_tsFailCount <= 3 || _tsFailCount % 50 == 0) {
           debugPrint('[TS] ok=false (count=$_tsFailCount, playing=$_playing, host=$_isHost)');
         }
-        // fallback: virtualFrame 기반 간단 정렬
-        if (!_isHost && _playing) {
-          _fallbackAlignment(ts);
-        }
+        // v0.0.119 (134): ts.ok=false면 monoMs(timeNs 기반)가 0(native_audio_service.dart:46
+        // 경고)이라 _fallbackAlignment의 hostWallNow/elapsedMs 외삽이 garbage seekTo로
+        // 게스트를 0:00로 튕김 (v0.0.115 monotonic 전환 회귀 — 정지→재생 직후 getTimestamp
+        // ErrorInvalidState ~2초 구간). ok 회복까지 정렬 skip — virtualFrame은 콜백이 계속
+        // 진행하니 재생은 안 끊기고, 정지 전 정렬 상태가 유지됨(양쪽 동시 resume이라 대략 정합).
         return;
       }
       if (_tsFailCount > 0) {
@@ -1464,6 +1465,9 @@ class NativeAudioSyncService {
   /// HAL timestamp 없을 때 virtualFrame으로 간단 정렬 (에뮬레이터, 블루투스 등)
   void _fallbackAlignment(NativeTimestamp ts) {
     if (!_sync.isSynced) return;
+    // v0.0.119 (134): ts.ok=false면 monoMs=0(timeNs=-1)이라 아래 외삽이 garbage →
+    // 게스트 0:00 튐. 방어 가드 (호출처 poll도 ts.ok=false 시 호출 안 하지만 이중 안전).
+    if (!ts.ok) return;
     // stability gate 없음 — 초기 offset으로도 즉시 대략 정렬 (±8ms)
     // 정밀 보정은 anchor 경로(isOffsetStable 필요)가 담당
     final obs = _latestObs;

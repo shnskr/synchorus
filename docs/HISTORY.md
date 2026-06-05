@@ -6557,6 +6557,32 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (134) — v0.0.119 정지→재생 시 게스트 0:00 점프 fix (ts.ok=false 외삽 garbage, v0.0.115 회귀)
+
+**배경**: (133) ring overwrite fix 검증 중 사용자가 별개 증상 발견 — "정지했다 재생하면 게스트가 0:00로 한번 갔다온다" + "게스트가 조금 앞선다". ring fix(시크바=소리)는 정상 작동 확인된 상태(head-tail이 cap에서 멈춤), 이건 **sync(fallback) 레이어**의 다른 버그.
+
+**증상 (사용자 관찰)**: 호스트 정지→재생 시 게스트가 0:00로 확 튀었다 제자리로 복귀.
+
+**진단** (`[FALLBACK] align` 로그):
+- resume 직후 첫 align이 `drift=182,077,364ms`(50시간), `seekTo=-8,019,881,814`(음수) → clamp(0) → **게스트 0:00 점프**. 2초 뒤 정상화(`-36ms`).
+- root: poll(`native_audio_sync_service.dart:1394`)이 `ts.ok=false`(resume 직후 getTimestamp `ErrorInvalidState` 구간)인데도 `_fallbackAlignment(ts)` 호출(`:1401`). 그 함수는 `ts.monoMs`로 외삽(`hostWallNow = ts.monoMs + offset`, `:1473`/`:1481`)하는데, **`ts.ok=false`면 `monoMs=0`**(timeNs=-1, `native_audio_service.dart:46` 주석이 "⚠️ 정렬은 ok 가드 통과 후만 사용"이라 직접 경고) → `elapsedMs` 외삽 폭주 → garbage seekTo.
+
+**root cause = v0.0.115 monotonic 전환 회귀**: 그 fallback 경로(`4431aa1`)는 원래 wall clock 기반이라 `ts.ok=false`여도 동작했으나, v0.0.115에서 `monoMs`가 "`ts.ok=false`면 0"이 되도록 바뀌면서 깨짐. 전환 때 `monoMs`에 경고 주석만 남기고 이 경로는 업데이트 안 함.
+
+**fix**: poll에서 `ts.ok=false` 시 `_fallbackAlignment` 호출 제거 + `_fallbackAlignment` 진입에 `if (!ts.ok) return;` 방어 가드. **정렬만 skip** — virtualFrame은 콜백이 계속 진행하니 재생은 안 끊기고, 정지 전 정렬 상태가 유지됨(정지→재생은 `host-paused/resumed`로 양쪽 동시라 resume 직후 대략 정합). `ts.ok` 회복 후 정상 fallback이 미세 보정.
+
+**검증** (호스트 SM-S947N + 게스트 SM-S901N):
+- 청감: 정지→재생 0:00 튐 **사라짐**.
+- logcat: garbage drift(50시간)/음수 seekTo **0건**. `engine.start` 즉시(187ms), `ts.ok` 회복 34~64ms(S22 내장 스피커)라 **재생 지연 없음** — 가드는 오디오 콜백(재생)이 아니라 sync 정렬만 skip.
+
+**남은/참고**:
+- **늦은 입장 케이스**: 게스트 vf=0(새 파일) → `ts.ok` 회복(수십ms) 후 호스트 위치로 seek(따라잡기). fix와 무관한 원래 동작(전엔 그 구간에 garbage seek가 추가됐을 뿐). 그 짧은 0:00마저 없애려면 `engine.start` 전 호스트 위치 pre-seek가 가능하나, ts.ok 회복이 수십ms라 체감 작아 별도 트랙(BT 등 느린 경로 체감 시).
+- **게스트 ~30-50ms 앞섬**(`fallback drift -36/-31/-47`): 기존 PLAN (125)/(126) "게스트 체계적 앞섬"(anchor establish 오차) 계열, 별개 트랙.
+
+**빌드**: v0.0.119
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
