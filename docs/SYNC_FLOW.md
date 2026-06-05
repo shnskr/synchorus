@@ -1,4 +1,6 @@
-# Sync 알고리즘 흐름도 (v0.0.80 main 기준, v0.0.48 baseline 흐름 유지)
+# Sync 알고리즘 흐름도 (v0.0.120 기준)
+
+> stable 판정은 v0.0.120 재설계(#1 fix, RTT 작은 샘플 공급 기반). anchor 주기 재발행(결함 A 근본 해법)은 `docs/SYNC_REDESIGN.md` 설계 단계.
 
 ## 핵심 개념
 
@@ -35,16 +37,17 @@
 
 | 변수명 | 한국어 풀이 |
 |---|---|
-| `_filteredOffsetMs` | "두 기기 시계 차이 — 게스트 시각 + offset = 호스트 시각" |
+| `_filteredOffsetMs` | "두 기기 시계 차이 — 게스트 시각 + offset = 호스트 시각" (monotonic, v0.0.115) |
 | `_recentWindow` | "최근 ping/pong 결과 sliding window (최대 10개)" |
-| `_stableCount` | "offset 안정 연속 카운트 (5 도달 시 stable)" |
-| `isOffsetStable` | "anchor 박힘 게이트 — stable 5 + window>=3 (v0.0.80)" |
+| `_lastGoodSampleMs` | "RTT≤20ms 샘플을 마지막으로 받은 monotonic 시각 (v0.0.120)" |
+| `isOffsetStable` | "anchor 박힘 게이트 — `_lastGoodSampleMs` 후 5초 이내면 true (v0.0.120)" |
 
-**clock sync 핵심 흐름** (v0.0.80):
-- 초기 핸드셰이크: 100ms × 30 ping burst → best 1개 carry over (window=1로 periodic 시작)
+**clock sync 핵심 흐름** (v0.0.120):
+- 초기 핸드셰이크: 100ms × 30 ping burst → best(min-RTT) 1개 carry over. RTT≤20 샘플 있었으면 **즉시 stable**((c) 조항).
 - Periodic sync: 1초 주기 ping → outlier rejection (RTT > 30ms reject) → age limit (60초+ sample 제거) → window 내 best RTT의 raw offset을 EMA(α=0.1)로 filtered 갱신
-- isOffsetStable 5초 도달 후 영구 true (jitter 환경에서도 toggle 0회 확인)
-- 측정 검증: filtered offset 표류 0.3ms (jitter 환경 28초 측정)
+- **stable 판정 (v0.0.120 재설계, #1 fix, HISTORY (135))**: 두 임계 분리 — **reject 30ms**(offset 갱신용) vs **good 20ms**(anchor 타이밍용). RTT≤20 샘플 들어오면 `_lastGoodSampleMs` 갱신 → 5초 내면 `isOffsetStable=true`.
+  - **왜 바뀌었나**: 이전 "filtered vs winMinRaw 2ms 비교"는 winMinRaw(생 샘플)의 RTT 노이즈(±RTT/2 > 2ms)에 깨져 안정 상황도 unstable이었음. monotonic으로 시계는 무죄 → "offset 값 안정"(EMA filtered가 담당) 대신 "RTT 작은 샘플이 오는 타이밍"으로 stable 판정. **혼잡(RTT 큼) 시 good 샘플 공백 → 자연 unstable → fallback**(억지 anchor 금지, v0.0.112 force 폐기 교훈).
+  - 측정 검증(집 WiFi): stable true 82%, 토글 4회 (이전 fallback 109회 대비 급감).
 
 ### Anchor 시스템 (정확한 정렬 baseline)
 
@@ -265,9 +268,10 @@ drift_ms 공식은 **하드웨어 카운터(framePos) 변화율**만 비교 — 
 - 그 후 두 기기 framePos 변화율이 같으면 drift_ms는 0
 - 단 **anchor 시점의 잘못된 차이는 그대로 유지됨**
 
-**다음 세션 알고리즘 재설계 핵심**:
-- drift_ms (rate 정밀) **+** vfDiff (절대 정렬) **둘 다** 임계 안에 있어야 진짜 sync
-- 자세한 결정 사항: `CLAUDE.md` "다음 세션 작업 흐름" 섹션 6가지 (A~F)
+**진행 상황 (v0.0.120)**:
+- vfDiff(절대 정렬)는 v0.0.108~114에서 도입·realign으로 부분 보강. drift_ms + vfDiff 둘 다 보는 구조 완성.
+- **근본 해법 = anchor 주기 재발행** (한 번 박은 baseline의 환산 오차가 곡 내내 지속하는 결함 A). 설계 합의 완료 → `docs/SYNC_REDESIGN.md` "anchor 주기 재발행" 섹션. 1단계(realign 주기) 시도했으나 offset 불안정으로 측정 오염 → **#1(isOffsetStable jitter) 선행 fix(v0.0.120)** 후 재측정 예정.
+- offset 토대: v0.0.115 monotonic 전환(점프 면역) + v0.0.120 stable 재설계로 단단해짐.
 
 ---
 

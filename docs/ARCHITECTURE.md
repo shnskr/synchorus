@@ -376,16 +376,18 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 
 **clock sync 알고리즘** (`lib/services/sync_service.dart` + PoC §3):
 - **초기 핸드셰이크**: 30회 ping (100ms 간격, fire-and-forget). 30개 다 받으면 best RTT의 raw offset을 초기값. **v0.0.74 early termination**: single raw RTT ≤ `_earlyTermRttThresholdMs` sample 10개 모이면 즉시 종료. **v0.0.80 임계 10 → 20** (jitter 환경에서도 도달 가능). 못 모으면 30개 cap fallback.
-- **carry over (v0.0.74 + v0.0.80 보강)**: 30개 중 best 1개 sample을 `_recentWindow` 맨 뒤에 추가. **v0.0.80**: `_prevFilteredOffset`도 best offset으로 같이 set (의도 완성, 첫 periodic sample stable=0 손해 제거 → isOffsetStable 도달 6→5초 단축).
+- **carry over (v0.0.74)**: 30개 중 best 1개 sample을 `_recentWindow` 맨 뒤에 추가. **v0.0.120 (c) 조항**: 초기 핸드셰이크에서 RTT≤`_stableGoodRttMs`(20) 샘플이 있었으면(roundBestRtt) `_lastGoodSampleMs`를 set → **즉시 stable**(시작 공백 제거).
 - **주기 단계**: 1s마다 ping, sliding window=10개 (v0.0.24 5→10 확장).
   - **v0.0.80 outlier rejection**: raw RTT > `_rejectThresholdMs` (30ms) sample은 window 추가 안 함, EMA/stable 변화 0. 근거: RTT/2 = 15ms 최악 비대칭 노이즈 → 청감 임계 ±20ms 안전 영역.
   - **v0.0.80 age limit**: window 안 sample `_sampleAgeLimitMs` (60초) 지나면 자동 제거. stale offset 박힘 차단.
   - **v0.0.80 window empty 처리**: 모든 sample expire 시 filtered offset 동결 (EMA/stable skip).
   - 창 내 RTT 최소 샘플의 raw offset을 EMA new로
   - `filtered = filtered * (1 - α) + winMinRaw * α` (α=0.1 단일, **v0.0.74 fast phase 제거**)
-- **stable 판정 (§D-2 v0.0.63 AND 조합)**: `delta < 2ms AND |filtered - winMinRaw| < 2ms` 5번 연속 만족 시 stable count 도달. **v0.0.80 추가 가드**: `_recentWindow.length >= 3` (carry over 1개만 남은 상태에서 false positive 차단).
+- **stable 판정 (v0.0.120 재설계 — #1 isOffsetStable jitter fix, HISTORY (135))**: `isOffsetStable = _lastGoodSampleMs>0 && now−_lastGoodSampleMs ≤ _stableTimeoutMs(5000)`. RTT≤`_stableGoodRttMs`(20) 샘플이 들어오면 `_lastGoodSampleMs` 갱신.
+  - **이전(§D-2 v0.0.63)은 `delta<2ms AND |filtered−winMinRaw|<2ms` 5연속**이었으나, winMinRaw(생 샘플)의 RTT 노이즈(±RTT/2, RTT10이면 ±5ms > 임계 2ms)에 깨져 filtered 안정(1.9ms)해도 unstable → fallback 지배. **monotonic(v0.0.115)으로 시계 무죄** → "offset 값 안정성"은 EMA filtered가 담당, **stable 판정은 "RTT 작은 샘플이 오는 타이밍"으로 역할 분리**. 두 임계: reject 30(offset 갱신, 넓게 평균) vs good 20(anchor 타이밍, 정밀). 혼잡 시 good 공백 → 자연 unstable → fallback(억지 anchor 금지).
 - **isOffsetStable의 의미**: anchor establish 진입 게이트. false 동안 fallback alignment(30ms 임계 거친 정렬). filteredOffsetMs는 stable 무관하게 항상 사용 — drift 계산/fallback 양쪽 모두에서.
 - **v0.0.83 `_fallbackAlignment`에 `_seekCooldownUntilMs` 가드**: seek-notify 직후 1초간 fallback skip. 호스트 큰 seek 후 정기 timer broadcast(500ms 주기) 새 obs 도달 전까지 게스트 `_latestObs`는 stale (이전 호스트 위치). 그 stale obs로 fallback이 게스트 옛 위치로 잘못 seek → 무음 race. `_tryEstablishAnchor`와 같은 cooldown 자료구조 일관성. HISTORY (99).
+- **v0.0.119 `ts.ok=false` 가드**: poll이 `ts.ok=false`(resume 직후 getTimestamp ErrorInvalidState ~2초)인데도 `_fallbackAlignment` 호출 시, 그 함수의 `ts.monoMs` 외삽이 monoMs=0(timeNs=-1)으로 garbage seekTo → 게스트 0:00 튐(v0.0.115 monotonic 회귀). fix: `ts.ok=false` 시 fallback skip(정렬만, 재생은 콜백이 vf 진행). HISTORY (134).
 - **v0.0.81 ANCHOR-VERIFY 사후 검증**: anchor 박힌 직후 100ms 시점에 ts.virtualFrame이 targetGuestVf와 임계(500ms) 초과 차이면 anchor 무효화 + `_seekCorrectionAccum` 되돌리기 + 다음 obs 시 재시도. 큰 seek 연타 race 자동 회복 (측정 race rate 31% 자동 흡수). HISTORY (97).
 
 **호스트 seek 처리**: `seek-notify` 메시지(절대 `targetMs`)로 게스트에 직접 통보. delta는 비동기 중첩 시 누적 오차 → absolute는 멱등(idempotent). drift 계산은 framePos 기반이라 별도 영향 없음 — 콘텐츠 정렬만 변동. **v0.0.82**: `syncSeek` 안 즉시 `_broadcastObs()` 호출 제거 — native seek 비동기(즉시 return)라 그 시점 ts는 stale virtualFrame. 정기 timer broadcast(500ms 주기)가 native seek 완료 후 정확한 obs 보냄. (HISTORY (98) — 사용자 "옛 위치로 돌아옴" race root cause fix).
@@ -416,11 +418,10 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 | `getVirtualFrame` | 없음 | `int64` | 현재 콘텐츠 위치 조회 |
 
 **네이티브 구현**:
-- Android: NDK AMediaCodec **스트리밍 디코딩** → int16 사전할당 버퍼 → Oboe float 콜백 (`oboe_engine.cpp`)
-  - 최소 1초 디코드 후 loadFile 반환, 백그라운드 스레드에서 나머지 디코딩 계속
-  - 2-range 추적: `[0, seqEnd)` + `[seekStart, seekEnd)` → `isFrameDecoded()` 체크
-  - seek-in-decode (Method A): 미디코딩 영역 seek → 디코드 스레드 점프 → fillGaps
-  - ⚠️ **v0.0.76 §G-1에서 ring buffer 60s sliding window 시도, v0.0.79 revert 완료** (큰 seek 연타 race로 호스트/게스트 무음 회귀. HISTORY (95) + DECISIONS §G-1 row 참고). 재설계는 PoC 격리에서 진행 예정.
+- Android: NDK AMediaCodec **스트리밍 디코딩** → **ring buffer 60s sliding window** → Oboe float 콜백 (`oboe_engine.cpp`)
+  - **ring buffer (v0.0.84 §G-1 재도입, HISTORY (100))**: behind 10s + ahead 50s 윈도우 `[mRingTail, mRingHead)`, 곡 길이 무관 ~11.5MB 고정. 콜백↔decode lock-free SPSC. `isFrameDecoded(f)` = `f ∈ [tail,head)`. 시크바=vf, 소리=ring `vf%cap` 위치 PCM.
+  - seek: 외부 thread는 `mDecodeSeekTarget`만 set, ring head/tail은 decodeLoop 단일 thread에서만 갱신 (큐 모델 — v0.0.76 race fix, HISTORY (95)).
+  - ⚠️ **v0.0.118 overwrite fix (HISTORY (133))**: prewarm/pause 중 callback이 tail 동결인데 decodeLoop가 ring 가득(head-tail≥cap) 차도 wait_for timeout마다 계속 decode → head가 cap 초과 → modular(`vf%cap`) overwrite로 옛 frame이 미래 frame PCM에 덮여 "시크바≠소리". fix: wait_for 후 `head-tail≥cap`이면 decode skip.
 - iOS: AVAudioPlayerNode + AVAudioFile 스트리밍 재생 (`AudioEngine.swift`) — 네이티브 스트리밍
 
 **파일 위치**:
@@ -429,9 +430,8 @@ PoC Phase 6에서 rate-only(virtualFrame) 사용 시 5ms/500ms 계단식 진동 
 - iOS: `ios/Runner/AudioEngine.swift` + `AppDelegate.swift`
 
 **제한**:
-- Android: 사전할당 메모리 디코딩 (150MB 제한, `TOO_LONG` 14분 한도). 스트리밍 디코드로 loadFile ~0.5-0.7s 반환
+- Android: ring buffer 60s 고정(~11.5MB) — 곡 길이 무관. **이전 사전할당 150MB/`TOO_LONG` 14분 한도는 v0.0.84 ring 재도입으로 해소** (MID-7 자연 해소).
 - sampleRate/virtualFrame은 파일 네이티브 샘플레이트 기준
-- ⚠️ v0.0.76 §G-1 ring buffer로 한도 제거 시도했으나 race 발견 → v0.0.79 revert. PoC 재설계 후 재도입 예정
 
 #### 5-2. 향후 확장 계획 (step 1-3+)
 
