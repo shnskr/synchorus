@@ -6646,6 +6646,22 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-05 (137) — SYNC_REDESIGN 🥇1번 stale 정정 + iOS transpose/speed latency 누락 진단 (코드 변경 없음)
+
+**배경**: "SoundTouch latency 반영이 로드맵 1순위였는데 다음 후보에서 왜 빠졌나?" 질문 → `SYNC_REDESIGN.md:74` 🥇1번에 **✅ 완료 표시 누락**(🥈2/🥉3은 갱신됐는데 1번만 stale) 발견.
+
+**정정 (로드맵 🥇1)**: SoundTouch latency 반영(**결함 B-ST**)은 **v0.0.112에서 Android 완료**(HISTORY (125), `oboe_engine.cpp` worker `getSetting(SETTING_INITIAL_LATENCY)` → outputLatencyMs 가산, 2배속 out_lat~274ms 실측 반영). close된 건 SoundTouch가 아닌 별개의 **결함 B-HAL**(출력단 ~11ms 하드웨어 비대칭, (132), 인지경계 아래 보류). 두 개를 "결함 B"로 뭉뚱그려 1순위가 사라진 것처럼 보였던 것 → 로드맵에 ✅/B-ST·B-HAL 분리 명시.
+
+**iOS latency 누락 진단 (코드 확정, 신규)**: iOS는 SoundTouch가 아닌 Apple `AVAudioUnitTimePitch` 사용(`AudioEngine.swift:11`). transpose/speed latency가 sync 보정에 **완전 누락**:
+- `getTimestamp`의 `outputLatencyMs`=`session.outputLatency`만(`:275`) — timePitch 미포함.
+- `nodeLatency` 합산(`:234-236`=playerNode+mainMixer+output)이 신호 체인(`node→timePitch→mainMixer`, `:120-121`) 중간 `timePitch`를 **건너뜀**. `timePitch.latency` 호출 **0곳**.
+- 그 `nodeLatencyMs`/`totalLatencyMs`는 Dart가 **안 받음**(`native_audio_service.dart:56,69`는 `outputLatencyMs`만 수신).
+- → iOS 게스트 transpose/speed ON 시 큐 latency만큼 어긋남 가능(영향 크기 미측정). AVAudioUnitTimePitch latency API 미문서화(`SYNC_REDESIGN.md:62`)라 SoundTouch식 hook 불가 → **acoustic 캘리브레이션 상수 필요**. PLAN §H "iOS 실기기 검증" 트랙으로 묶임.
+
+**빌드**: 문서만 (`SYNC_REDESIGN.md` 🥇1번 갱신 + 본 항목) — **v0.0.120 유지**.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

@@ -71,9 +71,11 @@
 
 ## 로드맵 (우선순위)
 
-### 🥇 1. SoundTouch latency 반영 (결함 B, 최우선)
-- `SETTING_INITIAL_LATENCY` 정적 항 반영 + 500→700ms 상한. native 한 곳 + Dart 무수정. transpose/speed 정렬 즉시 개선, acoustic 측정 가능. **리스크 최저, ROI 최고, 독립적.**
-- 동반(저비용): `mSTInRing.push` 반환값 검사(입력 유실 가시화), underrun 경로별 카운터(관측성), `setBufferSizeInFrames(2*burst)` 명시.
+### 🥇 1. SoundTouch latency 반영 (결함 B-ST) — ✅ Android 완료 (v0.0.112, HISTORY (125)) / ⏳ iOS 미반영
+- ✅ `SETTING_INITIAL_LATENCY` 정적 항 반영 + 500→700ms 상한. native 한 곳(`oboe_engine.cpp` worker가 `getSetting` → `getLatestTimestamp` outputLatencyMs 가산, useST일 때만) + Dart 무수정(`safeOutputLatencyMs` 자동 적용). 실측: 2배속 `out_lat~274ms` 반영 확인, 정상 2배속 drift median 0.24ms. **리스크 최저·ROI 최고·독립적 (사후 확인).**
+- ⚠️ acoustic 측정((132))으로 드러난 잔존은 SoundTouch가 아닌 **결함 B-HAL(출력단 ~11ms 하드웨어 비대칭, SoundTouch 독립)** → 인지경계 아래라 **보류(close)**. 아래 "용어 정리 — 결함 B 두 가지" 참조.
+- ⏳ iOS: `AVAudioUnitTimePitch` latency **완전 누락** (v0.0.112는 `oboe_engine.cpp`만 = Android 전용). 코드 확정 (2026-06-05 (137)): ① `getTimestamp`의 `outputLatencyMs`=`session.outputLatency`만(`AudioEngine.swift:275`, timePitch 미포함) ② `nodeLatency` 합산(`:234-236` = playerNode+mainMixer+output)이 신호 체인(`node→timePitch→mainMixer`, `:120-121`) 중간의 `timePitch`를 **건너뜀**(`timePitch.latency` 호출 0곳) ③ 그 `nodeLatencyMs`/`totalLatencyMs`는 Dart가 **안 받음**(`native_audio_service.dart:56,69`는 `outputLatencyMs`만 수신, 나머지 Map에서 버려짐). → iOS 게스트 transpose/speed ON 시 큐 latency만큼 sync 어긋남 가능(영향 크기 미측정). API 미문서화라 SoundTouch식 hook 불가 → acoustic 캘리브레이션 상수 필요(§해결 참조). PLAN §H "iOS 실기기 검증" 트랙.
+- ⏳ 동반(저비용, **미완료**): `mSTInRing.push` 반환값 검사(입력 유실 가시화), underrun 경로별 카운터(관측성 — 30분 stress 측정 선행), `setBufferSizeInFrames(2*burst)` 명시.
 
 ### 🥈 2. anchor 주기 재발행 (결함 A 거친 정렬층) — ✅ 시도 → **보류(close), 2026-06-05 (136)**
 - 호스트가 `(P, T, rate)` 주기 broadcast + 게스트 멱등 재스케줄. **Dart-only, 리스크 낮음.** 외삽 staleness + 재입장 + 합류 동시 완화.
