@@ -58,6 +58,10 @@ class AudioObs {
     this.transposeCents = 0,
   });
 
+  /// timeNs(BOOTTIME ns @ framePos)를 ms로. v0.0.115 monotonic 전환 — 게스트 정렬
+  /// 외삽 기준. hostTimeMs(wall)는 검증 대조용 유지. 상세: docs/SYNC_REDESIGN.md (130).
+  int get hostBootMs => timeNs ~/ 1000000;
+
   Map<String, dynamic> toJson() => {
         'type': 'audio-obs',
         'seq': seq,

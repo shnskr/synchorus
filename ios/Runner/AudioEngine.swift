@@ -324,12 +324,25 @@ class AudioEngine {
             + engine.outputNode.latency
         let totalLatency = outputLatency + ioBufDuration + nodeLatency
 
+        // v0.0.115 monotonic 전환: timeNs를 BOOTTIME 대응(mach_continuous_time) 도메인으로.
+        // AVAudioTime.hostTime은 mach_absolute_time(sleep 멈춤) 고정이라, sleep 누적분
+        // (continuous - absolute)을 더해 continuous로 올린다 → Android의 timeNs(CLOCK_BOOTTIME)와
+        // 같은 의미. 재생 중엔 sleep 없어 bootDelta가 안정 상수. wall(REALTIME)은 NTP 점프에
+        // 취약(측정3 root cause)이라 정렬 기준에서 빼고 검증 대조용으로만 병행 출력.
+        // 상세: docs/SYNC_REDESIGN.md (130).
         let hostTime = lastRenderTime.hostTime
         let info = Self.timebaseInfo
-        let timeNs = Int64(hostTime) * Int64(info.numer) / Int64(info.denom)
+        let absNowTicks = mach_absolute_time()
+        let contNowTicks = mach_continuous_time()
+        // sleep 누적분(ns). contNow >= absNow 항상이라 &-는 안전.
+        let bootDeltaNs = Int64(contNowTicks &- absNowTicks) * Int64(info.numer) / Int64(info.denom)
+        // hostTime(absolute @ framePos)을 ns로 변환 후 continuous 도메인으로 올림.
+        let timeNs = Int64(hostTime) * Int64(info.numer) / Int64(info.denom) + bootDeltaNs
 
-        let monoNowNs = Int64(mach_absolute_time()) * Int64(info.numer) / Int64(info.denom)
-        let wallAtFramePosNs = wallNowNs - (monoNowNs - timeNs)
+        // 검증 병행 wall. bootNow·timeNs 둘 다 continuous라 (bootNow-timeNs)는 순수 HAL 지연
+        // → wallNow에서 빼 wall 시각 역산(대조용). 게스트 정렬은 timeNs(continuous) 직접 사용.
+        let bootNowNs = Int64(contNowTicks) * Int64(info.numer) / Int64(info.denom)
+        let wallAtFramePosNs = wallNowNs - (bootNowNs - timeNs)
 
         // outputNode의 sampleTime은 세션(hw) rate로 카운트될 수 있음.
         // VF/totalFrames/sampleRate와 일관되도록 파일 rate로 정규화.

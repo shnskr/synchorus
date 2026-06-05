@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:flutter/foundation.dart';
 
+import 'monotonic_clock.dart';
 import 'p2p_service.dart';
 
 class SyncResult {
@@ -170,7 +171,7 @@ class SyncService {
 
       final t1 = message['data']['t1'] as int;
       final hostTime = message['data']['hostTime'] as int;
-      final t3 = DateTime.now().millisecondsSinceEpoch;
+      final t3 = MonotonicClock.nowMs();
 
       final sample = _SyncSample(t1: t1, t2: hostTime, t3: t3);
       final rtt = sample.rttMs;
@@ -228,7 +229,7 @@ class SyncService {
       _p2p.sendToHost({
         'type': 'sync-ping',
         'data': {
-          't1': DateTime.now().millisecondsSinceEpoch,
+          't1': MonotonicClock.nowMs(),
           'rid': requestId,
         },
       });
@@ -274,6 +275,10 @@ class SyncService {
   /// v0.0.74: fast phase 제거. carry over로 출발점 안정 + §D-2 gap 보호 전제.
   /// _recentWindow는 syncWithHost가 best 1개를 carry over했으므로 clear 안 함.
   void startPeriodicSync() {
+    // v0.0.115 검증: FFI monotonic 동작 + 도메인 확인. isNative=false면 wall fallback
+    // (도메인 섞임 위험). boot(부팅후 경과, 작은 값) vs wall(epoch, 큰 값) 확연히 다르면 정상.
+    debugPrint('[MONOTONIC] guest isNative=${MonotonicClock.isNative} '
+        'boot=${MonotonicClock.nowMs()} wall=${DateTime.now().millisecondsSinceEpoch}');
     _periodicSyncTimer?.cancel();
     _periodicPongSub?.cancel();
     // v0.0.74 B: _recentWindow.clear() 제거 — syncWithHost가 best 1개 carry over함.
@@ -289,7 +294,7 @@ class SyncService {
       final t1 = _pendingPingT1.remove(pongRid);
       if (t1 == null) return; // orphan
       final t2 = message['data']['hostTime'] as int;
-      final t3 = DateTime.now().millisecondsSinceEpoch;
+      final t3 = MonotonicClock.nowMs();
 
       final sample = _SyncSample(t1: t1, t2: t2, t3: t3);
 
@@ -308,7 +313,7 @@ class SyncService {
 
       // v0.0.80: age limit — 60초 지난 sample 제거. stale offset 박힘 차단.
       // 방금 추가한 sample은 t3=nowMs라 expire 안 됨. 다만 안전상 isEmpty 가드.
-      final nowMs = DateTime.now().millisecondsSinceEpoch;
+      final nowMs = MonotonicClock.nowMs();
       _recentWindow.removeWhere((s) => nowMs - s.arrivalMs > _sampleAgeLimitMs);
       if (_recentWindow.isEmpty) {
         debugPrint('Raw sample: rttMs=${sample.rttMs}, rawOffset=${sample.rawOffsetMs.toStringAsFixed(1)} (window empty after age limit, filtered frozen)');
@@ -362,7 +367,7 @@ class SyncService {
     // 1초 주기 ping
     _periodicSyncTimer = Timer.periodic(const Duration(seconds: 1), (_) {
       final rid = --_syncRequestSeq; // 음수 rid로 주기 단계 구분
-      final t1 = DateTime.now().millisecondsSinceEpoch;
+      final t1 = MonotonicClock.nowMs();
       _pendingPingT1[rid] = t1;
       _p2p.sendToHost({
         'type': 'sync-ping',
@@ -388,6 +393,8 @@ class SyncService {
 
   /// 호스트: sync-ping 메시지를 처리하여 pong 응답
   void startHostHandler() {
+    debugPrint('[MONOTONIC] host isNative=${MonotonicClock.isNative} '
+        'boot=${MonotonicClock.nowMs()} wall=${DateTime.now().millisecondsSinceEpoch}');
     _synced = true; // 호스트는 기준 시간이므로 항상 synced
     _offsetMs = 0;
     _filteredOffsetMs = 0.0;
@@ -404,7 +411,7 @@ class SyncService {
             'data': {
               't1': t1,
               'rid': rid,
-              'hostTime': DateTime.now().millisecondsSinceEpoch,
+              'hostTime': MonotonicClock.nowMs(),
             },
           });
         }
@@ -424,7 +431,7 @@ class SyncService {
 
   /// 동기화된 "지금" 시간 (호스트 기준)
   int get nowAsHostTime {
-    return DateTime.now().millisecondsSinceEpoch + _offsetMs;
+    return MonotonicClock.nowMs() + _offsetMs;
   }
 
   void dispose() {

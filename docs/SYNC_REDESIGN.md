@@ -152,3 +152,62 @@
 3. **vfDiff -19.5 position 편향** — seek 임계(20ms) 바로 아래라 방치. 임계/보정 검토.
 
 **현재 코드 상태**: v0.0.114 커밋(47a2f2b + bf0d47d 정정 + 측정4 검증). 톱니fix·realign 검증 완료, offset 점프/outputLatency 비대칭 미해결.
+
+---
+
+## 2026-06-05 (130) — monotonic clock 전환 설계 (offset 점프 면역, 결함 외 B-트랙)
+
+> (129) 다음 1순위. 측정3 "wall 점프"(NTP 보정) 재발 방지. **코드 작성 전** 전수조사(Dart/Android/iOS 3계층) + 1차 소스 검증 완료. 멀티에이전트 전수조사 + WebFetch 1차 소스 교차검증.
+
+### 결정 (사용자 합의)
+- **clock 도메인 = BOOTTIME 계열** (deep sleep 면역). Android `CLOCK_BOOTTIME` / iOS `mach_continuous_time`.
+- **Dart 시각 읽기 = dart:ffi 직접 호출** (MethodChannel 비동기 왕복 지연 회피 → ping/pong t1/t3 정밀 캡처).
+
+### 근본 문제 (전수조사 결과)
+현재 두 기기 정렬이 **전부 wall clock 도메인**. native는 이미 monotonic(`timeNs`)을 손에 쥐고도 `oboe_engine.cpp:686`에서 **일부러 wall로 역변환**(`wallNow-(monoNow-timeNs)`) — 호스트/게스트 monotonic은 epoch가 달라 직접 비교 불가하니 "공통어" wall로 변환한 것. 그러나 wall은 NTP 보정에 점프 → **측정3 root cause**(재생 중이라 deep sleep 아님 = NTP가 범인). obs는 `timeNs`(monotonic)를 이미 싣지만 게스트가 안 씀(`audio_obs.dart:17`) — 인프라 일부는 이미 깔림.
+
+### ✅ 검증된 시계 매핑 (1차 소스 — 절대 헷갈리지 말 것)
+| 의미 | Android/Linux | iOS clock_gettime | iOS mach | sleep | NTP점프 | 채택 |
+|---|---|---|---|---|---|---|
+| **목표: sleep포함+점프면역** | `CLOCK_BOOTTIME` (=7) | `CLOCK_MONOTONIC_RAW` | `mach_continuous_time()` | 포함 | 면역 | ✅ |
+| sleep멈춤 (구 MONOTONIC) | `CLOCK_MONOTONIC` | `CLOCK_UPTIME_RAW` | `mach_absolute_time()` | 멈춤 | 면역 | AVAudioTime 전용 |
+| ❌ 점프 위험 | — | `CLOCK_MONOTONIC` | — | 포함 | **점프** | 금지 |
+
+- Darwin `CLOCK_MONOTONIC` 함정: man page는 "sleep 포함"이라 하나, 실제론 REALTIME offset이라 **시스템 시간 변경 시 점프**(monotonic 보장 깨짐). → raw 계열 필수.
+- 출처: mach_continuous_time="including time the system spent asleep" (Apple kernel/1646199) · CLOCK_UPTIME_RAW=mach_absolute_time/sleep멈춤 (xcode man clock_gettime(3)) · CLOCK_MONOTONIC_RAW≡mach_continuous_time (Python bpo-42107) · **AVAudioTime.hostTime=mach_absolute_time** (Apple QA1643) · oboe가 clockId를 AAudio에 그대로 전달(AudioStreamAAudio.cpp)+AAUDIO_CLOCK_BOOTTIME 지원(NDK Audio) · CLOCK_BOOTTIME=7 (bionic).
+
+### 핵심 제약: 도메인 일치 (설계의 중심)
+Dart FFI `now()`와 native `getTimestamp`의 timeNs가 **반드시 같은 clock domain**이어야 offset·anchor 외삽이 성립.
+- **Android**: FFI `clock_gettime(CLOCK_BOOTTIME)` ≡ native `getTimestamp(CLOCK_BOOTTIME)` → 직접 일치, 변환 불필요.
+- **iOS**: `AVAudioTime.hostTime`은 `mach_absolute_time`(sleep 멈춤) **고정** → native에서 `hostTime + (mach_continuous_time()−mach_absolute_time())`로 continuous 도메인 변환해 보고. `play(at:)` 스케줄은 반대로 continuous→absolute 역변환. FFI `mach_continuous_time`과 일치.
+
+### 영향 위치 (도메인만 교체, 알고리즘 불변)
+| 단계 | 위치 | 현재(wall) | 전환 후 |
+|---|---|---|---|
+| clock offset | `sync_service.dart:173,231,292,365,407` t1/t2/t3 | `DateTime.now()` | FFI monotonic now |
+| obs 송신 | `audio_obs.dart:11` `hostTimeMs` | native wallAtFramePos | native mono@framePos (의미 변경) |
+| Android 시각 | `oboe_engine.cpp:565,686` | CLOCK_REALTIME 역변환 | `getTimestamp(BOOTTIME)` timeNs 직접 |
+| iOS 시각 | `AudioEngine.swift:228,304,331` | Date()+mach_absolute | continuous 변환 |
+| 게스트 anchor | `native_audio_sync_service.dart:1652` | `ts.wallMs+offset` | `ts.monoMs+offset` |
+| 게스트 drift 외삽 | `native_audio_sync_service.dart:1794,1822` | `ts.wallMs+offset` | `ts.monoMs+offset` |
+| native 모델 | `native_audio_service.dart:43` `wallMs` | `wallAtFramePosNs~/1e6` | `monoAtFramePosNs` (ns 양자화 제거 가능) |
+
+**전환 불필요(상대 경과/로그)**: p2p heartbeat `lastSeen`, cache-busting URL, seek cooldown, Stopwatch(이미 monotonic), 로그 파일명. → 사용자 무관, wall 유지 OK.
+
+### 구현 단계 (task #2~#6)
+1. **Dart FFI monotonic now** — Android `clock_gettime(BOOTTIME)`, iOS `mach_continuous_time()`.
+2. **Android native** — `getTimestamp(CLOCK_BOOTTIME)` + `clock_gettime(BOOTTIME)`, mono@framePos 보고.
+3. **iOS native** — hostTime→continuous 변환, scheduleStart 역변환.
+4. **Dart 정렬 교체** — sync t1/t2/t3, obs, anchor/drift 외삽, NativeTimestamp 모델.
+5. **wall 병행 csv 출력** — monotonic 값과 대조(검증용, 측정 끝나면 제거).
+6. **실기기 측정** — 아래 실측 항목.
+
+### ⚠️ 실측 검증 항목 (문헌으로 못 끝냄)
+1. **AAudio `getTimestamp(CLOCK_BOOTTIME)`가 실기기에서 정상 framePos/timeNs를 주는가** → ❌ **실측 (2026-06-05, SM S947N): clockId=BOOTTIME을 무시하고 MONOTONIC 값 반환** (vf -89억 폭발, 재생시간 음수). **수정**: iOS(hostTime=absolute + sleep누적) 대칭으로 — `getTimestamp(CLOCK_MONOTONIC)`로 받아 HAL지연/virtualFrame/wall은 MONOTONIC 일관, 정렬 보고값 `outTimeNs`만 `+(bootNow-monoNow)` 가산해 BOOTTIME화. **교훈: getTimestamp clockId는 신뢰 불가 — 항상 MONOTONIC 받고 sleep누적을 코드로 가산.** → ✅ **수정 후 검증 성공** (v0.0.115, HISTORY (130)): offset 1.1ms 변동(점프 제거), vfDiff -3.64, seek 0. (참고: `AudioStreamLegacy::getBestTimestamp` oboe#1489 — native path라 비해당.)
+2. **iOS continuous 변환 안정성** — 재생 중(sleep 없음)엔 `continuous−absolute` 차이 일정해야 함. 변환 오차 측정.
+→ **wall 값 csv 병행 출력**으로 monotonic과 대조하면 측정 단계에서 자연 검증.
+
+### 리스크/메모
+- **ns JSON 전송**: BOOTTIME ns는 부팅 후 경과(작음) → 2^53(=104일) 안전. wall epoch ns보다 안전. 우려 시 세션 baseline 빼서 전송.
+- **EMA min-RTT 로직**: 점프 없어지면 그대로 둬도 됨 (PLAN.md:150). isOffsetStable jitter(결함 A 약점 4)는 별개 트랙.
+- 이 전환은 **결함 A/B와 독립** — offset 토대를 단단히 해 vfDiff 신뢰성 확보(측정3 거짓말 패턴 재발 방지). 토대 다진 뒤 결함 A(anchor 주기 재발행)·결함 B(음향 outputLatency 비대칭) 진행.

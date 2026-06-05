@@ -39,8 +39,13 @@ class NativeTimestamp {
     this.outputLatencyMs,
   });
 
-  /// wallAtFramePosNs를 밀리초로 변환.
+  /// wallAtFramePosNs를 밀리초로 변환. v0.0.115: 검증 대조용으로만 유지(정렬엔 monoMs).
   int get wallMs => wallAtFramePosNs ~/ 1000000;
+
+  /// timeNs(BOOTTIME ns @ framePos)를 ms로. v0.0.115 monotonic 전환 — 정렬 외삽용.
+  /// ⚠️ ts.ok=false(timeNs=-1) 시 0이 되므로 정렬은 ok 가드 통과 후만 사용. 상대시간
+  /// (cooldown 등)엔 monoMs 대신 MonotonicClock.nowMs()(현재 시각) 직접 사용.
+  int get monoMs => timeNs ~/ 1000000;
 
   /// drift 공식에 적용할 안전한 값. null/음수/700ms 초과는 0으로 무시.
   /// (OS 보고 비정상 시 보정 자체가 노이즈가 되지 않도록 차단.)

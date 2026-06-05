@@ -6446,6 +6446,32 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (130) — v0.0.115 monotonic clock 전환 (offset 점프 면역, B-트랙 구현+검증)
+
+**배경**: (129) 다음 1순위. 측정3 "wall 점프"(NTP 보정) 재발 방지 — 두 기기 정렬 시계를 wall → BOOTTIME 계열로. 전수조사(Dart/Android/iOS 3계층) + 1차 소스 검증 + 설계: [SYNC_REDESIGN.md](SYNC_REDESIGN.md) (130). 핵심: 현재 정렬이 전부 wall 도메인(native가 monotonic을 일부러 wall로 역변환 `oboe_engine.cpp:686`), wall은 NTP에 점프.
+
+**구현 (task #2~5)**:
+- Dart FFI (`monotonic_clock.dart`): Android `clock_gettime(CLOCK_BOOTTIME)`, iOS `clock_gettime_nsec_np(CLOCK_MONOTONIC_RAW)`(=mach_continuous_time). `isNative` fallback 가드.
+- sync_service ping/pong t1/t2/t3 → `MonotonicClock.nowMs()` (offset boot 기반).
+- `NativeTimestamp.monoMs` / `AudioObs.hostBootMs` getter (=timeNs÷1e6). 외삽 정렬(anchor/drift/fallback) `ts.monoMs`+`obs.hostBootMs`. wall(`wallMs`/`hostTimeMs`/csv)는 검증 병행 유지.
+- ⚠️ Darwin `CLOCK_MONOTONIC`은 NTP 점프(REALTIME offset)라 금지 → raw 계열 필수(1차 소스 검증). AVAudioTime.hostTime=mach_absolute라 iOS native 변환 레이어(hostTime + sleep누적).
+- scheduleStart 경로 dead(v0.0.48) 확인 → 스킵.
+
+**⚠️ 실측 버그+수정 (getTimestamp clockId 신뢰 불가)**: 첫 측정 재생시간 **음수**(호스트 -38분/게스트 -1분). 원인 = AAudio `getTimestamp(CLOCK_BOOTTIME)`가 **clockId 무시하고 MONOTONIC 반환** → `bootNow(BOOTTIME)-timeNs(MONOTONIC)`가 deep sleep 누적만큼 폭발 → virtualFrame **-89억**(호스트/게스트 음수폭이 각 기기 sleep 시간차와 일치). **수정**: iOS와 대칭으로 — `getTimestamp(CLOCK_MONOTONIC)`로 받아 HAL지연/virtualFrame/wall역산은 MONOTONIC 일관(정상), 정렬 보고값 `outTimeNs`만 `+(bootNow-monoNow)` 가산해 BOOTTIME화. **교훈: getTimestamp clockId는 신뢰 불가 — 항상 MONOTONIC 받고 sleep누적을 코드로 가산(iOS hostTime과 동일 패턴).**
+
+**검증 (S947N 호스트 + S901N 게스트, transpose+5, 2분, `sync_log_2026-06-05T10-54-49`)**:
+- ✅ FFI 정상: `isNative=true`, boot=690443170ms(≈8일)≠wall=epoch.
+- ✅ **offset 점프 면역**: boot offset 522219902.0→903.1 (2분 **1.1ms 변동**), stable 17 유지. **측정3 점프 완전 제거.**
+- ✅ **vfDiff -3.64ms** (p10/p90 -6.3/-3.1, anchor 경로 247행). **(129) -19.5 대비 개선** (offset 안정→외삽 정확 추정).
+- ✅ drift_ms(rate) 0.59, seek_count 0, anchor_set 2 (drift 247 ≫ fallback 28, anchor 정상 박힘).
+- 음수 fix 후 재생시간 정상 + 사용자 청감 OK.
+
+**잔존 (별도 트랙)**: (1) 음향 outputLatency 비대칭(결함 B, 가장 체감), (2) vfDiff -3.64 position 편향(seek 임계 20ms 아래라 방치), (3) **데드코드 정리 트랙**: scheduleStart/cancelSchedule 경로 + `nowAsHostTime`(사용처 0) + wall 병행 경로(검증 끝나 제거 가능).
+
+**커밋**: v0.0.115.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

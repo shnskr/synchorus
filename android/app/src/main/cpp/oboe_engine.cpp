@@ -560,14 +560,22 @@ public:
         const int64_t vfNow = mVirtualFrame.load(std::memory_order_relaxed);
         *outVirtualFrame = vfNow;
 
-        // wall clock도 항상 제공 (fallback sync에 사용)
-        struct timespec wallTs, monoTs;
+        // v0.0.115 monotonic 전환 (실측 수정): AAudio getTimestamp는 clockId=CLOCK_BOOTTIME을
+        // 무시하고 MONOTONIC 값을 반환한다(실측 — bootNow-timeNs가 sleep 누적분만큼 폭발해
+        // virtualFrame -89억). 그래서 iOS(hostTime=mach_absolute + sleep누적)처럼 timeNs는
+        // MONOTONIC으로 받고, 정렬 보고값(outTimeNs)만 (bootNow-monoNow)=sleep누적을 더해
+        // BOOTTIME화한다. HAL 지연/virtualFrame/wall 역산은 MONOTONIC 일관(정상). wall(REALTIME)은
+        // 검증 대조 병행. 상세: docs/SYNC_REDESIGN.md (130).
+        struct timespec wallTs, monoTs, bootTs;
         clock_gettime(CLOCK_REALTIME, &wallTs);
         clock_gettime(CLOCK_MONOTONIC, &monoTs);
+        clock_gettime(CLOCK_BOOTTIME, &bootTs);
         const int64_t wallNow =
             static_cast<int64_t>(wallTs.tv_sec) * 1000000000LL + wallTs.tv_nsec;
         const int64_t monoNow =
             static_cast<int64_t>(monoTs.tv_sec) * 1000000000LL + monoTs.tv_nsec;
+        const int64_t bootNow =
+            static_cast<int64_t>(bootTs.tv_sec) * 1000000000LL + bootTs.tv_nsec;
 
         // outputLatencyMs default: -1 (미지원/측정 불가). Dart에서 sanity check.
         // BT codec/radio 단계는 Oboe 가이드상 잘 안 잡힘 — 어디까지 보고되는지는
@@ -634,6 +642,9 @@ public:
 
         int64_t framePos = 0;
         int64_t timeNs = 0;
+        // v0.0.115 실측 수정: CLOCK_BOOTTIME으로 요청해도 HAL이 MONOTONIC을 반환하므로
+        // (vf -89억 폭발) CLOCK_MONOTONIC으로 요청. timeNs는 MONOTONIC @ framePos.
+        // BOOTTIME화는 아래 outTimeNs에서 (bootNow-monoNow) 가산으로 처리.
         oboe::Result result = mStream->getTimestamp(
             CLOCK_MONOTONIC, &framePos, &timeNs);
         if (result != oboe::Result::OK) {
@@ -682,7 +693,11 @@ public:
             framePos = framePos * mDecodedSampleRate / mStreamSampleRate;
         }
         *outFramePos = framePos;
-        *outTimeNs = timeNs;
+        // v0.0.115: 정렬 보고값만 BOOTTIME화 (timeNs는 MONOTONIC @ framePos, + sleep누적).
+        // 게스트는 이 outTimeNs(BOOTTIME)를 obs.hostBootMs/ts.monoMs로 정렬에 사용.
+        *outTimeNs = timeNs + (bootNow - monoNow);
+        // v0.0.115: 검증 병행 wall. timeNs·monoNow 둘 다 MONOTONIC이라 (monoNow-timeNs)는
+        // 순수 HAL 지연 → wallNow에서 빼 wall 시각 역산(대조용). wall 검증 끝나면 이 줄 제거.
         *outWallAtFramePosNs = wallNow - (monoNow - timeNs);
 
         // v0.0.114 (톱니 fix): virtualFrame을 framePos와 같은 시점(timeNs)으로 정렬.

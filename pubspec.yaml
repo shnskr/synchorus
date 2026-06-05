@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.114+1
+version: 0.0.115+1
 
 environment:
   sdk: ^3.11.4
@@ -48,6 +48,10 @@ dependencies:
   # 자동 측정 모드 한정 — OS idle 판단 방지 (WiFi 절전 회피).
   # 일반 모드는 entry에서 호출 안 하므로 영향 0.
   wakelock_plus: ^1.5.2
+  # clock sync용 monotonic 시계(BOOTTIME 계열) FFI. libc clock_gettime의
+  # timespec 버퍼 alloc(Android)에 calloc 사용. iOS는 alloc 불필요(uint64 직접).
+  # 상세: docs/SYNC_REDESIGN.md (130). (v0.0.115)
+  ffi: ^2.1.4
 
 dev_dependencies:
   flutter_test:

@@ -1571,7 +1571,7 @@ class NativeAudioSyncService {
     if (obs == null || !obs.playing) return;
 
     final offset = _sync.filteredOffsetMs;
-    final hostWallNow = ts.wallMs + offset;
+    final hostWallNow = ts.monoMs + offset; // v0.0.115: boot 도메인 (변수명 wall은 정리 트랙에서 rename)
     final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
 
     // ms 단위로 통일하여 cross-rate 비교 (호스트 48kHz ↔ 게스트 44.1kHz 등)
@@ -1579,7 +1579,7 @@ class NativeAudioSyncService {
     // → 외삽 경과시간에 speed 반영. framePos는 HAL rate라 speed 무관이지만
     // fallback은 vf 기반 정렬이므로 곱해야 함.
     final speedFactor = obs.speedX1000 / 1000.0;
-    final elapsedMs = (hostWallNow - obs.hostTimeMs).toDouble();
+    final elapsedMs = (hostWallNow - obs.hostBootMs).toDouble();
     final expectedPositionMs =
         obs.virtualFrame / hostFpMs + elapsedMs * speedFactor;
     final guestPositionMs = ts.virtualFrame / _framesPerMs;
@@ -1649,12 +1649,12 @@ class NativeAudioSyncService {
     if (ts.safeOutputLatencyMs <= 0) return;
 
     // 앵커 순간의 호스트 wall clock = 게스트 wall + offset
-    final anchorHostWall = ts.wallMs + offset;
+    final anchorHostWall = ts.monoMs + offset; // v0.0.115: boot 도메인 (변수명 wall은 정리 트랙에서 rename)
     // obs는 최대 500ms 오래된 값 → 앵커 시점으로 외삽
     // 호스트 frame 외삽은 호스트의 sampleRate 사용
     final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
     final anchorHostFrame = obs.framePos +
-        ((anchorHostWall - obs.hostTimeMs) * hostFpMs).round();
+        ((anchorHostWall - obs.hostBootMs) * hostFpMs).round();
 
     // 콘텐츠 정렬: 호스트 콘텐츠 위치(ms)를 게스트 frame으로 변환하여 seek.
     // v0.0.103: vf(콘텐츠)는 호스트가 speed배로 진행(oboe_engine.cpp:834,851)
@@ -1663,7 +1663,7 @@ class NativeAudioSyncService {
     //  위 anchorHostFrame은 framePos=HAL rate라 speed 무관 → 곱하지 않음.)
     final speedFactor = obs.speedX1000 / 1000.0;
     final hostContentFrame = obs.virtualFrame +
-        ((anchorHostWall - obs.hostTimeMs) * hostFpMs * speedFactor).round();
+        ((anchorHostWall - obs.hostBootMs) * hostFpMs * speedFactor).round();
     final hostContentMs = hostContentFrame / hostFpMs;
     // v0.0.38: outputLatency 비대칭을 anchor seek에 베이크인.
     // 게스트가 BT(+200ms), 호스트가 내장(+5ms)이면 outLatDelta = +195ms.
@@ -1791,10 +1791,10 @@ class NativeAudioSyncService {
     }
 
     // 호스트의 현재 예상 frame (obs 외삽) — 호스트 sampleRate 사용
-    final hostWallNow = ts.wallMs + offset;
+    final hostWallNow = ts.monoMs + offset; // v0.0.115: boot 도메인 (변수명 wall은 정리 트랙에서 rename)
     final hostFpMs = obs.sampleRate > 0 ? obs.sampleRate / 1000.0 : _framesPerMs;
     final expectedHostFrameNow =
-        obs.framePos + (hostWallNow - obs.hostTimeMs) * hostFpMs;
+        obs.framePos + (hostWallNow - obs.hostBootMs) * hostFpMs;
     final dH = expectedHostFrameNow - anchorHF;
 
     // 게스트의 effective frame (seek 보정 포함)
@@ -1820,7 +1820,7 @@ class NativeAudioSyncService {
     // framePos 외삽은 HAL rate라 speed 무관 → 그대로 — driftMs는 견고.)
     final speedFactor = obs.speedX1000 / 1000.0;
     final expectedHostVfMs = obs.virtualFrame / hostFpMs +
-        (hostWallNow - obs.hostTimeMs) * speedFactor;
+        (hostWallNow - obs.hostBootMs) * speedFactor;
     final guestVfMs = ts.virtualFrame / _framesPerMs;
     final vfDiffMs = guestVfMs - expectedHostVfMs - currentOutLatDelta;
 
