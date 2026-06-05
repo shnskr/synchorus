@@ -6583,6 +6583,35 @@ PLAN UI 폴리싱 트랙 "SnackBar UX 개선" 항목 두 가지 처리.
 
 ---
 
+### 2026-06-05 (135) — v0.0.120 isOffsetStable jitter fix: stable 판정을 "RTT 작은 샘플 공급"으로 재설계 (#1)
+
+**배경**: anchor 주기 재발행(SYNC_REDESIGN 결함 A) 1단계(realign 2초 주기) 시도 → 2분 측정에서 `fallback` 109회(offset 불안정 지배)로 vfDiff가 거짓 → 효과 미확정 → **롤백**. **두 트랙 얽힘 확인**: isOffsetStable jitter(#1)가 offset을 흔들어 anchor 측정을 오염. 사용자 합의 "하나씩 확실히"로 **#1 선행**.
+
+**root cause**: `isOffsetStable`의 stable 판정 조건 (b) `|filtered − winMinRaw| < 2ms`가 **RTT 노이즈에 깨짐**. `winMinRaw`(window min-RTT **생 샘플 1개**)는 ±RTT/2 노이즈(RTT 10ms면 ±5ms) > 임계 2ms → `_filteredOffsetMs`가 안정(1.9ms)해도 `_stableCount` 리셋 → isOffsetStable false 지배 → fallback.
+
+**사용자 통찰 (설계 주도)**: monotonic 전환(v0.0.115)으로 **시계는 무죄**(점프 없음). jitter는 RTT 비대칭 노이즈일 뿐. `filtered` 안정 = **진짜 offset은 안정**, 판정만 raw 노이즈(winMinRaw)에 휘둘림. → "offset을 더 정확히"가 아니라 "안정한 offset을 stable로 인정"하는 판정만 고치면 됨.
+
+**설계 (사용자안)**: stable 판정을 **"offset 값 안정성(winMinRaw 2ms 비교)" → "RTT가 충분히 작은(≤20ms) 샘플이 최근 5초 내 들어왔는가"**(`_lastGoodSampleMs` 타이머)로 전환. **역할 분리**: stable 판정 = "정밀 anchor 박을 *타이밍*", offset 정확도 = EMA filtered가 담당.
+- 초기 (c): `syncWithHost`에서 RTT≤20 샘플이 있었으면(roundBestRtt) 즉시 stable — 시작 공백 제거.
+- 두 임계 분리: **reject 30ms**(offset 갱신용, 넓게 모아 EMA 평균) vs **stable good 20ms**(anchor 타이밍용, 정밀할 때만). RTT 21~30 샘플도 offset엔 기여하나 stable 타이머는 안 건드림.
+- **혼잡(RTT 큼) 시**: good 샘플(≤20)이 5초간 안 와 자연히 unstable → fallback(정확하면 −12ms로 버팀, v0.0.112 force-establish 폐기 교훈 = anchor 억지 금지).
+
+**변경** (`sync_service.dart`): `_stableGoodRttMs=20`/`_stableTimeoutMs=5000` 추가. `_stableThresholdMs`/`_stableRequiredCount`/`_stableCount`/`_prevFilteredOffset`/winMinRaw 2ms 비교/`window≥3` 가드 제거. isOffsetStable = `_lastGoodSampleMs>0 && now−_lastGoodSampleMs ≤ 5000`.
+
+**검증** (집 WiFi, 1분40초, 호스트 S947N + 게스트 S901N):
+- RTT 통과분 9~11ms (RTT≤20 **100%**).
+- stable **true 22 / false 5 (82%)**, `[STABLE TOGGLE]` **4회** — 이전 fallback 109회(거의 unstable) 대비 급감. anchor 잘 박힘.
+- 17:36:52 잠깐 false → 1초 복구 = **설계대로**(good 샘플 5초 공백 → false → 다음 good 샘플에 복구).
+- 청감 **"잘 맞음"**.
+
+**⚠️ 미해결 (별개 트랙)**: **reject ~73%**(Periodic sync 통과 27개/100초). RTT가 **9~11ms 아니면 >30으로 양극화** — 집 WiFi인데 의외, **WiFi 절전(doze)/간섭**으로 ping 응답 간헐 지연 의심. good 샘플 공백(잠깐 false)의 원인. #1과 독립.
+
+**다음**: offset 안정화됐으니 **anchor 주기 재발행(SYNC_REDESIGN) 재측정** — 이제 vfDiff 신뢰 가능.
+
+**빌드**: v0.0.120
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

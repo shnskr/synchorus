@@ -34,8 +34,13 @@ class _SyncSample {
 // EMA 파라미터 (v0.0.74: fast phase 제거 — carry over로 출발점 안정 + §D-2 gap 보호)
 const double _emaAlpha = 0.1; // 단일 alpha (이전 _emaAlphaSlow 값 유지)
 const int _windowSize = 10; // sliding window 크기 (v0.0.24: 5→10, min-RTT 표본 확장으로 outlier 영향 감소)
-const double _stableThresholdMs = 2.0; // offset 안정 판정 기준 (ms)
-const int _stableRequiredCount = 5; // 연속 안정 횟수
+// v0.0.120 stable 판정 재설계 (#1 isOffsetStable jitter fix, SYNC_REDESIGN):
+// 기존 "offset 값 안정성(filtered vs winMinRaw 2ms 비교)"은 RTT 노이즈(±RTT/2, RTT10이면
+// ±5ms > 2ms)에 깨져 안정 상황에서도 stable이 막혔다(fallback 지배). → "RTT가 충분히
+// 작은(≤_stableGoodRttMs) 샘플이 _stableTimeoutMs 내 들어왔는가"로 전환. offset 정확도는
+// EMA filtered가 담당(역할 분리). 혼잡(RTT 큼) 시 good 샘플이 안 와 자연히 unstable → fallback.
+const int _stableGoodRttMs = 20;   // 이 이하 RTT = 정밀 anchor 박을 만한 샘플
+const int _stableTimeoutMs = 5000; // 마지막 good 샘플 후 이 시간 지나면 unstable
 
 // v0.0.74: 초기 핸드셰이크 early termination 조건
 // (single raw RTT ≤ _earlyTermRttThresholdMs) sample이 _earlyTermSampleCount개 모이면 즉시 종료.
@@ -101,18 +106,21 @@ class SyncService {
   /// 주기 단계에서 보낸 ping의 t1 보관 (pong 매칭용)
   final Map<int, int> _pendingPingT1 = {};
 
-  /// offset 안정성 추적
-  double _prevFilteredOffset = 0.0;
-  int _stableCount = 0;
+  /// offset 안정성 추적 (v0.0.120 재설계): RTT가 충분히 작은(≤_stableGoodRttMs) 샘플을
+  /// 마지막으로 받은 monotonic 시각. _stableTimeoutMs 내 그런 샘플이 있으면 stable.
+  /// 기존 _stableCount(winMinRaw 2ms 비교)를 대체 — #1 root(RTT 노이즈에 깨짐) 제거.
+  int _lastGoodSampleMs = 0;
 
   /// isOffsetStable 토글 추적 (logging용)
   bool _prevIsStable = false;
 
-  /// offset이 안정화되었는지 여부. drift 보정은 이 값이 true일 때만 활성화.
-  /// v0.0.80: window 크기 가드 추가 — outlier rejection으로 window 작아진 상태
-  /// (carry over 1개만 남는 등)에서 stale stable 판정 차단.
+  /// offset이 안정화되었는지 여부. drift 보정/anchor는 이 값이 true일 때만 활성화.
+  /// v0.0.120 재설계: "RTT 작은 샘플이 최근 _stableTimeoutMs 내 들어왔는가". offset
+  /// 값 정확도는 EMA filtered가 담당(역할 분리) → window 크기 가드 불필요(초기 (c)
+  /// stable이 carry over 1개로도 성립해야 하므로 제거). 혼잡 시 false → fallback.
   bool get isOffsetStable =>
-      _stableCount >= _stableRequiredCount && _recentWindow.length >= 3;
+      _lastGoodSampleMs > 0 &&
+      MonotonicClock.nowMs() - _lastGoodSampleMs <= _stableTimeoutMs;
 
   SyncService(this._p2p);
 
@@ -136,8 +144,7 @@ class SyncService {
     _periodicPongSub = null;
     _recentWindow.clear();
     _pendingPingT1.clear();
-    _prevFilteredOffset = 0.0;
-    _stableCount = 0;
+    _lastGoodSampleMs = 0;
   }
 
   /// 참가자: 호스트와 시간 동기화 시작
@@ -196,9 +203,11 @@ class SyncService {
         _offsetMs = roundOffset;
         _bestRtt = roundBestRtt;
         _filteredOffsetMs = roundOffset.toDouble();
-        // v0.0.80: carry over 의도 완성 — _prevFilteredOffset도 같이 set.
-        // 안 하면 첫 periodic sample에서 delta=|filtered - 0|=큰 값 → stable=0 손해.
-        _prevFilteredOffset = roundOffset.toDouble();
+        // v0.0.120 (c) 조항: 초기 동기화에서 RTT≤_stableGoodRttMs 샘플이 있었으면
+        // (roundBestRtt) 즉시 stable — anchor를 시작 직후 박을 수 있게(시작 공백 제거).
+        if (roundBestRtt <= _stableGoodRttMs) {
+          _lastGoodSampleMs = MonotonicClock.nowMs();
+        }
         _synced = true;
         // v0.0.74 B: best 1개를 _recentWindow 맨 뒤에 carry over.
         // sliding window는 인덱스 0(가장 앞)에서 빠지므로 맨 뒤에 박으면 9개 새 sample이
@@ -247,8 +256,10 @@ class SyncService {
           _offsetMs = roundOffset;
           _bestRtt = roundBestRtt;
           _filteredOffsetMs = roundOffset.toDouble();
-          // v0.0.80: timeout 케이스도 carry over 의도 완성
-          _prevFilteredOffset = roundOffset.toDouble();
+          // v0.0.120 (c): timeout 케이스도 RTT≤_stableGoodRttMs 샘플 있었으면 즉시 stable
+          if (roundBestRtt <= _stableGoodRttMs) {
+            _lastGoodSampleMs = MonotonicClock.nowMs();
+          }
           _synced = true;
           // v0.0.74 B: timeout 케이스도 best 1개 carry over (부분 sample 받았으면)
           if (bestSample != null) {
@@ -337,29 +348,24 @@ class SyncService {
       _offsetMs = _filteredOffsetMs.round();
       _bestRtt = minSample.rttMs;
 
-      // offset 안정성 추적 — §D-2 AND 조합 (v0.0.63):
-      // step 변화량(EMA 진동 작음) + winMinRaw 일치(EMA가 진짜 값에 가까움) 둘 다 만족.
-      // (60) 진단으로 step 단독은 EMA convergence lag 시 false positive 확정.
-      // v0.0.74: fast phase 분기 제거. carry over + AND 조건이 false positive 방어.
-      final delta = (_filteredOffsetMs - _prevFilteredOffset).abs();
-      _prevFilteredOffset = _filteredOffsetMs;
-      if (delta < _stableThresholdMs &&
-          (_filteredOffsetMs - _winMinRawOffsetMs).abs() < _stableThresholdMs) {
-        _stableCount++;
-      } else {
-        _stableCount = 0;
+      // v0.0.120 stable 재설계 (#1 fix): RTT가 충분히 작으면(정밀 anchor 가능) good
+      // 샘플 시각 갱신. isOffsetStable getter가 이 시각 기준 _stableTimeoutMs 윈도우로 판정.
+      // (sample은 reject(>30) 통과분 → RTT≤_stableGoodRttMs면 노이즈 ±RTT/2 작아 신뢰.)
+      // 기존 winMinRaw 2ms 비교는 RTT 노이즈에 깨져 안정 상황도 unstable 만들던 root였음.
+      if (sample.rttMs <= _stableGoodRttMs) {
+        _lastGoodSampleMs = MonotonicClock.nowMs();
       }
 
       debugPrint('Raw sample: rttMs=${sample.rttMs}, rawOffset=${sample.rawOffsetMs.toStringAsFixed(1)}');
       debugPrint('Periodic sync: offset=${_filteredOffsetMs.toStringAsFixed(1)}ms, '
           'RTT=${minSample.rttMs}ms, window=${_recentWindow.length}, '
-          'stable=$_stableCount');
+          'stable=$isOffsetStable');
 
       // v0.0.80: isOffsetStable 토글 시점 명시
       final isStableNow = isOffsetStable;
       if (isStableNow != _prevIsStable) {
         debugPrint('[STABLE TOGGLE] $_prevIsStable → $isStableNow '
-            '(stable=$_stableCount, window=${_recentWindow.length})');
+            '(window=${_recentWindow.length})');
         _prevIsStable = isStableNow;
       }
     });
