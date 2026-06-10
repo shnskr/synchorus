@@ -6718,6 +6718,41 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-10 (140) — iOS 실기기 첫 검증: transpose/speed/seek/monotonic ✅ + v0.0.121 크래시 fix + 잔음 root cause 진단
+
+**구성**: SM S947N(Android 16) 호스트 + iPhone 12 Pro(iOS 26.4.2) 게스트. 호스트는 v0.0.120 유지(이번 fix는 iOS native만, P2P 버전 호환성 체크 없음 확인). 게스트는 **profile 빌드**(AOT — debug는 attach 끊기면 interpreter fallback이라 sync 측정 오염).
+
+**검증 성공 (iOS 첫 실측)**:
+- ✅ §H/§I **transpose/speed 게스트 전파** — 음정·속도 정상 추종 (`AVAudioUnitTimePitch`).
+- ✅ **seek/정지/resume** — 0:00 안 튐 (v0.0.119 Dart fix가 iOS에도 적용 확인).
+- ✅ **monotonic 안정** — vfDiff 진동/점프 없음 (v0.0.115 iOS BOOTTIME 대칭화 동작).
+- ⚠️ **sync 오프셋**: iPhone 게스트 **−13~−15ms 느림**(baseline) → transpose/speed ON 시 **−23~−27ms 악화**(csv `vf_diff_ms`, n=560/810). 원인 유력 = `timePitch.latency` 미반영(v0.0.112 iOS 누락 — `getTimestamp`의 `outputLatencyMs`가 `session.outputLatency`만, `nodeLatency`에도 `timePitch.latency` 빠짐, `AudioEngine.swift:234-236,275`). **미해결, 별도 트랙.**
+
+**🔴 신규 크래시 발견 → v0.0.121 fix**: `*** Terminating ... 'com.apple.coreaudio.avfaudio', reason: 'player did not see an IO cycle.'` (SIGABRT). speed 변경 + seek 연타로 실측 재현. root cause: iOS `AudioEngine`에 **interruption/routeChange/configurationChange notification 핸들러 0개** + `engine.isRunning`(실제 상태) 미확인(자체 Bool 플래그만) → engine이 IO 멈춘/첫 렌더 전 상태에서 `node.play()` 호출. 검증: Apple DTS forum 129207 + AudioKit #2910 — notification 다 구현해도 production 잔존(TOCTOU race, 호출 전 체크로 100% 못 막음) → **던져진 예외를 잡는 게 유일한 확실한 차단**.
+- **fix 3층** (`AudioEngine.swift` + `ExceptionCatcher.h` + bridging header):
+  1. `scheduleAndPlay`에 `engine.isRunning` 가드 (멈춤 시 재시작) — 단독으론 부족(IO 첫 사이클 전 race는 못 막음).
+  2. `objcTryCatch`(ObjC `@try/@catch` static inline 헬퍼)로 `node.play()` wrap → **NSException 잡아 크래시 0**.
+  3. 예외 시 `rebuildEngineAndResume` — engine/노드 재구성 + 50ms 지연 후 재시도(IO 사이클 1회 경과). 게스트는 native 멈춤을 Dart가 몰라 복구를 native 내부에서 끝내야 영구 무음 회피.
+- **검증**: speed+seek 막 연타 → **크래시 0** (앱 안 죽음). ① 성공.
+
+**잔음 root cause 진단 (idevicesyslog)**: ① fix 후 "가끔 잔음, 다른 동작 전까지 지속" 보고. iPhone syslog 캡처 분석:
+- **내 rebuild 반복 가설 틀림** — `AVAudioEngine start` **1회**(rebuild면 다회). 잔음은 rebuild가 아님.
+- **진짜 원인**: 잔음 구간 `AudioConverter`(mp3 디코더) **~2초마다 dispose/생성 235회 반복**. 동시 flutter 로그 = **seek 폭주**(`[SEEK-NOTIFY] targetMs 9.5분↔1.7분 진동`, `diffMs ±48만ms`) + `[ANCHOR] establish fpVfDiff_ms=4352605`(72분!) + `[ANCHOR-VERIFY] REJECT diffMs 14000ms`. 메커니즘: **seek 연타 → 게스트 seek 폭주(node.stop()→scheduleSegment 반복) → ① 디코더 235회 재생성=잔음 + ② outputNode.sampleTime 꼬임 → framePos 72분 폭주 → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → 잔음 지속(seek 멈춰도)**. 
+- iOS `framePos`(outputNode 누적)가 seek/node 재생성 후 `vf`와 어긋남 = **v0.0.114 "vf/framePos 정합" 가정이 seek 폭주에선 깨짐**. 아까 (137) offset 폭주와 동일 뿌리.
+- 크래시에 가려져 있다가 ① fix로 앱이 안 죽으니 드러난 **기존 sync 버그**. **정상 seek(가끔)에선 미발현** → 일상 사용은 ① fix만으로 안전.
+
+**부수 발견**:
+- **CLI `flutter run` "1~8분 hung"의 정체 = 첫 연결 Xcode shared-cache symbol 복사**(`Installing and launching` 622초). 한 번 복사 후 캐시 → 재빌드 시 **15~17초**로 통과. hung이 아니라 symbol 복사 대기였음(CLAUDE.md 정정).
+- profile에서 `flutter run`이 VM Service attach 실패(errno=49)해도 **AOT라 앱 정상 동작**(debug와 달리 안 멈춤).
+- Swift `print()`는 **stdout이라 syslog 미표시**(idevicesyslog에 안 잡힘). Dart print는 NSLog 경유라 잡힘. → native 진단 로그는 `NSLog`/`os_log` 필요.
+- 진단 인프라: `idevicesyslog`(brew libimobiledevice) — `idevicesyslog -u <udid> -p Runner`로 Runner 로그 캡처.
+
+**빌드**: v0.0.121 (iOS `AudioEngine.swift` 크래시 가드 3층 + `ExceptionCatcher.h` 신규 + bridging header).
+
+**남은 트랙** (미해결 이슈 + PLAN/SYNC_REDESIGN 반영): ① iOS sync 오프셋(timePitch latency 미반영) ② **잔음/seek 폭주 → framePos 붕괴**(iOS framePos 도메인 + anchor 재설계, 깊음) ③ ② notification 핸들러(크래시 빈도 추가 완화).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6747,6 +6782,8 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 - [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
 - [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73% → ✅ **close (139)**(RTT>30 품질 게이트라 무해, 환경 탓, 완화 다 역효과), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
 - [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
+- [ ] **iOS 게스트 잔음 — seek 폭주 → framePos 붕괴** (2026-06-10 (140) v0.0.121 진단). seek 연타(시크바 막 드래그) 시 게스트 seek 폭주 → mp3 디코더(`AudioConverter`) ~2초마다 235회 재생성=잔음 + outputNode.sampleTime 꼬임 → `framePos` 72분 폭주(fpVfDiff) → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → **잔음 지속(seek 멈춰도)**. iOS `framePos`(outputNode 누적)가 seek/node 재생성 후 `vf`와 어긋남 = v0.0.114 "vf/framePos 정합" 가정이 seek 폭주에선 깨짐 ((137) offset 폭주와 동일 뿌리). **정상 seek(가끔)에선 미발현** → 일상 사용은 v0.0.121 크래시 fix만으로 안전. fix = iOS framePos 도메인 + anchor 재설계(깊음, SYNC_REDESIGN 트랙). idevicesyslog 진단 근거 (140).
+- [ ] **iOS 게스트 sync 오프셋 −13~−27ms (timePitch latency 미반영)** (2026-06-10 (140)). baseline −13~−15ms 느림, transpose/speed ON 시 −23~−27ms 악화. `getTimestamp`의 `outputLatencyMs`가 `session.outputLatency`만이고 `nodeLatency`에도 `timePitch.latency` 누락(`AudioEngine.swift:234-236,275`) = v0.0.112(Android SoundTouch latency 반영)의 iOS 미반영분. fix = `timePitch.latency`를 outputLatency 보고에 가산. 단 `AVAudioUnitTimePitch.latency` 실측 크기 미확인(작을 수도) → fix 전 효용 측정 권장. **〈잔음 트랙과 별개, 더 가벼움〉**
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

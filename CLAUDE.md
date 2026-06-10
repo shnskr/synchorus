@@ -91,11 +91,12 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 #### 실기기 빌드/설치 (CLI, Xcode 불필요)
 - **Galaxy S22** (R3CT60D20XE): `flutter build apk --debug` → `flutter install --debug --device-id R3CT60D20XE`
 - **Galaxy Tab A7 Lite** (R9PW315GL0L): `flutter install --debug --device-id R9PW315GL0L`
-- **iPhone 12 Pro** (00008101-00063C963C52001E): **CLI `flutter run` 비권장** — iOS 26.4.1 + macOS 26.3 환경에서 `Installing and launching...` 단계 1~8분 hung 재현 (HISTORY (43)/(82)/(84) MID-14). **IntelliJ Run** 또는 **Xcode IDE Run** 권장. CLI 시도 후 hung으로 종료하면 잔재 프로세스가 다음 빌드와 충돌하므로 정리 필요:
+- **iPhone 12 Pro** (00008101-00063C963C52001E): `Installing and launching...` 단계 **1~8분 hung처럼 보임** (HISTORY (43)/(82)/(84) MID-14). **정체 = 첫 연결 시 Xcode shared-cache symbol 복사** (2026-06-10 (140) 확인: 첫 빌드 622초 → 한 번 복사 후 캐시 → 재빌드 **15~17초** 통과). hung이 아니라 symbol 복사 대기이니 **첫 빌드는 끝까지 기다리면 됨** (Xcode "Copying shared cache symbols (N% completed)" 다이얼로그 = 정상, Cancel 금지). 단 **CLI `flutter run --debug`는 symbol 복사가 길어지면 VM Service attach 타임아웃으로 종료** → debug는 attach 끊기면 interpreter fallback으로 멈춤(아래 참조). **검증/측정은 `flutter run --profile`(AOT — attach 끊겨도 앱 정상 동작) 권장.** IntelliJ/Xcode IDE Run도 가능. CLI 종료 후 잔재 프로세스가 다음 빌드와 충돌하면 정리:
   ```bash
   ps aux | grep -iE "flutter|xcodebuild|devicectl|frontend_server|iproxy" | grep -v grep
-  # 오래된 PID들 (이전 hung 종료 후 살아남은 자식 프로세스) kill
+  # 오래된 PID들 kill
   ```
+- **iOS native syslog 캡처** (device 로그 진단): `idevicesyslog -u 00008101-00063C963C52001E -p Runner` (brew `libimobiledevice`). ⚠️ Swift `print()`는 **stdout이라 syslog에 안 나옴** — native 진단 로그는 `NSLog`/`os_log` 사용해야 idevicesyslog/Console에 잡힘. Dart print는 NSLog 경유라 보임.
 
 #### iOS debug 빌드 디버거 attach 필요
 iOS debug 빌드는 Dart VM JIT 의존이라 디버거 끊으면 interpreter mode fallback → 동작 멈춤. 회귀 테스트 동안엔 IntelliJ/Xcode Run 창 띄워둔 채로 진행. 디버거 없이 길게 쓰려면 `flutter run --profile` (AOT 컴파일, hot reload 안 됨) 또는 release 빌드. Android debug는 무관.

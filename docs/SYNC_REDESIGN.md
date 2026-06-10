@@ -74,7 +74,7 @@
 ### 🥇 1. SoundTouch latency 반영 (결함 B-ST) — ✅ Android 완료 (v0.0.112, HISTORY (125)) / ⏳ iOS 미반영
 - ✅ `SETTING_INITIAL_LATENCY` 정적 항 반영 + 500→700ms 상한. native 한 곳(`oboe_engine.cpp` worker가 `getSetting` → `getLatestTimestamp` outputLatencyMs 가산, useST일 때만) + Dart 무수정(`safeOutputLatencyMs` 자동 적용). 실측: 2배속 `out_lat~274ms` 반영 확인, 정상 2배속 drift median 0.24ms. **리스크 최저·ROI 최고·독립적 (사후 확인).**
 - ⚠️ acoustic 측정((132))으로 드러난 잔존은 SoundTouch가 아닌 **결함 B-HAL(출력단 ~11ms 하드웨어 비대칭, SoundTouch 독립)** → 인지경계 아래라 **보류(close)**. 아래 "용어 정리 — 결함 B 두 가지" 참조.
-- ⏳ iOS: `AVAudioUnitTimePitch` latency **완전 누락** (v0.0.112는 `oboe_engine.cpp`만 = Android 전용). 코드 확정 (2026-06-05 (137)): ① `getTimestamp`의 `outputLatencyMs`=`session.outputLatency`만(`AudioEngine.swift:275`, timePitch 미포함) ② `nodeLatency` 합산(`:234-236` = playerNode+mainMixer+output)이 신호 체인(`node→timePitch→mainMixer`, `:120-121`) 중간의 `timePitch`를 **건너뜀**(`timePitch.latency` 호출 0곳) ③ 그 `nodeLatencyMs`/`totalLatencyMs`는 Dart가 **안 받음**(`native_audio_service.dart:56,69`는 `outputLatencyMs`만 수신, 나머지 Map에서 버려짐). → iOS 게스트 transpose/speed ON 시 큐 latency만큼 sync 어긋남 가능(영향 크기 미측정). API 미문서화라 SoundTouch식 hook 불가 → acoustic 캘리브레이션 상수 필요(§해결 참조). PLAN §H "iOS 실기기 검증" 트랙.
+- ⏳ iOS: `AVAudioUnitTimePitch` latency **완전 누락** (v0.0.112는 `oboe_engine.cpp`만 = Android 전용). 코드 확정 (2026-06-05 (137)): ① `getTimestamp`의 `outputLatencyMs`=`session.outputLatency`만(`AudioEngine.swift:275`, timePitch 미포함) ② `nodeLatency` 합산(`:234-236` = playerNode+mainMixer+output)이 신호 체인(`node→timePitch→mainMixer`, `:120-121`) 중간의 `timePitch`를 **건너뜀**(`timePitch.latency` 호출 0곳) ③ 그 `nodeLatencyMs`/`totalLatencyMs`는 Dart가 **안 받음**(`native_audio_service.dart:56,69`는 `outputLatencyMs`만 수신, 나머지 Map에서 버려짐). → iOS 게스트 transpose/speed ON 시 큐 latency만큼 sync 어긋남 **실측 확인 (2026-06-10 (140))**: baseline **−13~−15ms** → transpose/speed ON **−23~−27ms 악화**(profile 측정, csv `vf_diff_ms`). `AVAudioUnitTimePitch.latency` 실측 크기는 미확인(작을 수도) → fix 전 효용 측정 권장. API 미문서화라 SoundTouch식 hook 불가 → `timePitch.latency` 가산 또는 acoustic 캘리브레이션. **〈가벼운 fix, 잔음 트랙(아래 6)과 별개〉**
 - ⏳ 동반(저비용, **미완료**): `mSTInRing.push` 반환값 검사(입력 유실 가시화), underrun 경로별 카운터(관측성 — 30분 stress 측정 선행), `setBufferSizeInFrames(2*burst)` 명시.
 
 ### 🥈 2. anchor 주기 재발행 (결함 A 거친 정렬층) — ✅ 시도 → **보류(close), 2026-06-05 (136)**
@@ -89,6 +89,12 @@
 
 ### 5. 미세 정렬층 (결함 A 미세 정렬, 중장기)
 - 정수 샘플 add/drop → SoundTouch/AVAudioUnitTimePitch ±0.05% rate-bend 폐루프. **Android+iOS 동시 구현 필수.**
+
+### 6. iOS framePos 도메인 — seek 폭주 시 붕괴 (결함 A, iOS 전용, 2026-06-10 (140))
+- **증상**: seek 연타 시 게스트 잔음 + sync 완전 붕괴. idevicesyslog 진단 — mp3 디코더(`AudioConverter`) ~2초마다 235회 반복 재생성(=잔음) + `framePos` 72분 폭주(`fpVfDiff_ms=4352605`) → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → 잔음 지속.
+- **근본**: iOS `framePos`(outputNode.lastRenderTime.sampleTime, **engine 시작부터 누적**)가 seek/`node` 재생성(`seekToFrame`의 `node.stop()→scheduleSegment`) 후 `vf`(seekFrameOffset+playerNode sampleTime, 리셋됨)와 어긋남. **v0.0.114 "iOS는 vf/framePos가 같은 렌더 사이클이라 정합" 가정이 seek 폭주에선 깨짐**(`AudioEngine.swift:211-213` 주석). (137) offset 폭주·(140) 둘 다 동일 뿌리.
+- **방향(미설계)**: ① outputNode 누적 sampleTime을 seek 시점 기준으로 정규화(framePos를 vf와 같은 도메인으로) ② seek 재정렬 빈도 자체 억제(offset 안정화 — 🥉3과 연결) ③ anchor REJECT 시 무한 reset 대신 거친 정렬(🥈2/#5 rate-bend)로 흡수. **iOS framePos 도메인 재설계 = 깊은 작업.**
+- **우선순위**: 정상 seek(가끔)에선 미발현 + v0.0.121 크래시 fix로 앱 안 죽음 → 일상 사용 안전. 막 조작 견고화 트랙(중장기). HISTORY (140).
 
 ### 기타
 - outputLatency 과소보고 베이크인 방지(BT 워밍업 안정화 후 establish), host getTimestamp framePos=-1 구간 보간 obs((30) 완화), polling→condition_variable 정밀 깨우기.

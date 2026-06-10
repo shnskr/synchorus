@@ -322,12 +322,82 @@ class AudioEngine {
         guard let file = audioFile, let node = playerNode else { return }
         let remaining = file.length - AVAudioFramePosition(frame)
         guard remaining > 0 else { return }
+        // route change(이어폰/BT 연결·해제)·interruption(전화)·configuration change로
+        // AVAudioEngine이 IO를 자동으로 멈췄는데 isEngineRunning 플래그는 true로 남는
+        // 경우가 있다(notification 미처리). 이 상태에서 node.play()를 부르면
+        // "player did not see an IO cycle" NSException으로 크래시
+        // (developer.apple.com/forums/thread/129207). seek/speed 연타 시 실측 재현.
+        // play() 직전 engine 실제 상태를 확인해 멈춰 있으면 재시작 — 모든 재생 경로
+        // (start/seekToFrame)가 이 단일 지점을 거치므로 여기 한 곳 가드로 차단.
+        if !engine.isRunning {
+            do {
+                try engine.start()
+            } catch {
+                print("[AudioEngine] scheduleAndPlay: engine restart failed: \(error)")
+                return
+            }
+        }
         node.scheduleSegment(
             file,
             startingFrame: AVAudioFramePosition(frame),
             frameCount: AVAudioFrameCount(remaining),
             at: nil
         )
-        node.play()
+        // 위 engine.isRunning 가드로도 IO 첫 렌더 사이클 전(또는 route change race)에
+        // play()가 "player did not see an IO cycle" NSException → SIGABRT 크래시가
+        // 날 수 있다(호출 전 체크는 TOCTOU race로 100% 못 막음). ObjC 예외를 잡아
+        // 크래시를 차단하고, 잡힌 경우 engine을 재구성해 소리를 복구한다.
+        if let ex = objcTryCatch({ node.play() }) {
+            print("[AudioEngine] play() NSException: \(ex.name.rawValue) \(ex.reason ?? "") → engine 재구성")
+            rebuildEngineAndResume(from: frame)
+        }
+    }
+
+    /// play()가 NSException(IO 사이클 못 봄)으로 실패하면 engine/노드를 깨끗이 재구성하고
+    /// 같은 위치부터 재생을 재개한다. 게스트는 sync 정렬을 seekToFrame으로만 하는데
+    /// isEngineRunning=false면 그 경로가 재생을 못 살리므로(Dart는 native 멈춤을 모름),
+    /// 복구를 native 내부에서 끝내야 영구 무음을 피한다.
+    /// engine.start() 직후엔 첫 IO 렌더 전이라 즉시 play()하면 같은 예외가 또 나므로,
+    /// 짧은 지연(IO 사이클 1회 경과) 후 메인스레드에서 재시도한다.
+    private func rebuildEngineAndResume(from frame: Int64) {
+        playerNode?.stop()
+        engine.stop()
+        if let node = playerNode {
+            engine.disconnectNodeOutput(node)
+            engine.detach(node)
+            playerNode = nil
+        }
+        isEngineRunning = false
+        guard let file = audioFile else { return }
+        let node = AVAudioPlayerNode()
+        playerNode = node
+        engine.attach(node)
+        engine.connect(node, to: timePitch, format: file.processingFormat)
+        engine.connect(timePitch, to: engine.mainMixerNode, format: file.processingFormat)
+        do {
+            try engine.start()
+            isEngineRunning = true
+        } catch {
+            print("[AudioEngine] rebuild engine.start failed: \(error)")
+            return
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.05) { [weak self] in
+            guard let self = self,
+                  let node = self.playerNode,
+                  self.isEngineRunning,
+                  let file = self.audioFile else { return }
+            let remaining = file.length - AVAudioFramePosition(frame)
+            guard remaining > 0 else { return }
+            node.scheduleSegment(
+                file,
+                startingFrame: AVAudioFramePosition(frame),
+                frameCount: AVAudioFrameCount(remaining),
+                at: nil
+            )
+            // 재구성 후에도 예외면 더 재시도하지 않고(무한루프 방지) 다음 sync 사이클에 맡김.
+            if let ex = objcTryCatch({ node.play() }) {
+                print("[AudioEngine] rebuild 후 play 재예외: \(ex.reason ?? "") — 다음 sync 사이클에 맡김")
+            }
+        }
     }
 }
