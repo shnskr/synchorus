@@ -6749,7 +6749,35 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 **빌드**: v0.0.121 (iOS `AudioEngine.swift` 크래시 가드 3층 + `ExceptionCatcher.h` 신규 + bridging header).
 
-**남은 트랙** (미해결 이슈 + PLAN/SYNC_REDESIGN 반영): ① iOS sync 오프셋(timePitch latency 미반영) ② **잔음/seek 폭주 → framePos 붕괴**(iOS framePos 도메인 + anchor 재설계, 깊음) ③ ② notification 핸들러(크래시 빈도 추가 완화).
+**남은 트랙** (미해결 이슈 + PLAN/SYNC_REDESIGN 반영): ① ✅ iOS sync 오프셋(timePitch latency) → **v0.0.122 (141) 해결** ② **잔음/seek 폭주 → framePos 붕괴**(iOS framePos 도메인 + anchor 재설계, 깊음) ③ ⏸️ notification 핸들러 → **조건부 보류 close (141)**.
+
+---
+
+### 2026-06-10 (141) — iOS 트랙 1: timePitch latency 반영(v0.0.122) → acoustic 검증으로 fix 성공 + (140) vfDiff 인과 오진 정정
+
+(140) "남은 트랙" ① 처리. **구성**: SM S947N(Android 16) 호스트 v0.0.122 + iPhone 12 Pro(iOS 26.4.2) 게스트 profile 빌드.
+
+**fix**: `AudioEngine.swift getTimestamp()`의 `outputLatencyMs` 보고에 `timePitch.latency` 가산 (`algoLatency = max(0, timePitch.latency)` → `reportedOutputLatency = session.outputLatency + algoLatency`). Android v0.0.112(SoundTouch `SETTING_INITIAL_LATENCY`를 outputLatency에 가산, `oboe_engine.cpp:624`)의 **iOS 미반영분 대칭**. ⚠️ Android는 callback이 cents=0에서 bypass라 조건 분기했으나, iOS는 노드 그래프(node→timePitch→mixer)가 **항상** timePitch를 거치므로 pitch=0/rate=1에서도 알고리즘 latency가 남아 **조건 없이 항상 가산**. 진단 컬럼 `algoLatencyMs` 신규.
+
+**timePitch.latency 실측** (NSLog, idevicesyslog 캡처 — `print`는 stdout이라 syslog 미표시, native 진단은 NSLog 필수):
+- baseline(pitch=0, speed=1.0): **85.33ms** (사전 예측 13-15ms의 6배 — "작을 수도" 우려 반증)
+- **pitch 무관** (cents 900~1200 모두 85.33 고정)
+- **speed 반비례**: 2.0x=64.0ms / 1.0x=85.33ms / 0.5x=128.0ms
+
+**csv 반영 확인** (`sync_log_2026-06-10T14-35-42.csv`): `out_lat_guest_raw` = baseline 95.60ms(=85.33 timePitch + 10.27 session) / 2x 74.27 / 0.5x 130~138 → fix 정확 반영. host(Android 내장 스피커) 5~6ms → **outLatDelta +90ms** → 게스트를 호스트보다 90ms 앞선 위치로 seek.
+
+**🔴 vfDiff는 이 fix 검증에 무력 (순환 구조)**: anchor seek `targetGuestVf = hostContent + outLatDelta`(`native_audio_sync_service.dart:1574-1576`)와 vfDiff 계산 `vfDiffMs = guestVfMs − expectedHostVfMs − currentOutLatDelta`(`:1728`)에 **같은 outLatDelta가 양쪽에 들어가 상쇄** → outLat을 바꾸는 fix는 vfDiff에 무감각. 실측 증명: **fix 후에도 baseline vfDiff median −23ms** (fix 전 −13~−15와 동급). 이 −23ms의 정체는 timePitch가 아니라 **결함 A 잔재**(anchor establish 편향 −7~−22, (136)/(138)서 청감 OK로 close).
+
+**✅ acoustic 검증 = fix 성공 확정** (`scripts/acoustic/`, 맥북 마이크 호스트 5cm/게스트 50cm, chirp 동기 재생 15초, `rec_v122_baseline.wav`):
+- **emit_dt median +7.84ms** (게스트−호스트 출력 시차, std 2.91, 진폭비 host/guest 2.20 식별 명확, '큰 peak 먼저' 100% 일관, 15 events)
+- 판정: **+7.84ms ≈ +11ms(결함 B — (132)에서 잰 DAC 후 하드웨어 비대칭)** → **가설 A 확정**. timePitch.latency 85ms = **실제 음향 지연이 맞음**. fix(+90ms 앞당김)가 게스트 늦음을 정확히 상쇄. 잔여 +7.84는 결함 B(timePitch 무관, (132) close).
+- 과보정(가설 B = 85ms는 lookahead일 뿐) 반증: 그랬다면 emit_dt가 음수(게스트 빠름)여야 하나 양수.
+
+**🔧 (140) 인과 오진 정정**: (140) "iOS 게스트 sync 오프셋 −13~−27ms(**csv vf_diff_ms**) = timePitch latency 미반영"은 **인과 오진**이었음. vfDiff는 timePitch fix에 순환 무감각 → 그 −13~−27은 timePitch가 아니라 결함 A 잔차였음(청감/음향 OK, 이미 close). timePitch 누락의 **실제 음향 영향은 acoustic으로만 보이고**, fix 후 +7.84ms로 양호. **방법론 교훈: outLat 자체를 바꾸는 fix는 vfDiff(순환)/청감(미세차)으로 검증 불가 → acoustic 필수.** (PLAN (114)/(132) "acoustic 교차검증" 원칙 재확인.)
+
+**빌드**: v0.0.122 (iOS `AudioEngine.swift` outputLatencyMs += timePitch.latency + 실측 NSLog 3곳 + algoLatencyMs 진단 컬럼).
+
+**트랙 3 (② notification 핸들러) — 조건부 보류 close**: interruption/routeChange/configurationChange 핸들러 부재가 v0.0.121 크래시("player did not see an IO cycle")의 근본 트리거였으나, ① v0.0.121 예외잡기(`objcTryCatch` + `engine.isRunning` 가드)로 **크래시 0** + ② (140) 결론 "notification 다 구현해도 TOCTOU race로 production 잔존 → 예외잡기가 유일한 확실 차단"이라 **크래시 관점 추가가치 미미**. 남는 실익(예외 발생 빈도↓ / 전화·이어폰·BT 후 자동 재개 UX)은 **관찰된 적 없음**(효용 불확실) + notification 핸들러는 라이프사이클을 건드려 **회귀 검증 비용(전화·이어폰·BT 실기기 시나리오) 확실** → 효용<비용. **재개조건**: 크래시 자연 재발 or "게스트가 전화 받았다 끊으면 재생 미복귀" 같은 실사용 불편 관찰 시 → `configChange`/`interruption` 핸들러 추가(`rebuildEngineAndResume` 재사용). 사용자 합의 close.
 
 ---
 
@@ -6783,7 +6811,7 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 - [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73% → ✅ **close (139)**(RTT>30 품질 게이트라 무해, 환경 탓, 완화 다 역효과), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
 - [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
 - [ ] **iOS 게스트 잔음 — seek 폭주 → framePos 붕괴** (2026-06-10 (140) v0.0.121 진단). seek 연타(시크바 막 드래그) 시 게스트 seek 폭주 → mp3 디코더(`AudioConverter`) ~2초마다 235회 재생성=잔음 + outputNode.sampleTime 꼬임 → `framePos` 72분 폭주(fpVfDiff) → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → **잔음 지속(seek 멈춰도)**. iOS `framePos`(outputNode 누적)가 seek/node 재생성 후 `vf`와 어긋남 = v0.0.114 "vf/framePos 정합" 가정이 seek 폭주에선 깨짐 ((137) offset 폭주와 동일 뿌리). **정상 seek(가끔)에선 미발현** → 일상 사용은 v0.0.121 크래시 fix만으로 안전. fix = iOS framePos 도메인 + anchor 재설계(깊음, SYNC_REDESIGN 트랙). idevicesyslog 진단 근거 (140).
-- [ ] **iOS 게스트 sync 오프셋 −13~−27ms (timePitch latency 미반영)** (2026-06-10 (140)). baseline −13~−15ms 느림, transpose/speed ON 시 −23~−27ms 악화. `getTimestamp`의 `outputLatencyMs`가 `session.outputLatency`만이고 `nodeLatency`에도 `timePitch.latency` 누락(`AudioEngine.swift:234-236,275`) = v0.0.112(Android SoundTouch latency 반영)의 iOS 미반영분. fix = `timePitch.latency`를 outputLatency 보고에 가산. 단 `AVAudioUnitTimePitch.latency` 실측 크기 미확인(작을 수도) → fix 전 효용 측정 권장. **〈잔음 트랙과 별개, 더 가벼움〉**
+- [x] ~~**iOS 게스트 sync 오프셋 −13~−27ms (timePitch latency 미반영)**~~ — **v0.0.122 (141) 해결**. timePitch.latency(baseline 85.33ms, pitch 무관·speed 반비례) outputLatency 가산 → acoustic emit_dt **+7.84ms**(결함 B ~11ms 범위)로 fix 성공 확정(가설 A: 85ms = 실제 음향 지연). ⚠️ (140) "−13~−27ms(csv vfDiff)" 진단은 **인과 오진** — vfDiff는 outLat fix에 순환 무감각(seek와 계산에 같은 outLatDelta 상쇄), 그 잔차는 결함 A((136)/(138) close). 상세 (141).
 
 **안정성**
 - [x] ~~호스트 백그라운드 진입 시 파일 서버 끊김 → 게스트 seek 시 "404"~~ — v0.0.22(HTTP 서버 재구현) + v0.0.23(heartbeat timeout 15초) 이후 재현 실패. 실기기(S22 호스트 + iPhone + A7 Lite 게스트) 3기기에서 홈 버튼/파일 선택 창/다운로드 중 파일 선택 모든 경로 검증. 단일 원인 확정은 못 했고 두 변경의 합산 효과로 추정 (2026-04-22). **v0.0.25에서 프로토콜 메시지 + 자리비움 배너 + 주기적 재접속으로 근본 대응 완료.**

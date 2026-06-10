@@ -121,6 +121,13 @@ class AudioEngine {
             engine.connect(timePitch, to: engine.mainMixerNode, format: file.processingFormat)
             try engine.start()
             isEngineRunning = true
+            // v0.0.122 실측: latency 항 분해(NSLog = syslog 캡처용, print는 stdout이라 미표시).
+            // timePitch.latency 크기 확인 → outputLatency 가산 효용 판정(HISTORY (140)).
+            NSLog(
+                "[AudioEngine] latencies(s): timePitch=%.5f node=%.5f mixer=%.5f output=%.5f session.outLat=%.5f ioBuf=%.5f",
+                timePitch.latency, node.latency, engine.mainMixerNode.latency,
+                engine.outputNode.latency, session.outputLatency,
+                session.ioBufferDuration)
             scheduleAndPlay(from: seekFrameOffset)
             return true
         } catch {
@@ -205,6 +212,15 @@ class AudioEngine {
         let session = AVAudioSession.sharedInstance()
         let outputLatency = session.outputLatency
         let ioBufDuration = session.ioBufferDuration
+        // v0.0.122: timePitch(AVAudioUnitTimePitch) 처리 파이프라인 latency를 outputLatency
+        // 보고에 가산. vf(playerNode lastRenderTime)는 즉시 진행하나 실제 PCM은 timePitch를
+        // 거쳐 늦게 DAC 도달 → Android의 SoundTouch SETTING_INITIAL_LATENCY 가산(v0.0.112,
+        // oboe_engine.cpp:624)과 대칭. 이 항을 안 빼면 게스트(iOS)가 자기 latency를 과소보고
+        // → P2P anchor 비대칭 틀어짐(HISTORY (140) −13~−27ms 오프셋). Android는 callback이
+        // cents=0에서 bypass라 조건 분기했으나, iOS는 노드 그래프가 항상 timePitch를 거치므로
+        // pitch=0/rate=1에서도 알고리즘 latency가 남아 조건 없이 항상 가산.
+        let algoLatency = max(0, timePitch.latency)
+        let reportedOutputLatency = outputLatency + algoLatency
         // 정지 또는 timestamp 무효 시에도 virtualFrame/sampleRate/totalFrames/wallMs는
         // 유효 → ok=false라도 반환해야 호스트 UI seek바·_skipSeconds 동작 + 게스트
         // 측 fallback alignment 가능 (v0.0.43, 이전엔 ok=false만 반환했음).
@@ -220,7 +236,7 @@ class AudioEngine {
             "sampleRate": sampleRate,
             "totalFrames": totalFrames,
             "wallAtFramePosNs": wallNowNs,
-            "outputLatencyMs": outputLatency * 1000,
+            "outputLatencyMs": reportedOutputLatency * 1000,
         ]
 
         guard let node = playerNode,
@@ -234,7 +250,8 @@ class AudioEngine {
         let nodeLatency = node.latency
             + engine.mainMixerNode.latency
             + engine.outputNode.latency
-        let totalLatency = outputLatency + ioBufDuration + nodeLatency
+        // totalLatency는 reportedOutputLatency(algoLatency 포함)로 — 진단 합계도 timePitch 반영.
+        let totalLatency = reportedOutputLatency + ioBufDuration + nodeLatency
 
         // v0.0.115 monotonic 전환: timeNs를 BOOTTIME 대응(mach_continuous_time) 도메인으로.
         // AVAudioTime.hostTime은 mach_absolute_time(sleep 멈춤) 고정이라, sleep 누적분
@@ -272,9 +289,10 @@ class AudioEngine {
             "virtualFrame": vf,
             "sampleRate": sampleRate,
             "totalFrames": totalFrames,
-            "outputLatencyMs": outputLatency * 1000,
+            "outputLatencyMs": reportedOutputLatency * 1000,
             "nodeLatencyMs": nodeLatency * 1000,
             "totalLatencyMs": totalLatency * 1000,
+            "algoLatencyMs": algoLatency * 1000,
             "ioBufferDurationMs": ioBufDuration * 1000,
         ]
     }
@@ -284,6 +302,7 @@ class AudioEngine {
         let clamped = max(-2400, min(2400, cents))
         pitchCents = clamped
         timePitch.pitch = Float(clamped)
+        NSLog("[AudioEngine] setSemitoneCents=%ld → timePitch.latency=%.5fs", clamped, timePitch.latency)
     }
 
     func getSemitoneCents() -> Int {
@@ -295,6 +314,7 @@ class AudioEngine {
         let clamped = max(500, min(2000, speedX1000))
         playbackSpeedX1000 = clamped
         timePitch.rate = Float(clamped) / 1000.0
+        NSLog("[AudioEngine] setPlaybackSpeedX1000=%ld → timePitch.latency=%.5fs", clamped, timePitch.latency)
     }
 
     func getPlaybackSpeedX1000() -> Int {
