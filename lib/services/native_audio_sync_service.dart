@@ -41,6 +41,11 @@ const double _obsBroadcastIntervalMs = 500.0;
 // 평소 100ms 후 측정값은 ~90ms (seek 도달까지 디코더 처리 시간) → 500ms이면 그 5배 안전 마진.
 // 사고 케이스(35초 잔재) 같은 큰 어긋남만 잡고 정상 동작은 영향 0.
 const double _anchorVerifyRejectThresholdMs = 500.0;
+// v0.0.123 (트랙2): seek-notify coalesce 디바운스 — 호스트 막 드래그로 seek가 다발로
+// 오면(실측 host_seek 331회·min 1ms 간격) 마지막 위치만 native seekToFrame 실행 →
+// iOS 디코더(AudioConverter) 재생성 폭주=잔음 차단. 절대위치라 멱등(중간 skip 무해).
+// UI/anchor무효화는 매번(반응성), 무거운 seekToFrame만 합침. HISTORY (140)/SYNC_REDESIGN #6.
+const int _seekCoalesceMs = 150;
 
 /// v3 오디오 동기화 서비스.
 /// 호스트: 네이티브 엔진 재생 + audio-obs broadcast + HTTP 파일 서빙.
@@ -111,6 +116,9 @@ class NativeAudioSyncService {
   // seek 시 즉시 target position을 emit하고, 일정 시간 폴링 position을 무시.
   Duration? _seekOverridePosition;
   Timer? _seekOverrideTimer;
+  // v0.0.123 (트랙2): seek-notify coalesce 상태. _pendingSeekTargetMs = 마지막 목표 위치(ms).
+  double? _pendingSeekTargetMs;
+  Timer? _seekCoalesceTimer;
   // §I 전환 anchor 리셋 디바운스 — 드래그/연타 중 연쇄 리셋 방지 (v0.0.105).
   Timer? _speedAnchorResetTimer;
   static const int _speedResetDebounceMs = 250;
@@ -1230,15 +1238,12 @@ class NativeAudioSyncService {
     if (targetMs == null || !_audioReady) return;
     // v0.0.85 진단: 호스트가 동봉한 msgSeq (구버전 호스트 호환 위해 0 fallback).
     final msgSeq = (message['data']?['msgSeq'] as num?)?.toInt() ?? 0;
-    // 절대 위치 → 게스트 frame 변환. 몇 번 와도 같은 위치 (멱등)
-    final targetGuestVf = (targetMs * _framesPerMs).round();
     debugPrint(
-      '[SEEK-NOTIFY] recv msgSeq=$msgSeq targetMs=${targetMs.toStringAsFixed(0)} '
-      '→ guestVf=$targetGuestVf',
+      '[SEEK-NOTIFY] recv msgSeq=$msgSeq targetMs=${targetMs.toStringAsFixed(0)} (coalesce)',
     );
-    unawaited(_engine.seekToFrame(targetGuestVf));
-    // UI 즉시 반영. 재생 중이 아니면 폴링이 이전 위치를 계속 emit하므로
-    // override로 덮어야 "처음 재생" 시 끝 위치(4:55) 잔상이 사라짐.
+    // UI 즉시 반영 (반응성 — seekToFrame을 디바운스해도 시크바는 바로 따라감).
+    // 재생 중이 아니면 폴링이 이전 위치를 계속 emit하므로 override로 덮어야
+    // "처음 재생" 시 끝 위치(4:55) 잔상이 사라짐.
     final pos = Duration(milliseconds: targetMs.round());
     _seekOverridePosition = pos;
     _positionController.add(pos);
@@ -1246,33 +1251,22 @@ class NativeAudioSyncService {
     _seekOverrideTimer = Timer(const Duration(milliseconds: 500), () {
       _seekOverridePosition = null;
     });
-    // 앵커 무효화 + 쿨다운: fresh obs 도착 대기 후 re-anchor
+    // 앵커 무효화 + 쿨다운 (가벼움, 매번 — 마지막 seek 후 fresh re-anchor)
     _anchorHostFrame = null;
     _anchorGuestFrame = null;
     _seekCooldownUntilMs = DateTime.now().millisecondsSinceEpoch + 1000;
     _logGuestEvent(event: 'anchor_reset_seek_notify', seekMsgSeq: msgSeq);
-    // v0.0.85: 200ms 후 ts.virtualFrame이 target 근처 도달했는지 검증.
-    // 큐 모델 fix 후 외부 seekToFrame은 mDecodeSeekTarget만 set → ts.virtualFrame
-    // 자체가 즉시 점프하는지 / decodeLoop 실제 처리되는지 따로 확인.
-    // ±100ms 범위 밖이면 logcat warning — handler는 발화했는데 native 처리 누락.
-    Timer(const Duration(milliseconds: 200), () {
-      final ts = _engine.latest;
-      if (ts == null) return;
-      final actual = ts.virtualFrame;
-      final diffFrames = actual - targetGuestVf;
-      final fpms = ts.sampleRate > 0 ? ts.sampleRate / 1000.0 : _framesPerMs;
-      final diffMs = diffFrames / fpms;
-      if (diffMs.abs() > 100.0) {
-        debugPrint(
-          '[SEEK-NOTIFY] WARN msgSeq=$msgSeq target=$targetGuestVf '
-          'actual=$actual diffMs=${diffMs.toStringAsFixed(1)}ms (>100ms after 200ms)',
-        );
-      } else {
-        debugPrint(
-          '[SEEK-NOTIFY] OK msgSeq=$msgSeq target=$targetGuestVf '
-          'actual=$actual diffMs=${diffMs.toStringAsFixed(1)}ms',
-        );
-      }
+    // v0.0.123: seekToFrame coalesce — 연속 seek-notify(호스트 막 드래그)를 디바운스로
+    // 합쳐 마지막 위치만 native 적용 → iOS 디코더 재생성 폭주(잔음) 차단. 절대위치라 멱등.
+    _pendingSeekTargetMs = targetMs;
+    _seekCoalesceTimer?.cancel();
+    _seekCoalesceTimer = Timer(const Duration(milliseconds: _seekCoalesceMs), () {
+      final t = _pendingSeekTargetMs;
+      _pendingSeekTargetMs = null;
+      if (t == null) return;
+      final targetGuestVf = (t * _framesPerMs).round();
+      debugPrint('[SEEK-NOTIFY] coalesced → guestVf=$targetGuestVf');
+      unawaited(_engine.seekToFrame(targetGuestVf));
     });
   }
 
@@ -1933,6 +1927,7 @@ class NativeAudioSyncService {
     _playing = false;
     _playingController.add(false);
     _seekOverrideTimer?.cancel();
+    _seekCoalesceTimer?.cancel();
     _speedAnchorResetTimer?.cancel();
     _seekOverridePosition = null;
     _messageSub?.cancel();

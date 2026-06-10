@@ -6781,6 +6781,24 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-10 (142) — iOS 트랙2(잔음/seek 폭주) 착수: 백오프 롤백 → seek coalesce(v0.0.123) + 음정/속도 틀어짐 "네트워크 아님" 확정
+
+(140) "남은 트랙" ② 착수. **구성**: S947N 호스트 + iPhone 12 Pro 게스트, 둘 다 coalesce v0.0.123(profile). 측정 csv `sync_log_2026-06-10T16-29-49.csv`.
+
+**1차 시도 = anchor REJECT 백오프 → 롤백(진단 오류)**: establish-REJECT 루프(매 obs 재establish→seekToFrame)가 잔음 주범이라 가정, 연속 REJECT N회 시 establish 백오프 구현. **실측이 가설 반증** — csv event: `anchor_reset_verify_fail` **16회뿐**, 진짜 주범은 **`host_seek` 331회(시크바 막 드래그, 간격 median 176ms·min 1ms) = 게스트 seekToFrame 331회 → iOS 디코더(AudioConverter) 재생성**. 백오프는 16회짜리만 겨냥해 잔음(331회) 무효 + 음정/속도 변경 시 establish 억제로 sync 악화 의심 → **롤백**.
+
+**2차 = seek-notify coalesce (v0.0.123)**: 연속 seek-notify를 150ms 디바운스로 합쳐 **마지막 위치만 native seekToFrame** (절대위치라 멱등, 중간 skip 안전). UI/anchor무효화는 매번(반응성), 무거운 seekToFrame만 합침. `native_audio_sync_service.dart` `_handleSeekNotify` + `_seekCoalesceTimer`. **결과: 잔음 감소(baseline+일반 seek OK)** but **극한 막 조작엔 잔존**(디바운스 150ms < seek 간격 median 176ms라 일부 구간 안 합쳐짐).
+
+**음정/속도 sync 틀어짐 진단**: 사용자 보고 "속도/음정 조정 시 sync 틀어짐". (a) **백오프 무관 확정** — 롤백 후에도 틀어짐. (b) **네트워크 아님 확정** — RTT median **16ms**(max 30)인데 vfDiff 스파이크 **±100~224ms**(RTT의 10배+, 극단 ±48만). 네트워크 지연이면 vfDiff≈RTT여야 하나 10배+ → 네트워크로 설명 불가. (c) vfDiff median **−24.7ms**(정상 구간 안정, 트랙1 baseline −23과 동일 = 결함 A 잔재), `|vfDiff|>100` **8%**(막 조정 중 전환 순간만). → **원인 = speed 전환 순간 엔진/timePitch latency 과도기**(speed마다 timePitch.latency 85/64/128ms로 점프 → 전환 시 outputLatency 비대칭 어긋남 + 엔진 버퍼 재충전 과도기). **§I-6 "네트워크 지연" 기존 가정 정정** — 실측상 네트워크 아님, 엔진 전환 과도기.
+
+**잔여 (둘 다 깊음, 다음 세션 하나씩)**:
+1. **잔음** — coalesce 디바운스 튜닝(150→?) or iOS 엔진 디코더 재사용(seekToFrame이 AudioConverter 재생성 안 하게, 깊음).
+2. **speed 전환 과도기** — 네트워크 아님, 엔진/timePitch latency 과도기. §I-6 해법(적용 시각 broadcast)은 네트워크 보상 전제라 재검토 필요. acoustic 교차검증(vfDiff offset 의존) 권장.
+
+**빌드**: v0.0.123 (`_handleSeekNotify` seek coalesce 디바운스 150ms + dispose cancel).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
@@ -6810,7 +6828,7 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 - [x] ~~**Android 16 16KB page size 정렬 미준수**~~ — **v0.0.101 (118) 완료**. 2026-06-01 실측 결과 미정렬은 `liboboe.so`(oboe 1.9.0 AAR) **단 하나**(나머지는 NDK 28 + Flutter 3.41 + AGP 8.11이 이미 정렬, `libVkLayer`는 debug 전용). oboe `1.9.0`→`1.9.3` 한 줄로 해결, 전 ABI ELF+zip 정렬 통과, SM S947N 첫 실행 경고 사라짐 + 오디오 회귀 없음 확인. (2026-05-29 (105) 최초 보고 시점의 7개 미정렬 목록은 debug APK 기준 + 당시 버전 조합 기준이었음.)
 - [ ] **거짓말 패턴(vfDiff) — 대부분 해소, 잔여 추적** (2026-06-03 (123) v0.0.111 부분 대응 → 2026-06-05 진척). (1) `isOffsetStable` jitter anchor 공백 → ✅ **v0.0.120 (135) fix**(stable 82%, fallback 지배 해소). (1') vfDiff 40~95 진동 → ✅ **(138) close**(v0.0.118/119 효과, 재입장 5회 재측정에서 재현 안 됨, 폭 3~6ms). 잔여: (2) host HAL getTimestamp 간헐 실패(framePos=-1, (30) 재발) 미해결, (3) offset reject ~73% → ✅ **close (139)**(RTT>30 품질 게이트라 무해, 환경 탓, 완화 다 역효과), (4) 결함 A 잔재(anchor establish -7~-22 편향, fallback이 더 정확, 청감 OK → (136) close, 재개 시 rate-bend). 상세 (138)/(135)/(136) / PLAN §H.
 - [ ] **게스트 engine 재시작 루프 (막 조작 트리거)** (2026-06-03 (123) v0.0.111). host seek 연타 + play/pause 토글 막 조작 시 guest start/stop 반복 → "position(vf) 동기 표시인데 실제 다른 부분 재생". 정상 사용에선 미발생 — 막 조작 견고화는 별도 트랙(우선순위 낮음).
-- [ ] **iOS 게스트 잔음 — seek 폭주 → framePos 붕괴** (2026-06-10 (140) v0.0.121 진단). seek 연타(시크바 막 드래그) 시 게스트 seek 폭주 → mp3 디코더(`AudioConverter`) ~2초마다 235회 재생성=잔음 + outputNode.sampleTime 꼬임 → `framePos` 72분 폭주(fpVfDiff) → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → **잔음 지속(seek 멈춰도)**. iOS `framePos`(outputNode 누적)가 seek/node 재생성 후 `vf`와 어긋남 = v0.0.114 "vf/framePos 정합" 가정이 seek 폭주에선 깨짐 ((137) offset 폭주와 동일 뿌리). **정상 seek(가끔)에선 미발현** → 일상 사용은 v0.0.121 크래시 fix만으로 안전. fix = iOS framePos 도메인 + anchor 재설계(깊음, SYNC_REDESIGN 트랙). idevicesyslog 진단 근거 (140).
+- [ ] **iOS 게스트 잔음 — seek 폭주 → framePos 붕괴** (2026-06-10 (140) v0.0.121 진단). seek 연타(시크바 막 드래그) 시 게스트 seek 폭주 → mp3 디코더(`AudioConverter`) ~2초마다 235회 재생성=잔음 + outputNode.sampleTime 꼬임 → `framePos` 72분 폭주(fpVfDiff) → anchor 매번 REJECT/reset → 위치 못 맞춰 seek 무한 → **잔음 지속(seek 멈춰도)**. iOS `framePos`(outputNode 누적)가 seek/node 재생성 후 `vf`와 어긋남 = v0.0.114 "vf/framePos 정합" 가정이 seek 폭주에선 깨짐 ((137) offset 폭주와 동일 뿌리). **정상 seek(가끔)에선 미발현** → 일상 사용은 v0.0.121 크래시 fix만으로 안전. idevicesyslog 진단 근거 (140). **⏳ (142) 정정+진전**: 실측상 잔음 주범은 framePos 붕괴/establish-REJECT 루프(`anchor_reset_verify_fail` 16회)가 아니라 **`host_seek` 331회 → 게스트 seekToFrame 331회 = iOS 디코더 재생성**. **v0.0.123 seek-notify coalesce(150ms 디바운스)로 완화** — baseline+일반 seek OK, 극한 막 조작엔 잔존(디바운스 150 < seek 간격 median 176ms). 추가 = 디바운스 튜닝 or iOS 엔진 디코더 재사용(깊음). framePos 도메인 재설계는 잔재 재현 시 재검토. 상세 (142).
 - [x] ~~**iOS 게스트 sync 오프셋 −13~−27ms (timePitch latency 미반영)**~~ — **v0.0.122 (141) 해결**. timePitch.latency(baseline 85.33ms, pitch 무관·speed 반비례) outputLatency 가산 → acoustic emit_dt **+7.84ms**(결함 B ~11ms 범위)로 fix 성공 확정(가설 A: 85ms = 실제 음향 지연). ⚠️ (140) "−13~−27ms(csv vfDiff)" 진단은 **인과 오진** — vfDiff는 outLat fix에 순환 무감각(seek와 계산에 같은 outLatDelta 상쇄), 그 잔차는 결함 A((136)/(138) close). 상세 (141).
 
 **안정성**
