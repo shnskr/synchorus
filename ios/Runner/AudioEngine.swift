@@ -237,6 +237,12 @@ class AudioEngine {
             "totalFrames": totalFrames,
             "wallAtFramePosNs": wallNowNs,
             "outputLatencyMs": reportedOutputLatency * 1000,
+            // v0.0.124: 무음(underrun) 카운터 — iOS는 AVAudioEngine 내부 버퍼라
+            // 동일 카운트 불가 → -1(미지원). Android(oboe)는 콜백 직접 채워 측정 가능.
+            "decodeUnderrunFrames": -1,
+            "decodeUnderrunEvents": -1,
+            "stUnderrunFrames": -1,
+            "stUnderrunEvents": -1,
         ]
 
         guard let node = playerNode,
@@ -294,6 +300,11 @@ class AudioEngine {
             "totalLatencyMs": totalLatency * 1000,
             "algoLatencyMs": algoLatency * 1000,
             "ioBufferDurationMs": ioBufDuration * 1000,
+            // v0.0.124: iOS는 underrun 직접 카운트 불가 → -1(미지원).
+            "decodeUnderrunFrames": -1,
+            "decodeUnderrunEvents": -1,
+            "stUnderrunFrames": -1,
+            "stUnderrunEvents": -1,
         ]
     }
 

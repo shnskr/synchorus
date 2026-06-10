@@ -59,8 +59,14 @@ class SyncMeasurementLogger {
     // p2p 메시지에 동봉 → 게스트 anchor_reset_seek_notify event row에 같은 값 기록.
     // csv 안에서 송수신 1:1 매칭으로 메시지 손실 vs handler 자체 발화 누락 분리.
     // host_seek 이외 row는 0.
+    // v0.0.124 진단 컬럼 (PLAN ②): 무음(underrun) 누적 카운터. 호스트/게스트 각자
+    // native 엔진의 누적값(monotonic) — 두 row의 delta로 구간 무음량 분석.
+    // *_decode_under_frames: ring decode 못 따라온 frame(vf>=ringHead) 누적
+    // *_st_under_frames: SoundTouch out-ring 부족 silence padding frame 누적
+    // *_*_events: 그런 콜백 횟수(끊김 횟수). frames/SR*1000 = 총 무음 ms.
+    // iOS는 -1(AVAudioEngine 내부 버퍼라 동일 카운트 불가).
     _sink!.writeln(
-      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,decode_load_ms,decode_total_frames,decode_throughput_fpms,seek_msg_seq,event',
+      'seq,wall_ms,guest_wall,guest_id,drift_ms,vf_diff_ms,host_obs_wall,offset_ms,host_vf,guest_vf,seek_count,out_lat_host_raw,out_lat_guest_raw,out_lat_delta_current,out_lat_delta_anchored,raw_offset_ms,win_min_raw_offset_ms,last_rtt_ms,win_min_rtt_ms,decode_load_ms,decode_total_frames,decode_throughput_fpms,seek_msg_seq,guest_decode_under_frames,guest_decode_under_events,guest_st_under_frames,guest_st_under_events,host_decode_under_frames,host_decode_under_events,host_st_under_frames,host_st_under_events,event',
     );
     _nextSeq = 0;
     _isActive = true;
@@ -90,12 +96,21 @@ class SyncMeasurementLogger {
     int decodeTotalFrames = 0,
     double decodeThroughputFpms = 0,
     int seekMsgSeq = 0,
+    // v0.0.124: 무음(underrun) 누적 카운터. -1=미지원(iOS).
+    int guestDecodeUnderFrames = 0,
+    int guestDecodeUnderEvents = 0,
+    int guestStUnderFrames = 0,
+    int guestStUnderEvents = 0,
+    int hostDecodeUnderFrames = 0,
+    int hostDecodeUnderEvents = 0,
+    int hostStUnderFrames = 0,
+    int hostStUnderEvents = 0,
     String event = 'drift',
   }) {
     if (!_isActive) return;
     final seq = _nextSeq++;
     _sink?.writeln(
-      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$decodeLoadMs,$decodeTotalFrames,${decodeThroughputFpms.toStringAsFixed(2)},$seekMsgSeq,$event',
+      '$seq,$wallMs,$guestWall,$guestId,${driftMs.toStringAsFixed(2)},${vfDiffMs.toStringAsFixed(2)},$hostObsWall,${offsetMs.toStringAsFixed(1)},$hostVf,$guestVf,$seekCount,${outLatHostRaw.toStringAsFixed(2)},${outLatGuestRaw.toStringAsFixed(2)},${outLatDeltaCurrent.toStringAsFixed(2)},${outLatDeltaAnchored.toStringAsFixed(2)},${rawOffsetMs.toStringAsFixed(1)},${winMinRawOffsetMs.toStringAsFixed(1)},$lastRttMs,$winMinRttMs,$decodeLoadMs,$decodeTotalFrames,${decodeThroughputFpms.toStringAsFixed(2)},$seekMsgSeq,$guestDecodeUnderFrames,$guestDecodeUnderEvents,$guestStUnderFrames,$guestStUnderEvents,$hostDecodeUnderFrames,$hostDecodeUnderEvents,$hostStUnderFrames,$hostStUnderEvents,$event',
     );
   }
 

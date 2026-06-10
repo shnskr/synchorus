@@ -28,6 +28,15 @@ class NativeTimestamp {
   /// null = 미지원/측정 불가 (Dart 측에서 0 fallback).
   final double? outputLatencyMs;
 
+  /// v0.0.124: 무음(underrun) 누적 카운터 (측정 보고서용, PLAN ②). monotonic 증가 →
+  /// csv에서 두 시점 delta로 구간 무음량 분석. decode=ring decode 못 따라옴(vf>=ringHead),
+  /// st=SoundTouch out-ring 부족 silence padding. frames=총 무음 frame, events=끊김 횟수.
+  /// -1 = 미지원 (iOS는 AVAudioEngine 내부 버퍼라 동일 카운트 불가).
+  final int decodeUnderrunFrames;
+  final int decodeUnderrunEvents;
+  final int stUnderrunFrames;
+  final int stUnderrunEvents;
+
   const NativeTimestamp({
     required this.framePos,
     required this.timeNs,
@@ -37,6 +46,10 @@ class NativeTimestamp {
     required this.totalFrames,
     required this.ok,
     this.outputLatencyMs,
+    this.decodeUnderrunFrames = 0,
+    this.decodeUnderrunEvents = 0,
+    this.stUnderrunFrames = 0,
+    this.stUnderrunEvents = 0,
   });
 
   /// wallAtFramePosNs를 밀리초로 변환. v0.0.115: 검증 대조용으로만 유지(정렬엔 monoMs).
@@ -67,6 +80,11 @@ class NativeTimestamp {
         totalFrames: (m['totalFrames'] as num?)?.toInt() ?? 0,
         ok: m['ok'] as bool? ?? false,
         outputLatencyMs: (m['outputLatencyMs'] as num?)?.toDouble(),
+        // v0.0.124: 키 없으면 0 (구버전 native), iOS는 -1(미지원) 명시 보고.
+        decodeUnderrunFrames: (m['decodeUnderrunFrames'] as num?)?.toInt() ?? 0,
+        decodeUnderrunEvents: (m['decodeUnderrunEvents'] as num?)?.toInt() ?? 0,
+        stUnderrunFrames: (m['stUnderrunFrames'] as num?)?.toInt() ?? 0,
+        stUnderrunEvents: (m['stUnderrunEvents'] as num?)?.toInt() ?? 0,
       );
 }
 

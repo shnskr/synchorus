@@ -110,6 +110,10 @@ class NativeAudioSyncService {
   int _seekCorrectionAccum = 0;
   int _seekCount = 0;
   int _seekCooldownUntilMs = 0;
+  // v0.0.124: 게스트 무음(underrun) logcat throttle용 직전 누적값 (PLAN ②).
+  // csv는 호스트만 기록 → 게스트는 변화 시에만 logcat. -1=미지원(iOS).
+  int _lastGuestUnderDecode = 0;
+  int _lastGuestUnderSt = 0;
 
   // ── seek 후 position 점프 방지 ──────────────────────────────
   // seek 직후 폴링이 아직 이전 위치를 반환 → UI에 순간 점프 발생.
@@ -890,6 +894,9 @@ class NativeAudioSyncService {
     // guest_wall은 게스트가 보낸 원본 wallMs — TCP lag + clock offset 분석용.
     final hostRecvWall = DateTime.now().millisecondsSinceEpoch;
     final guestWall = (data['wallMs'] as num?)?.toInt() ?? 0;
+    // v0.0.124: 호스트 자기 native 엔진 무음 누적(여기는 호스트에서 실행). 게스트분은
+    // csv 미기록(게스트 logcat) → guest_* 컬럼 0, host_*만 채움. null/iOS는 -1(미지원).
+    final hostTs = _engine.latest;
     _logger.log(
       wallMs: hostRecvWall,
       guestWall: guestWall,
@@ -910,6 +917,10 @@ class NativeAudioSyncService {
       lastRttMs: lastRttMs,
       winMinRttMs: winMinRttMs,
       seekMsgSeq: seekMsgSeq,
+      hostDecodeUnderFrames: hostTs?.decodeUnderrunFrames ?? -1,
+      hostDecodeUnderEvents: hostTs?.decodeUnderrunEvents ?? -1,
+      hostStUnderFrames: hostTs?.stUnderrunFrames ?? -1,
+      hostStUnderEvents: hostTs?.stUnderrunEvents ?? -1,
       event: event,
     );
     // 실시간 관측용 logcat 출력 (v0.0.24+)
@@ -1440,6 +1451,23 @@ class NativeAudioSyncService {
         _pendingAnchorVerifyTarget = null;
         _pendingAnchorVerifyDeadline = null;
         _pendingAnchorVerifyInitialCorrection = null;
+      }
+
+      // v0.0.124: 게스트 무음(underrun) 변화 시 logcat (csv는 호스트만, PLAN ②).
+      // 누적값이라 변할 때만 = 끊김 발생 순간만 출력(매 poll spam 방지).
+      if (!_isHost) {
+        final du = ts.decodeUnderrunFrames;
+        final su = ts.stUnderrunFrames;
+        if (du != _lastGuestUnderDecode || su != _lastGuestUnderSt) {
+          final sr = ts.sampleRate > 0 ? ts.sampleRate : 48000;
+          debugPrint(
+            '[UNDERRUN][guest] decode=$du fr '
+            '(${(du * 1000 / sr).toStringAsFixed(0)}ms, ${ts.decodeUnderrunEvents}ev) '
+            'st=$su fr (${(su * 1000 / sr).toStringAsFixed(0)}ms, ${ts.stUnderrunEvents}ev)',
+          );
+          _lastGuestUnderDecode = du;
+          _lastGuestUnderSt = su;
+        }
       }
 
       // 게스트: drift 보정

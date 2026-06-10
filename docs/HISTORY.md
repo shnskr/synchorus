@@ -6799,6 +6799,58 @@ v0.0.120으로 offset 안정화(#1) 완료 → 1단계 롤백 사유("offset 불
 
 ---
 
+### 2026-06-10 (143) — v0.0.124 무음(underrun) 객관 카운터 + 30분 측정 음원 (PLAN ② 선행)
+
+PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underrun) 객관 카운터 부재 해소. HAL `getXRunCount`는 콜백이 0으로 채운 **soft silence**(decode 못 따라옴 / SoundTouch out-ring 빔)를 정상 출력으로 보고 못 잡으므로 별도 카운터 필요(`oboe_engine.cpp:840/862/870`).
+
+**변경 (v0.0.124)**:
+- `oboe_engine.cpp`: atomic 4개(`mDecodeUnderrunFrames/Events`, `mStUnderrunFrames/Events`) + 콜백 로컬 누적 후 끝에 1회 `fetch_add`(RT-safe). decode underrun = `!muted && !decoded && vf∈[0,total)`(useST `:843` + bypass `:873`), ST underrun = `popped<numFrames`(`:862`). getter + JNI long array 8→12.
+- `MainActivity.kt` Map 4키 / `native_audio_service.dart` `NativeTimestamp` 4필드(`-1`=미지원).
+- `sync_measurement_logger.dart`: csv에 `guest_*`/`host_*` underrun 8컬럼(frames+events). `native_audio_sync_service.dart`: 호스트 자기 underrun을 `_handleDriftReport`에서 `_engine.latest` 직접 읽어 `host_*` 기록 + 게스트는 `[UNDERRUN][guest]` logcat(누적 변화 시에만).
+- iOS `AudioEngine.swift`: 두 반환 Map에 `-1`(AVAudioEngine 내부 버퍼라 동일 카운트 불가).
+
+**범위 결정 (사용자 합의, "추가가 많다" 지적 후)**: "호스트만 csv + 게스트 logcat". P2P 송신 배관(`_sendDriftReport`)은 **0줄 수정** — 측정 핵심은 재생 주체(호스트)이고, 게스트 underrun을 drift report에 동봉하는 건 효용 대비 배관 큼. 게스트는 자체 logcat으로 충분.
+
+**측정 음원**: `assets/measure_scale_30min.mp3` 생성 — 도레미파솔라시도(C4~C5, `261.63~523.25Hz`) 100ms 톤 + 900ms 무음, 8초 주기 반복, 30분, 48k/stereo/192k. **음높이로 어긋난 비트를 즉시 식별**(싱크 앞/뒤 판별). Android 2대 `/sdcard/Download` push. pubspec 미등록(측정은 `_pickFile` 수동 선택이라 번들 불필요).
+
+**관찰/발견**:
+- PLAN 128줄 "algorithm latency 미반영"은 **옛 서술** — v0.0.112(Android SoundTouch `INITIAL_LATENCY`+batch)/v0.0.122(iOS `timePitch.latency`)로 **정적 항 이미 반영**(drift median 0.24 / acoustic +7.84). 남은 건 out-ring **동적 점유**(의도적 1단계 제외, `oboe_engine.cpp:627`, 효용<비용 후보).
+- `assets/measure_audio.mp3`(12분) + `scripts/measure.sh`(`AUTO_MEASURE_MODE` dart-define)는 **lib 미참조 죽은 유물** — 현재 측정은 `_pickFile` 수동 방식. pubspec 등록/파일/measure.sh 묶어 정리 가능(사용자 결정 대기).
+- csv는 **호스트가 방 만들면 자동 시작**(`startListening(isHost:true)`→`_logger.start()`, 별도 토글 없음) → 측정은 호스트1+게스트≥1 구성 필요.
+
+**검증**: C++ NDK 컴파일 통과(`assembleDebug` 20.4s) + `flutter analyze` 0 issues. Android 2대(R3CT60D20XE/R3KL207HBBF) 설치+음원 push 완료. iOS(iPhone 12 Pro) profile 빌드 완료. **실측은 (144)**.
+
+**빌드**: v0.0.124.
+
+---
+
+### 2026-06-10 (144) — v0.0.124 첫 실측: underrun=재생 시작 워밍업 1회성 + iPhone vfDiff 과도기(속도/음정 조정 시 오차)
+
+**구성**: 호스트 R3KL207HBBF + 게스트 2대(Android R3CT60D20XE=`192.168.35.239`, iPhone 12 Pro=`192.168.35.209`). 같은 csv `sync_log_2026-06-10T17-21-13.csv`(`startListening` 재호출이 기존 파일 이어씀)에 **2배속 구간(+10.8~24.9min) + 1배속 구간(+30.6~42.3min, 11.7분 무조작 1.0x)** 누적. 보관: `measurements/underrun_v124_2026-06-10_mixed.csv`.
+
+**underrun = 재생 시작 워밍업 1회성 (배속 무관)**:
+- **ST underrun: 2배속·1배속 둘 다 정확히 7392 fr (154ms, 77 events)** — 동일값 = 결정론적. `event=96 fr`(콜백 1개 통째)씩 77회 = 재생 시작 시 SoundTouch out-ring 초기 채우는 동안 silence. 정상 재생 구간은 0. 카운터가 loadFile마다 리셋되는 듯(1배속 구간 delta=절대값 7392) → "재생 세션당 시작 워밍업 154ms" 성격.
+- **decode underrun: 1배속 622 fr (13ms, 7ev)** — 재생 시작 ring 초기화 시 미미. 2배속 전체구간 0.
+- 호스트 csv `host_*`와 게스트 logcat `[UNDERRUN][guest]`가 동일(7392) — 두 별개 기기가 같은 콘텐츠/콜백크기(96 fr)로 같은 워밍업.
+
+**🎯 iPhone vfDiff = 배속 전환 과도기 노이즈 (iOS 고유 sync 문제 아님)**:
+| 게스트 | 2배속 \|vfDiff\| | 1배속 \|vfDiff\| (깨끗) | 1배속 >100ms |
+|--------|-----------------|----------------------|-------------|
+| Android(.239) | 20ms | **6.9ms** | 0.1% |
+| iPhone(.209) | **71ms** (>100ms 25%) | **17.3ms** | 0.1% |
+- 2배속 측정의 iPhone 71ms(25%가 100ms 초과)는 **배속 슬라이더 1.0→2.0 변경(`host_tempo` 20회) + pause 과도기 스파이크**(vfDiff max 1144ms) 탓. **1배속 깨끗 조건에선 iPhone 17ms로 양호**. vfDiff는 offset 의존 외삽이라 "거짓말" 가능 — 과도기 노이즈 확인.
+- ⚠️ **단 iPhone은 속도/음정 조정 시 오차 발생**(2배속·전환에서 vfDiff 악화 17→71ms, Android는 20ms로 덜 민감). 일상 1배속 재생은 양호(17ms, 결함 A 잔재 수준, (138) close 영역). 속도/음정 기능 쓸 때만 iOS 과도기 오차 참고. → §I-6 트랙.
+
+**기타 sync 품질**: fallback 2배속 21% → **1배속 3%**(깨끗하면 offset 안정). `verify_fail` 0, seek 폭주 0(host_seek 3), `anchor_reset_offset_drift` 1회. 양호.
+
+**방법론 교훈**:
+- **측정 중 중간 pull 금지** — 진행 중 csv를 당기면 `host_vf`가 그 순간값이라 "정지"로 오판(실제론 28.1분까지 진행 중이었음). 측정 끝나고 한 번에 pull.
+- **배속 검증은 재생 전 idle 제외 필수** — csv 첫 row(방 만든 시점)부터 wall 재면 파일 고르기·게스트 입장 idle(8.8분) 포함돼 2배속이 1.13x로 오산. 순수 재생 구간(첫 vf>0 ~ 마지막 vf증가)만 보면 1.74x(≈2배속, 남은 차이는 pause).
+
+**빌드**: 코드 변경 없음 (실측·분석만, v0.0.124 데이터).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

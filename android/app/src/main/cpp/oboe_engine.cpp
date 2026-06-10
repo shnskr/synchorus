@@ -786,6 +786,20 @@ public:
 
     int64_t getTotalFrames() const { return mDecodedTotalFrames; }
 
+    // v0.0.124: underrun 누적 카운터 노출 (측정 보고서용). monotonic 증가, csv delta로 분석.
+    int64_t getDecodeUnderrunFrames() const {
+        return mDecodeUnderrunFrames.load(std::memory_order_relaxed);
+    }
+    int64_t getDecodeUnderrunEvents() const {
+        return mDecodeUnderrunEvents.load(std::memory_order_relaxed);
+    }
+    int64_t getStUnderrunFrames() const {
+        return mStUnderrunFrames.load(std::memory_order_relaxed);
+    }
+    int64_t getStUnderrunEvents() const {
+        return mStUnderrunEvents.load(std::memory_order_relaxed);
+    }
+
     oboe::DataCallbackResult onAudioReady(
         oboe::AudioStream* stream,
         void* audioData,
@@ -811,6 +825,10 @@ public:
 
         const bool muted = mMuted.load(std::memory_order_relaxed);
         int64_t vf = mVirtualFrame.load(std::memory_order_relaxed);
+
+        // v0.0.124: 이번 콜백 무음 누적(로컬). 콜백 끝에 atomic으로 1회 합산.
+        int64_t cbDecodeUnder = 0;  // decode 못 따라온 frame (vf>=ringHead 등)
+        int64_t cbStUnder = 0;      // ST out-ring 부족으로 silence padding한 frame
 
         // §G G-1 ring buffer: 윈도우 [tail, head) 안이면 modular index로 read.
         // 밖이면 무음 (디코드 wait 또는 EOS).
@@ -838,6 +856,10 @@ public:
             if (mSTInBuf.size() < inSamples) mSTInBuf.resize(inSamples);
             for (int i = 0; i < inputFrames; ++i) {
                 const bool decoded = vf >= ringTail && vf < ringHead;
+                // v0.0.124: 재생해야 하는데(범위 안 + unmuted) decode 못 따라온 frame = underrun.
+                if (!muted && !decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
+                    ++cbDecodeUnder;
+                }
                 for (int ch = 0; ch < 2; ++ch) {
                     float sample = 0.0f;
                     if (!muted && decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
@@ -860,6 +882,9 @@ public:
             const size_t popSamples = popped * 2u;
             memcpy(output, mSTOutBuf.data(), popSamples * sizeof(float));
             if (popped < static_cast<size_t>(numFrames)) {
+                // v0.0.124: SoundTouch out-ring이 비어 못 채운 frame = ST underrun.
+                cbStUnder += static_cast<int64_t>(numFrames) -
+                             static_cast<int64_t>(popped);
                 memset(output + popSamples, 0,
                        (needSamples - popSamples) * sizeof(float));
             }
@@ -868,6 +893,10 @@ public:
             // cents=0 또는 outCh!=2 — 기존 패턴 그대로 (음질 손실 0).
             for (int i = 0; i < numFrames; ++i) {
                 const bool decoded = vf >= ringTail && vf < ringHead;
+                // v0.0.124: bypass 경로도 동일 — decode 못 따라온 frame = underrun.
+                if (!muted && !decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
+                    ++cbDecodeUnder;
+                }
                 for (int ch = 0; ch < outCh; ++ch) {
                     float sample = 0.0f;
                     if (!muted && decoded && vf >= 0 && vf < totalFrames && capFrames > 0) {
@@ -883,6 +912,16 @@ public:
         }
 
         mVirtualFrame.store(vf, std::memory_order_relaxed);
+
+        // v0.0.124: 이번 콜백 무음을 누적 카운터에 1회 반영(frame 합 + event 1).
+        if (cbDecodeUnder > 0) {
+            mDecodeUnderrunFrames.fetch_add(cbDecodeUnder, std::memory_order_relaxed);
+            mDecodeUnderrunEvents.fetch_add(1, std::memory_order_relaxed);
+        }
+        if (cbStUnder > 0) {
+            mStUnderrunFrames.fetch_add(cbStUnder, std::memory_order_relaxed);
+            mStUnderrunEvents.fetch_add(1, std::memory_order_relaxed);
+        }
 
         // §G G-1 ring buffer tail advance: 재생 head 진행에 따라 behind 한도 유지.
         // tail = max(tail, vf - behindFrames). atomic 갱신으로 lock 회피.
@@ -906,6 +945,16 @@ private:
     std::atomic<bool> mMuted{false};
     // prewarm 상태에서 콜백을 무음 + vf 동결 모드로 만드는 플래그. (v0.0.44)
     std::atomic<bool> mPrewarmIdle{false};
+    // v0.0.124: 무음(underrun) 객관 카운터 (측정 보고서용, PLAN ②). 콜백에서 로컬
+    // 누적 후 콜백 끝에 1회 fetch_add(RT-safe — atomic을 frame 루프 안에서 매번
+    // 건드리지 않음). getter로 누적값 노출 → csv에서 delta 분석.
+    // decode: 재생 위치인데 ring에 decode 안 됨(vf>=ringHead, decode가 못 따라옴).
+    // st: SoundTouch out-ring이 비어 callback이 silence padding(popped<numFrames).
+    // HAL getXRunCount는 콜백이 0으로 채운 soft silence를 못 잡으므로 별도 필요.
+    std::atomic<int64_t> mDecodeUnderrunFrames{0};
+    std::atomic<int64_t> mDecodeUnderrunEvents{0};
+    std::atomic<int64_t> mStUnderrunFrames{0};
+    std::atomic<int64_t> mStUnderrunEvents{0};
     // NTP-style 예약 재생 (v0.0.47). active=true이면 콜백이 wall clock과 비교해
     std::mutex mLock;
 
@@ -1336,12 +1385,15 @@ Java_com_synchorus_synchorus_NativeAudio_nativeGetTimestamp(
     const int64_t outLatMicro =
         outputLatencyMs < 0 ? -1
                             : static_cast<int64_t>(outputLatencyMs * 1000.0);
-    jlongArray arr = env->NewLongArray(8);
-    const jlong vals[8] = {
+    // v0.0.124: arr[8..11]에 무음(underrun) 누적 카운터 추가 (측정 보고서용).
+    jlongArray arr = env->NewLongArray(12);
+    const jlong vals[12] = {
         framePos, timeNs, wallNs, ok ? 1L : 0L, vf,
-        engine().getSampleRate(), engine().getTotalFrames(), outLatMicro
+        engine().getSampleRate(), engine().getTotalFrames(), outLatMicro,
+        engine().getDecodeUnderrunFrames(), engine().getDecodeUnderrunEvents(),
+        engine().getStUnderrunFrames(), engine().getStUnderrunEvents()
     };
-    env->SetLongArrayRegion(arr, 0, 8, vals);
+    env->SetLongArrayRegion(arr, 0, 12, vals);
     return arr;
 }
 

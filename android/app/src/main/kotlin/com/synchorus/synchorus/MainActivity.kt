@@ -67,6 +67,11 @@ class MainActivity : AudioServiceActivity() {
                                 "sampleRate" to arr[5],
                                 "totalFrames" to arr[6],
                                 "outputLatencyMs" to outLatMs,
+                                // v0.0.124: 무음(underrun) 누적 카운터 (측정 보고서용).
+                                "decodeUnderrunFrames" to arr[8],
+                                "decodeUnderrunEvents" to arr[9],
+                                "stUnderrunFrames" to arr[10],
+                                "stUnderrunEvents" to arr[11],
                             )
                         )
                     }
