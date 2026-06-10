@@ -6851,6 +6851,33 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-10 (145) — 시크바/시간 표시 정확도(speed≠1.0) 조사 → 정상 확인 close
+
+**배경**: PLAN "시크바/시간 표시 정확도 (speed != 1.0 시 totalDuration / position 표시)"는 v0.0.92(§I 속도 조절 도입) 당시 남긴 **미검증 후보**(HISTORY (109) 남은 후속 5835)였음 — 실제 관찰된 버그가 아님. 코드 조사 + 기존 실측 + iPhone 실기기 눈 확인으로 close.
+
+**조사 결론 — 로직상 speed≠1.0서도 콘텐츠 timeline 기준으로 정상**:
+
+| 항목 | 계산식 | speed 반영 | 판정 |
+|------|--------|-----------|------|
+| Duration(총길이) | `totalFrames / sampleRate` (`native_audio_sync_service.dart:1999`) | 안 곱함 → 원본 음원 길이 | ✅ 정상 |
+| Position(UI) | `virtualFrame / sampleRate` (`:1384`) | 안 곱함, 단 vf가 콘텐츠 기준 진행 | ✅ 정상 |
+| Position(내부 vf) | `inputFrames = (numFrames × speedX1000 + 500)/1000` (`oboe_engine.cpp`, (109) 5799) | 2배속 시 vf 2배 빠르게 증가 | ✅ 정상 |
+| Seek | `position_ms × sampleRate / 1000` (`:603`) | 안 곱함 → 절대 콘텐츠 위치 | ✅ 정상 |
+
+- **"2배속이면 시간 표시가 2배 빠르게 가는" 게 정상** — 콘텐츠 타임라인 기준(YouTube/Spotify 배속과 동일). 4분 곡을 2배속으로 틀면 실제론 2분에 끝나지만 시크바/시간은 00:00→04:00을 2배 빠르게 채움. (109) 도입 당시 설계 메모(5800)와 일치: "vf += inputFrames → position 표시도 1.5배 빠르게".
+- duration을 "재생 소요 시간"(2분)으로 바꾸면 오히려 표준에서 벗어남 → 현 동작이 맞음.
+
+**플랫폼별 근거**:
+- **Android**: 코드로 확정. vf가 콘텐츠 프레임 단위 진행(`oboe_engine.cpp` onAudioReady inputFrames), UI는 `vf/sampleRate`.
+- **iOS**: `playerTime.sampleTime`(`AudioEngine.swift:200-209`)이 콘텐츠/입력 기준인지 1차 문서 직접 확정은 안 됨(Apple 미명시). **가설**: AVAudioEngine pull-based 파이프라인 — 하드웨어가 N프레임 당기면 `timePitch.rate=2.0`서 입력 2N프레임을 playerNode서 pull → sampleTime 2배 진행. **간접 실증**: (144) 측정에서 iPhone 2배속 vfDiff **71ms로 유지**(`HISTORY (144)` 6840) — sampleTime이 출력 기준(rate 미반영)이었다면 게스트 vf가 호스트의 절반 속도라 vfDiff가 **초당 0.5초씩 무한 누적**돼 P2P sync가 박살났을 것. 71ms 유지 = vf가 콘텐츠 기준 진행하는 강력한 간접 증거.
+- **iPhone 실기기 눈 확인 (2026-06-10)**: 2배속 재생 중 시크바/시간이 2배 빠르게 진행 — 정상 확인. → **close**.
+
+**부수(실버그 아님)**: duration 초 단위 반올림(`native_audio_sync_service.dart:1999` `Duration(seconds:)`) — speed 무관, Android/iOS 1초 차이 통일용 의도된 것(HISTORY (10) 1042). 시간 표시 무관.
+
+**빌드**: 코드 변경 없음 (조사·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
