@@ -6914,6 +6914,35 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (148) — iPhone 2배속 톤 누락 추적 → realign 과잉 seek 가설 (기록 후 보류)
+
+**배경**: 사용자 보고 — measure 음원 2배속 재생 시 "짧은 톤이 가끔 누락". 어제 (144) 30분 테스트(기기 겹쳐놔 호스트/게스트 청감 분리 불가) 중 들은 현상. 처음엔 §H/§I SoundTouch **82ms batch**(짧은 톤 vs 큰 처리 단위) 또는 §I-6 전환 과도기로 의심 → 추적 결과 **별개의 제3 이슈**로 좁혀짐.
+
+**추적 (가설 단계적 반증·확정)**:
+1. **음원 실측**: `measure_audio.mp3` = 100ms 톤 + 900ms 무음, 1초 주기(`ffmpeg silencedetect`). 2배속이면 톤 50ms, 주기 0.5초. SoundTouch worker batch=4096fr(85ms, `oboe_engine.cpp:178`)·`SEQUENCE_MS=82`(`:112`)와 비슷한 크기 → "톤이 batch 단위와 안 맞아 누락" 가설 성립 가능성.
+2. **❌ 82ms/SoundTouch 가설 반증 (사용자 실측)**: 단독 1대(P2P·sync 없음) 2배속 재생 → **누락 재현 0**. SoundTouch + worker batch + ring 경로 무죄. 보조로 `ffmpeg atempo=2.0`도 50ms 톤 생존(=time-stretch 알고리즘 무죄, 단 다른 알고리즘·오프라인이라 참고).
+3. **✅ realign 과잉 seek 가설 (어제 (144) csv 재분석, `measurements/underrun_v124_2026-06-10_mixed.csv`)**: `event=anchor_realign_vfdiff` **46회 전부 iPhone(.209), Android(.239) 0회**, 시간상 2배속 구간(11.0~24.7분)에 집중(1배속 구간 0). realign 코드(`native_audio_sync_service.dart:1794-1814`) = **vfDiff 중앙값 >60ms 시 `_engine.seekToFrame(targetGuestVf)`**(`:1803`)로 게스트 위치 강제 점프.
+
+**가설 (강함)**: iPhone 2배속 vfDiff 71ms((144)) → realign이 60ms 임계 넘어 seek 46회 → **iOS 디코더(AudioConverter) 재생성**((142)) → 짧은 톤(50ms) 건너뜀 = 누락. 모든 관찰 일치:
+- 단독 1대 누락 0 = realign 자체 없음(P2P 아님)
+- Android 게스트 안 들림 = vfDiff 20ms < 60ms → realign 0
+- iPhone 게스트 누락 = vfDiff 71ms → realign 46 = seek 46
+- 2배속에서만 = 1배속은 vfDiff 작아 realign 0
+- **(144) underrun 0인데 누락** = seek는 무음(silence padding)이 아니라 **위치 점프(톤 건너뜀)**라 underrun 카운터 무감지 → (144) "정상구간 underrun 0" vs 청감 누락 **모순 해소**
+
+**미확정 (정직)**:
+- realign 발동 vfDiff가 **진짜 어긋남인지 "거짓말"(측정 노이즈)인지** 미확정. 거짓말이면 realign이 멀쩡한 위치를 헛seek로 망가뜨리는 것(치료가 병) — HISTORY (136) "realign↑ = vfDiff 악화, self-seek 음수 편향" 패턴과 통함.
+- realign seek가 그 순간 톤을 건너뛰는지 **녹음 직접 확인 안 됨**.
+- realign 행 `vf_diff_ms`가 전부 0으로 찍힘 — 발동 조건이 >60ms인데 0일 리 없으니 **로깅 누락**(`_logGuestEvent`가 vfDiff 미전달, 사소한 측정 버그). 실제 분포는 drift 행으로 봐야.
+
+**함의**: §I-6(전환 과도기)·82ms batch와 **별개 제3 이슈 = realign 과잉 seek**. 또 **iOS 편중** — realign은 공통 코드지만 *발동은 iPhone(vfDiff 큼)*, *아픔은 iOS(seek=디코더 재생성)*. iOS 후순위 → **fix 보류, 기록만**.
+
+**재개조건**: iOS 트랙 재개 시. fix 후보(보류): (a) realign 임계(60ms) iOS 상향 or 신뢰도 게이트, (b) iOS `seekToFrame` 디코더 재사용(재생성 회피, (142) 잔음과 동일 깊은 트랙), (c) vfDiff 거짓말 여부 acoustic 확정 후 realign 발동 신뢰. **선행**: realign vfDiff 로깅 누락 fix(0→실값) — 그래야 발동 vfDiff 분포 측정 가능.
+
+**빌드**: 코드 변경 없음 (진단·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
