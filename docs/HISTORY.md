@@ -6895,6 +6895,25 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (147) — §G step 2-G2 (Ready-then-Go 하이브리드) 도입 보류 → close
+
+**배경**: §G PCM streaming의 G-2 항(시작/큰 seek 시 ready timeout 200ms 동기 시작 = `ready_then_go`). v0.0.77 (93) 시도 → v0.0.78 **(94) 회귀 revert**(호스트 큰 seek 직후 무음 stuck, loadFile 재호출해야만 풀림) 이후 "큐 모델 기반 재설계로 재시도" 후보로 남아 있었음. 지금 도입 안 함으로 close.
+
+**close 근거 — 효용<비용**:
+1. **도입 동기가 약해짐**: G-2가 풀려던 문제(큰 seek 직후 stale obs → vfDiff 100초+ race, HISTORY (91))가 그 후 측정에서 재현 안 됨 — §B 후속 (102) **256회 빠른 seek 측정에서 메시지 손실 0 · vfDiff 영구 잔재 0건**. 추가로 v0.0.111 거짓말 패턴 re-anchor(vfDiff>150ms 시 anchor 리셋, HISTORY (123))로 큰 seek 직후 폭주는 다른 경로로 이미 완화.
+2. **재시도 비용 큼**: (94) 재시도 전제가 ring 상태(`mRingHead`/`mRingTail`/`mDecodeSeekTarget`/`mDecodePts`)를 decodeLoop **단일 thread 직렬화 + 외부는 요청 큐 push만** 구조로 재설계(또는 G-2 native 흡수) + 회귀(호스트 무음) 재현 unit test 선확보. (94)에서 "한 줄 fix 영역 아님"으로 명시.
+3. **§G 핵심 실용 가치는 G-1으로 이미 확보**: 14분 PCM 한도 제거(51분 곡 로드) · decode 2~3배 단축 · ~11.5MB constant 메모리는 G-1 ring buffer(v0.0.76 / v0.0.84 큐 모델 fix)로 달성됨. G-2 없이도 시작/seek 청감 양호.
+
+→ 불확실한 효용(이미 재현 안 되는 race 방어) < 확실한 비용(엔진 재설계 + 회귀 위험)이라 도입 보류.
+
+**종속 정리**: step 3(G-3 throughput EMA)도 "G-2 재도입 후" 전제라 함께 보류. 30분+ 측정은 (143)/(144)에서 1회 완료, iOS 회귀는 별도 iOS 트랙.
+
+**재개조건**: 큰 seek 직후 무음 / vfDiff 폭주가 일반 WiFi에서 자연 재발할 때(§B 후속 진단 인프라 `seek_msg_seq` csv + `[SEEK-NOTIFY]` logcat 유지 중). 재개 시 (94) 전제대로 decodeLoop 큐 모델 재설계로 진행.
+
+**빌드**: 코드 변경 없음 (close 결정·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

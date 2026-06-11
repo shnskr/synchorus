@@ -164,8 +164,8 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 진행 상태:
 - ✅ step 1 (v0.0.75) — csv decode_load 측정 인프라 + Android loadFile Map 통일 완료 (2026-05-11)
 - ✅ **step 2-G1 재도입 (v0.0.84, 2026-05-17)** — PoC 격리에서 race 재현(8회 중 2회=25%) + 큐 모델 fix 검증(17회 중 0회=0%) 후 본 앱 합치기. 큐 모델: 외부는 `mDecodeSeekTarget`만 set, ring head/tail은 decodeLoop 단일 thread에서만 갱신. 추가로 EOS wait fix(v0.0.76 누락) — 곡 끝 도달해도 decode thread 살아있게 seek 대기. HISTORY (100) 참조.
-- ⏳ **step 2-G2 (Dart Ready-then-Go 하이브리드)** — v0.0.77 시도 후 revert (HISTORY (94)). G-1 race가 fix됐으니 G-2 재시도 가능. 다음 작업 후보 (큐 모델 기반 재설계).
-- ⏳ step 3 — G-3 측정 → EMA 활용 (G-2 재도입 후)
+- ✅ **step 2-G2 (Dart Ready-then-Go 하이브리드) — 도입 보류 close (2026-06-11 (147))**. v0.0.77 시도 → v0.0.78 (94) 회귀 revert(호스트 큰 seek 후 무음 stuck). **효용<비용**: G-2가 풀려던 race(큰 seek 직후 vfDiff 100초+)가 (102) 256회 측정서 재현 0 + v0.0.111 re-anchor로 완화 → 동기 약화. 재시도는 decodeLoop 단일 thread 큐 재설계 수준((94) "한 줄 fix 아님"). §G 핵심 가치(14분 한도 제거·51분 곡·decode 2~3배)는 G-1으로 이미 확보. **재개조건**: 큰 seek 직후 무음/vfDiff 폭주 자연 재발 시(§B 진단 인프라 유지 중). 상세 HISTORY (147).
+- ⏸️ step 3 — G-3 측정 → EMA 활용. **G-2 종속이라 (147) 함께 보류**.
 - ⏳ 30분+ 측정 검증 (MID-7 자연 해소 가능 — ring buffer 14분 한도 제거됨)
 - ⏳ iOS 회귀 검증
 
