@@ -7003,6 +7003,25 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (152) — 출시 전 준비도 점검 → 출시 체크리스트 PLAN 추가
+
+**배경**: 사용자 "이제 출시 전인 것 같은데" → 준비도 점검. "출시 = 기능 + 기능 외"인데 기능 MVP는 탄탄하나 기능 외 요소 점검.
+
+**점검 결과 — 주요 블로커**:
+- 🔴 **Android release 서명이 debug keystore** (`android/app/build.gradle.kts` `signingConfig = signingConfigs.getByName("debug")`) → Play 업로드 거부. release keystore + 서명 config 필요.
+- 🔴 **수익화 코드 0** — 프로 IAP(`in_app_purchase` 패키지 없음) + 무료 2대 제한 로직 없음. DECISIONS(2026-06-01)는 모델 결정만.
+- 🔴 **앱 아이콘 기본 Flutter** (`ic_launcher.png`) — 커스텀 필요.
+
+**갖춰진 것**: bundle id/앱 이름, iOS 권한 설명(로컬네트워크/Bonjour/AppleMusic), Android 권한(INTERNET/FOREGROUND_SERVICE mediaPlayback 등), 16KB page 대응, 핵심 기능 + sync 1배속 양호 + iOS 크래시 fix.
+
+**잔여 iOS 이슈**(§I-6 / realign 톤 누락(148) / 잔음(142))는 일상 1배속 영향 없어 **출시 블로커 아님**.
+
+**결정**: 출시 전략(무료 먼저 vs 수익화 포함)이 남은 작업량을 가름 → 전략 정하기 전 **PLAN "🚀 출시 체크리스트" 섹션**으로 전체 항목+상태(블로커/스토어등록물/마무리/완료) 정리. 전략은 체크리스트 보고 결정.
+
+**빌드**: 코드 변경 없음 (점검·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

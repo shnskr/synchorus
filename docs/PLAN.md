@@ -93,6 +93,37 @@
 
 각 단계 후 회귀 테스트.
 
+## 🚀 출시 체크리스트 (v1.0 목표)
+
+2026-06-11 (152) 점검. **출시 = 기능 + 기능 외**(서명·아이콘·수익화·스토어). 기능 MVP는 탄탄하나 "기능 외"가 남음. **전략(무료 먼저 vs 수익화 포함) 미정** — 아래로 남은 일 파악 후 결정.
+
+### 🔴 블로커 (이게 안 되면 출시 불가)
+- [ ] **Android release 서명** — 현재 release도 **debug keystore** 사용(`android/app/build.gradle.kts` `signingConfig = signingConfigs.getByName("debug")`). release keystore 생성 + 서명 config 필요 (debug 서명은 Play 업로드 거부).
+- [ ] **앱 아이콘** — 현재 기본 Flutter `ic_launcher.png`. 커스텀 디자인 + `flutter_launcher_icons`.
+- [ ] **수익화 구현** (전략에 따라, 무료 먼저면 보류 가능) — 프로 IAP(`in_app_purchase`, 결제/복원/상품등록) + 무료 2대 제한 로직. **현재 코드 0**(DECISIONS 결정만).
+
+### 🟡 스토어 등록물
+- [ ] 개인정보처리방침 URL (P2P라 수집 적어도 스토어 필수)
+- [ ] 스크린샷 (Play 폰/태블릿 · App Store 사이즈별)
+- [ ] 스토어 설명(제목/짧은·긴, 한/영), 카테고리, 연령등급 설문
+- [ ] 데이터 안전성(Play) / 앱 개인정보(App Store) 양식
+- [ ] 버전 `0.0.125` → `1.0.0`
+
+### ⚙️ 마무리 점검
+- [ ] release 빌드 실기기 회귀 (Android + iOS)
+- [ ] 잔여 iOS 이슈(§I-6 과도기 / realign 톤 누락(148) / 잔음(142)) — 블로커 아님(일상 1배속 영향 없음). 알려진 한계로 명시할지 결정.
+- [ ] 개발자 계정: Play Console($25 1회) / Apple Developer($99/년) + (IAP 시) 세금·은행 정보
+- [ ] iOS 배포 인증서/프로비저닝 (Mac/Xcode 필요)
+
+### 🟢 이미 갖춰진 것
+- [x] applicationId/bundle id `com.synchorus.synchorus`, 앱 이름 "Synchorus"
+- [x] iOS 권한 설명 (`NSLocalNetworkUsageDescription`·`NSBonjourServices`·`NSAppleMusicUsageDescription`)
+- [x] Android 권한 (INTERNET/WIFI_STATE/MULTICAST/FOREGROUND_SERVICE_MEDIA_PLAYBACK + `foregroundServiceType=mediaPlayback`)
+- [x] 16KB page size 대응 (SM S947N, HISTORY)
+- [x] 핵심 기능(재생/시크/A-B/슬롯/음정/속도/P2P/온보딩) + sync 1배속 양호 + iOS 크래시 fix(v0.0.121)
+
+---
+
 ## 다음 세션 작업 후보 (우선순위)
 
 매 세션 시작 시 이 리스트로 진입점 결정. 완료된 항목은 체크해서 위로 통과. 새 항목은 우선순위에 끼워 넣기.
