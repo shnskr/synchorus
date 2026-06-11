@@ -251,10 +251,11 @@ H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV +
 - 위험: 변경 범위 크나 알고리즘 그대로 → 회귀 위험 보통
 
 **🆕 [신규, 2026-05-10] clock sync broadcast 주기 단축 (500ms → 200ms)**
-- 변경 위치: `native_audio_sync_service.dart` `_obsBroadcastIntervalMs` (라인 518-520)
+- 변경 위치: `native_audio_sync_service.dart` `_obsBroadcastIntervalMs` (현재 `:36`, 값 500.0)
 - 효과: 첫 fresh obs 도착 빨라짐 → anchor establish 자연 wait ↓ (cold start 끝 부분 추가 단축)
 - 우려: p2p 트래픽 2.5배 ↑ → 호스트 부담 (사용자가 호스트 부담 우려로 보류 의사 표시)
 - v0.0.74 cold start 측정 결과 보고 결정. 만족스러우면 보류, 부족하면 검토.
+- 🆕 **2026-06-11 (150) 재검토 — realign 완화 후보로 연결**: 사용자 질문("단축 시 과보정 누적?")에 코드 확인. **과보정 누적 우려 = 기우** — realign/seek 판정은 게스트 poll(~100ms, `_recomputeDrift` `:1481/:1697`)에 묶이지 obs 주기(500ms broadcast)에 안 묶임(두 통로 독립). obs 단축해도 판정 빈도 불변, 오히려 외삽 거리(`:1744`)↓ → vfDiff 정확↑ → 누적 위험·헛seek **감소** 방향. **새 효용 후보**: (148) realign 과잉 seek 완화 — iPhone vfDiff 71ms 흔들림 일부가 외삽 거리면 obs 단축이 realign 발동↓. **단 효과 미확정**(vfDiff 거짓말 주범이 외삽거리인지 offset 노이즈인지) + 트래픽 비용 확실 + cold start는 v0.0.74로 이미 해결(원래 동기 약화) → **지금 단독 변경 안 함**. **iOS 트랙(realign (148)) 재개 시 "obs 단축↔vfDiff 흔들림" 묶어 측정 후 결정.** 상세 HISTORY (150).
 
 ### LOW
 

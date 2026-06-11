@@ -6962,6 +6962,27 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (150) — obs broadcast 주기 단축(500→200) 재검토: 과보정 우려=기우, realign 완화 후보로 연결
+
+**배경**: PLAN MID 항목(clock sync broadcast 주기 단축) 재검토 — 사용자 질문 "단축 시 과보정으로 틀어짐 누적되지 않나?".
+
+**분석 (코드 근거)**:
+- realign/seek 판정은 게스트 자체 `timestampStream` poll(~100ms, `:33` 주석)마다 `_recomputeDrift`(`:1481`/`:1697`) → vfDiff 중앙값 >60ms면 realign(`:1794`).
+- obs는 호스트가 500ms마다 broadcast(`_obsBroadcastIntervalMs` `:36`) → 게스트 `_latestObs` 갱신. **poll(판정)과 obs(정보)는 별개 통로** — poll=게스트 native emit, obs=네트워크.
+- ∴ obs 주기 단축해도 **판정 빈도(poll 100ms) 불변**. 오히려 게스트가 매 poll `_latestObs`로 외삽(`:1744`, `hostWallNow - obs.hostBootMs`)하는 거리가 짧아짐 → vfDiff 정확↑.
+
+**결론 — 과보정 누적 우려 = 기우(반대)**: 누적 위험은 obs가 **길 때**(외삽 멀어 vfDiff 거짓말 → 틀린 위치 seek) 더 큼. 단축하면 외삽 짧아 realign 정확도↑ + 헛발동↓.
+
+**새 함의**: (148) realign 과잉 seek **완화 후보** — iPhone vfDiff 71ms 흔들림 일부가 외삽 거리에서 오면 obs 단축이 realign 발동을 줄일 수 있음.
+
+**미확정/비용**: vfDiff 거짓말 주범이 외삽 거리인지 offset 노이즈인지 미확정 → 효과 미확정(다른 주범이면 트래픽만 늘고 효과 미미). 트래픽 2.5배(호스트, 멀티 게스트 ×N)는 확실 비용. cold start는 v0.0.74로 이미 해결돼 원래 단축 동기 약화.
+
+**결정**: 지금 단독 변경 안 함(효용<비용 가능). **iOS 트랙(realign (148)) 재개 시 "obs 단축 ↔ vfDiff 흔들림 감소"를 묶어 측정 후 결정.** PLAN MID 항목에 연결.
+
+**빌드**: 코드 변경 없음 (분석·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
