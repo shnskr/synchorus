@@ -6878,6 +6878,23 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (146) — out-ring 동적 점유 반영 → 효용<비용 close
+
+**배경**: PLAN HIGH "Algorithm latency를 `outputLatencyMs`에 반영"의 마지막 잔여 항. transpose/speed ON 시 SoundTouch 파이프라인 지연을 P2P 동기 보정값(`outputLatency`)에 더하는 작업인데, **정적 항(SoundTouch `INITIAL_LATENCY` + worker batch)은 이미 v0.0.112에서 반영**(`oboe_engine.cpp:626-640`, iOS는 v0.0.122 `timePitch.latency`). 남은 건 **out-ring 동적 점유**(`mSTOutRing`에 매 순간 쌓인 양) 하나뿐이었음.
+
+**out-ring 동적 점유란**: SoundTouch 가공 결과를 담는 출력 ring(`mSTOutRing`, `kSTOutRingFrames=8192` ≈ 170ms @48k, `oboe_engine.cpp:42-44`)에 "지금 몇 ms어치 PCM이 대기 중인지"가 매 순간 0~170ms로 변동. 정확히 하려면 이 점유분도 `outputLatency`에 가산해야 콜백이 처리한 샘플의 실제 DAC 도달 시점과 맞음.
+
+**close 결정 — 효용<비용**:
+- **측정 이미 양호**: 정적 항만 반영한 상태로 drift median **0.24ms**, acoustic(마이크 실측) **emit_dt +7.84ms** — 결함 B 음향 비대칭(~11ms, HISTORY (132)) 범위 내. 동적 점유까지 안 넣어도 정렬 충분.
+- **반영 시 리스크**: 동적 점유는 0~170ms로 출렁이는 값 → `outputLatency`에 직접 넣으면 anchor(동기 기준점)가 같이 출렁일 우려. `oboe_engine.cpp:627-628` 주석에서 "1단계 의도적 제외"로 이미 명시.
+- 따라서 **불확실한 효용(이미 양호한 정렬을 미세 개선) < 확실한 비용(anchor 출렁임 + 검증 부담)** → 구현 안 함으로 결정.
+
+**재개조건**: BT 등 큰 비대칭 경로에서 정적 항만으론 부족함이 체감될 때 / 다른 큰 이슈(§I-6 등) 해결 후 이게 마지막 병목으로 남을 때. 재개 시 동적 점유를 raw 가산이 아니라 EMA smoothing 등으로 anchor 출렁임을 막는 방향 검토.
+
+**빌드**: 코드 변경 없음 (close 결정·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
