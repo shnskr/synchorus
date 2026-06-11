@@ -10,6 +10,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
 import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
@@ -119,6 +120,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // long-press: 그 슬롯만 해제 + 햅틱. 비어있으면 무동작.
   List<Duration?> _seekSlots = List<Duration?>.filled(3, null);
 
+  // 온보딩 가이드(coach mark) 타겟 키. build에서 각 영역을 KeyedSubtree로 감싸 가리킴.
+  // tutorial_coach_mark가 이 GlobalKey의 렌더 위치를 하이라이트 + 설명 말풍선 표시.
+  final GlobalKey _keyP2P = GlobalKey();
+  final GlobalKey _keyNowPlaying = GlobalKey();
+  final GlobalKey _keySeekBar = GlobalKey();
+  final GlobalKey _keyAbControls = GlobalKey();
+  final GlobalKey _keySeekSlots = GlobalKey();
+  final GlobalKey _keyTranspose = GlobalKey();
+  final GlobalKey _keySpeed = GlobalKey();
+  final GlobalKey _keyControls = GlobalKey();
+
   NativeAudioSyncService get _audio =>
       ref.read(nativeAudioSyncServiceProvider);
 
@@ -188,6 +200,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         });
       });
     }
+
+    // 첫 실행이면 위젯 렌더 후(GlobalKey 유효 시점) 가이드 자동 표시.
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      _maybeShowFirstRunGuide();
+    });
   }
 
   @override
@@ -389,6 +406,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
         actions: [
           IconButton(
+            tooltip: '사용법 가이드',
+            icon: const Icon(Icons.help_outline),
+            onPressed: _showGuide,
+          ),
+          IconButton(
+            key: _keyP2P,
             tooltip: 'P2P 모드',
             icon: const Icon(Icons.group_add),
             onPressed: _isModeTransitioning ? null : _showModeSheet,
@@ -401,28 +424,28 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           child: Column(
             children: [
               // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
-              _buildNowPlaying(),
+              KeyedSubtree(key: _keyNowPlaying, child: _buildNowPlaying()),
 
               const Spacer(),
 
               // 시크바 + 시간
-              _buildSeekBar(),
+              KeyedSubtree(key: _keySeekBar, child: _buildSeekBar()),
 
               // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
               // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
               const SizedBox(height: 8),
-              _buildAbControls(),
+              KeyedSubtree(key: _keyAbControls, child: _buildAbControls()),
               const SizedBox(height: 8),
-              _buildSeekSlots(),
+              KeyedSubtree(key: _keySeekSlots, child: _buildSeekSlots()),
               const SizedBox(height: 8),
-              _buildTransposeControls(),
+              KeyedSubtree(key: _keyTranspose, child: _buildTransposeControls()),
               const SizedBox(height: 8),
-              _buildSpeedControls(),
+              KeyedSubtree(key: _keySpeed, child: _buildSpeedControls()),
 
               const SizedBox(height: 16),
 
               // 재생 컨트롤
-              _buildControls(),
+              KeyedSubtree(key: _keyControls, child: _buildControls()),
 
               const SizedBox(height: 24),
 
@@ -1129,6 +1152,120 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final messenger = ScaffoldMessenger.of(context);
     messenger.hideCurrentSnackBar();
     messenger.showSnackBar(SnackBar(content: Text(msg)));
+  }
+
+  // ── 온보딩 가이드 (coach mark, tutorial_coach_mark) ──────────────────
+  // 첫 실행 자동 + AppBar ? 버튼. 각 영역(GlobalKey) 단계별 하이라이트 + 한국어 설명.
+  static const String _guidePrefsKey = 'hasSeenGuide_v1';
+  // 오버레이 탭 시 next() 호출용 인스턴스 보관.
+  TutorialCoachMark? _coachMark;
+
+  /// 첫 실행이면(플래그 없음) 가이드 자동 표시. initState의 postFrame에서 호출.
+  Future<void> _maybeShowFirstRunGuide() async {
+    final prefs = await SharedPreferences.getInstance();
+    if (prefs.getBool(_guidePrefsKey) ?? false) return;
+    if (!mounted) return;
+    _showGuide();
+  }
+
+  Future<void> _markGuideSeen() async {
+    final prefs = await SharedPreferences.getInstance();
+    await prefs.setBool(_guidePrefsKey, true);
+  }
+
+  /// 가이드 말풍선 내용 (제목 + 설명 + 다음/완료 버튼). 오버레이가 어두우므로 흰 글씨.
+  /// 버튼 onPressed에서 _coachMark.next() — 하이라이트 탭 없이 버튼으로 명확히 진행.
+  Widget _guideText(String title, String body, {bool isLast = false}) {
+    return Column(
+      mainAxisSize: MainAxisSize.min,
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(title,
+            style: const TextStyle(
+                color: Colors.white,
+                fontSize: 19,
+                fontWeight: FontWeight.bold)),
+        const SizedBox(height: 8),
+        Text(body,
+            style: const TextStyle(
+                color: Colors.white, fontSize: 15, height: 1.4)),
+        const SizedBox(height: 12),
+        Align(
+          alignment: Alignment.centerRight,
+          child: TextButton(
+            onPressed: () => _coachMark?.next(),
+            style: TextButton.styleFrom(
+              foregroundColor: Colors.white,
+              backgroundColor: Colors.white.withValues(alpha: 0.18),
+              padding:
+                  const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+            ),
+            child: Text(isLast ? '완료 ✓' : '다음 →',
+                style: const TextStyle(fontWeight: FontWeight.bold)),
+          ),
+        ),
+      ],
+    );
+  }
+
+  /// coach mark 타겟 helper. 가로로 긴 위젯도 적절히 감싸도록 RRect(사각) 하이라이트
+  /// + 오버레이 아무 곳이나 탭해도 다음 단계로(enableOverlayTab).
+  TargetFocus _guideTarget(String id, GlobalKey key, ContentAlign align,
+      String title, String body,
+      {bool isLast = false}) {
+    return TargetFocus(
+      identify: id,
+      keyTarget: key,
+      shape: ShapeLightFocus.RRect,
+      radius: 12,
+      contents: [
+        TargetContent(
+            align: align, child: _guideText(title, body, isLast: isLast)),
+      ],
+    );
+  }
+
+  /// 단계별 coach mark 표시 (첫 실행 자동 / ? 버튼 수동 공용).
+  void _showGuide() {
+    final targets = <TargetFocus>[
+      _guideTarget('nowPlaying', _keyNowPlaying, ContentAlign.bottom, '음악 선택',
+          '여기를 눌러 재생할 음악을 골라요. 선택한 곡 이름이 여기 표시돼요.'),
+      _guideTarget('seekBar', _keySeekBar, ContentAlign.top, '재생 위치',
+          '지금 재생 중인 위치예요. 좌우로 드래그하면 원하는 지점으로 이동해요.'),
+      _guideTarget('abControls', _keyAbControls, ContentAlign.top, 'A-B 구간 반복',
+          'A·B로 시작과 끝을 찍으면 그 구간만 반복돼요. A·B를 길게 누르면 그 지점만, Ⓧ로 전체를 해제해요.'),
+      _guideTarget('seekSlots', _keySeekSlots, ContentAlign.top, '위치 저장',
+          '1·2·3에 현재 위치를 저장하고, 다시 누르면 그 위치로 이동해요. 길게 누르면 해제돼요.'),
+      _guideTarget('transpose', _keyTranspose, ContentAlign.top, '음정',
+          '음 높낮이를 반음씩 바꿔요. ↻로 원래 음으로 되돌려요.'),
+      _guideTarget('speed', _keySpeed, ContentAlign.top, '재생 속도',
+          '빠르기를 0.5~2.0배로 바꿔요. ↻로 원래 속도로 되돌려요.'),
+      _guideTarget('controls', _keyControls, ContentAlign.top, '재생 컨트롤',
+          '가운데로 재생·일시정지하고, 양옆 화살표로 5초씩 이동해요. 맨 오른쪽은 음소거예요.'),
+      _guideTarget('p2p', _keyP2P, ContentAlign.bottom, '싱크 모드',
+          '여러 폰을 동기화된 스피커로 묶어 같은 음악을 함께 들어요. 이 버튼으로 시작해요.',
+          isLast: true),
+    ];
+    _coachMark = TutorialCoachMark(
+      targets: targets,
+      colorShadow: Colors.black,
+      opacityShadow: 0.85,
+      textSkip: '건너뛰기',
+      paddingFocus: 8,
+      // 오버레이(타겟 밖) 탭해도 다음 단계로. enableOverlayTab은 환경에 따라
+      // 닫힘으로 동작 → onClickOverlay에서 next() 명시 호출이 확실.
+      onClickOverlay: (target) {
+        _coachMark?.next();
+      },
+      onFinish: () {
+        _markGuideSeen();
+      },
+      onSkip: () {
+        _markGuideSeen();
+        return true;
+      },
+    );
+    _coachMark!.show(context: context);
   }
 
   void _showModeSheet() {

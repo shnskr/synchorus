@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.124+1
+version: 0.0.125+1
 
 environment:
   sdk: ^3.11.4
@@ -52,6 +52,9 @@ dependencies:
   # timespec 버퍼 alloc(Android)에 calloc 사용. iOS는 alloc 불필요(uint64 직접).
   # 상세: docs/SYNC_REDESIGN.md (130). (v0.0.115)
   ffi: ^2.1.4
+  # 온보딩 가이드 오버레이(coach mark) — 첫 실행 자동 + AppBar ? 버튼. 각 버튼
+  # GlobalKey 하이라이트 + 설명. 순수 Flutter(네이티브 무관). (v0.0.125)
+  tutorial_coach_mark: ^1.3.3
 
 dev_dependencies:
   flutter_test:

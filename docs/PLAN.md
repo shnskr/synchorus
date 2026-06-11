@@ -111,6 +111,8 @@
 - ✅ **v0.0.95 P2P 동선 통합 (HISTORY (112))** — group_add → BottomSheet 안에서 호스트/스피커 선택 + 정보 카드 + 종료까지 단일 화면. RoomScreen 거치지 않음. 입장 코드 검증 + IP 검증 + 호스트 ping. 단독↔P2P 전환 시 audio-url 재바인딩(HISTORY (105) 자연 해소). 게스트 transpose/speed UI 정합성 + sync 직렬 처리 + cleanupSync stream emit + 시크바 hasAudio 가드. 검증 통과(SM-S947N + S22).
 - ✅ **방 만들기 WiFi 미연결 silent fail fix (v0.0.94, HISTORY (111))** — 2026-05-29 v0.0.90 SM-S947N "방 만들기 클릭 무반응" 보고는 사용자 진단으로 WiFi 미연결이 root cause로 확인. `_createRoom` 진입 시 `NativeAudioSyncService.getLocalIP()` 사전 체크 + SnackBar "WiFi 연결이 필요합니다" 안내로 마감. iOS 제어센터 WiFi 토글 케이스도 IP 직접 체크라 robust.
 
+- ✅ **온보딩 가이드 오버레이(coach mark) — v0.0.125 (HISTORY (151))**. UI 폴리싱 트랙 중 사용자 요청. `tutorial_coach_mark 1.3.3`(순수 Flutter, 추가 의존성 1개)로 8개 영역(파일선택/시크바/A-B/슬롯/음정/속도/재생/싱크모드) `GlobalKey`+RRect 하이라이트 + 해요체 설명. 첫 실행 자동(`hasSeenGuide_v1`, 강제 유지 결정) + AppBar `?` 버튼. 각 말풍선 "다음→/완료✓" 버튼(`next()`)으로 진행(오버레이 빈 곳 탭은 패키지 미수신). 손가락 탭 검증 OK(adb 탭은 불안정). → DECISIONS.
+
 **🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
 
 H-1 첫 시도(v0.0.91 1차, 2026-05-29 revert) — Sonic 음수 cents SIGSEGV + SoundTouch callback 안 직접 처리 시 silence padding buzz + timing drift. **공통 root cause**: 음악용 transpose 라이브러리 모두 batch processing 알고리즘인데 우리 oboe LowLatency callback burst(~96 frames)이 너무 작음.

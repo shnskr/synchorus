@@ -6983,6 +6983,26 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (151) — 온보딩 가이드 오버레이(coach mark) 추가 (v0.0.125)
+
+**배경**: UI 폴리싱(#16) 트랙 중 사용자 요청 — "처음 앱 열거나 가이드 버튼 누르면 반투명 오버레이로 각 버튼 설명". coach mark 패턴.
+
+**구현 (v0.0.125, `lib/screens/player_screen.dart`)**:
+- **패키지**: `tutorial_coach_mark 1.3.3`(순수 Flutter, Android/iOS 동일 — 네이티브 무관). 첫 실행 플래그는 기존 `shared_preferences` 재사용 → 추가 의존성 1개뿐.
+- **타겟**: 8개 영역(파일선택/시크바/A-B/슬롯/음정/속도/재생컨트롤/싱크모드)에 `GlobalKey` — build에서 각 `_buildXXX()`를 `KeyedSubtree`로 감싸 부착(레이아웃 코드 거의 안 건드림). **`shape: RRect`**(가로로 긴 위젯은 원형이면 화면 절반 덮음 → 사각, `radius:12`).
+- **트리거**: ① 첫 실행 자동(initState `addPostFrameCallback` → `SharedPreferences` `hasSeenGuide_v1` 체크) ② AppBar `?`(help_outline) 버튼(`_showGuide` 수동). P2P 버튼에 `_keyP2P` 부착.
+- **진행**: 각 말풍선 우하단 **"다음 →"/"완료 ✓"(마지막)** 버튼 → `_coachMark.next()`. 하이라이트(타겟) 탭도 진행. ⚠️ **오버레이 빈 곳 탭은 패키지가 기본 미수신** — `onClickOverlay`+`next()` 시도했으나 무효 → 버튼/타겟 탭으로 진행. (`enableOverlayTab`은 닫힘으로 오작동해 제거.)
+- **문구**: 해요체 통일 + "[동작]. [되돌리기/팁]." 구조. A-B "길게 누르면 그 지점만, Ⓧ로 전체 해제", 위치저장 "길게 누르면 해제"(코드 `:779-781` 확인), 음정/속도 "↻로 원래 ~로 되돌려요". P2P→**"싱크 모드"**(연동/해제 절차는 가이드 생략 — 들어가면 BottomSheet서 안내).
+
+**결정**: 첫 실행 자동(강제) **유지** — 숨은 기능(길게 누르기·A-B·슬롯·음정/속도) 발견성 + 빈 첫 화면이라 방해 적음 + 건너뛰기로 탈출 쉬움(1회만). 비강제(? 버튼만)/절충(힌트 배너) 대안 검토 후 현행 채택. → DECISIONS.
+
+**검증**: 에뮬 Pixel_6. 첫 실행 자동 표시 + RRect 사각 하이라이트 + **손가락 탭으로 단계 진행 정상**(사용자 확인) + 건너뛰기/완료 동작. `flutter analyze` 0 issues. ⚠️ **방법론**: `adb input tap`은 가이드 오버레이와 상호작용 불안정(종료 오작동) — 실제 손 탭은 정상. 검증은 손 탭 우선.
+- **부수(별개)**: 에뮬 첫 부팅이 `lo0` loopback의 `127.0.0.1` 부재로 "too many emulator instances" abort → `sudo ifconfig lo0 alias 127.0.0.1` 복구. AVD/lock 무관, 환경 이슈(메모리 기록). emulator는 콘솔/ADB 포트를 127.0.0.1에 bind하므로 그 주소 없으면 전 포트 실패.
+
+**빌드**: v0.0.125.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
