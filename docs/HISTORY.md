@@ -6943,6 +6943,25 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-11 (149) — Crossfade(transition click) 해결법 설계 정리 → 보류 유지
+
+**배경**: Crossfade(Option C, `SYNC_ALGORITHM_V2.md` §H H-4 7) 보류 항목의 **해결법을 코드 확인 후 정리**(착수 아님, 다음 재논의 시 중복 방지용 기록).
+
+**click 원인**: pitch/tempo 변경(`oboe_engine.cpp:155,166`) 시 v0.0.102부터 `mST.clear()` 생략 → `mSTOutRing`에 옛 설정 출력 ↔ 새 설정 출력이 이어 붙어 **이음새 파형 불연속**. 단일 SoundTouch 인스턴스(`mST`)라 파라미터 바꾸면 옛 설정 소리를 동시에 못 만듦 = 진짜 crossfade 어려움.
+
+**해결 옵션**:
+- **(A) 짧은 fade — 권장**: 변경 순간 출력 수ms 페이드out → 변경 → 페이드in. click → 귀에 안 띄는 미세 볼륨 dip. 단일 인스턴스로 가능(`mSTOutRing` push/pop 경계 ramp).
+- (B) 이중 인스턴스 crossfade: 옛·새 SoundTouch 병렬, 옛↘+새↗ N ms 겹침. 가장 매끄러우나 CPU/메모리 잠깐 2배 + 위치/latency 정렬 복잡.
+- (C) 파라미터 ramp: transpose엔 음 미끄러짐(글리산도)이라 부적합. speed엔 가능.
+
+**크로스플랫폼**: iOS는 `AVAudioUnitTimePitch`(OS 내장 노드)라 **내부에 fade 못 넣음** → 노드 출력단에서 별도 처리 필요(Android SoundTouch와 구현 다름).
+
+**결론**: click 매우 미세(음악 무영향) → **보류 유지**. 착수 시 A로 Android 먼저, iOS 별도. 82(SEQUENCE) 줄이기는 정상 재생 처리 단위라 click 해결책 아님(별개 손잡이).
+
+**빌드**: 코드 변경 없음 (설계·문서만).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
