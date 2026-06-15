@@ -7056,6 +7056,27 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-16 (155) — 수익화 1차: 배너 광고 + 일회성 프로 IAP + 2대 제한 (v0.0.127)
+
+**배경**: 출시 전 수익화 도입(사용자 결정). **2026-06-01 "광고 안 함" 결정을 뒤집어** 배너 광고 추가 + 일회성 프로 IAP. 플랜 합의(`docs/` 플랜 파일): 호스트 기준 프로 / `in_app_purchase` 직접 / 배너 / 업셀 A안. → DECISIONS 결정 변경 기록.
+
+**구현 (Phase 1~4)**:
+- **프로 상태**(`app_providers.dart`): `ProController extends Notifier<bool>` + `proProvider`. `isPro_v1` SharedPreferences 영속(기존 `hasSeenGuide_v1` 패턴). 구매/복원 완료 시 `setPro(true)` → 런타임 즉시 반영.
+- **IAP**(`services/purchase_service.dart` 신규): `in_app_purchase` 래퍼. non-consumable `synchorus_pro`. `init()`(가용성→purchaseStream 구독→상품조회→restorePurchases). 구매/복원 시 proProvider 갱신 + completePurchase. 클라 검증(서버리스). `main.dart` 루트(`SynchorusApp` → ConsumerStatefulWidget)에서 init.
+- **설정 화면**(`screens/settings_screen.dart` 신규): 프로 카드(구매/복원 버튼, 가격은 스토어 상품 price) + 가이드 다시 보기. AppBar `?`(가이드) 버튼 → **⚙️ 설정 버튼**으로 교체(`player_screen.dart:401`). 가이드는 GlobalKey가 PlayerScreen에 있어 SettingsScreen이 `pop('showGuide')` 신호 → `_openSettings`가 받아 `_showGuide` 실행.
+- **2대 제한**(`p2p_service.dart`): `_isPro`/`setProStatus` + `_handleNewPeer` roomCode 검증 직후 `_distinctOtherDeviceCount(joiningDeviceId)>=1 && !_isPro` → `join-rejected(reason:'pro-required')`. 같은 deviceId 재접속은 stale 교체라 카운트 제외(1:N 멀티게스트/재접속 정합). `onProLimitReached` 스트림 → 호스트 업그레이드 팝업. isPro 주입: 앱 루트 `ref.listen(proProvider)` + 호스트 시작 시 push.
+- **팝업**: 호스트 2대 도달 시 업그레이드 다이얼로그(`_showProLimitDialog`, 중복 가드) / 게스트 거절 시 `pro-required`는 시트 닫고 안내 다이얼로그(`_showGuestRejectedDialog`), `invalid-code`는 기존 inline 유지(코드 고쳐 재시도 가능하므로).
+- **배너**(`widgets/banner_ad_widget.dart` 신규): `google_mobile_ads` anchored adaptive(`getLargeAnchoredAdaptiveBannerAdSize`). `main`에서 `MobileAds.initialize()`. player body를 `Column[Expanded(기존 스크롤), if(!isPro) Banner]`로 — **하단 배치**(상단 카드/시크바 안 밀리게, 사용자 선택). 재생 컨트롤 아래 여백 40→8dp 축소(하단 배너와 간격 정리). 작은 화면 스크롤 fix는 Expanded 안에 유지.
+- **플랫폼**: AndroidManifest `APPLICATION_ID` meta-data, iOS Info.plist `GADApplicationIdentifier`+`SKAdNetworkItems`+`NSUserTrackingUsageDescription`. 모두 **Google 공식 테스트 ID**(출시 전 실 ID 교체 TODO 주석).
+
+**검증** (SM S947N debug): 배너 테스트 광고 노출(상단→하단 둘 다 확인) / ⚙️ 설정 진입 + 프로 카드 + 구매 버튼(상품 미등록이라 "상품 정보 불러올 수 없어요" graceful, 크래시 0) / 짧은 화면(1080x1300)서 배너+스크롤 공존 overflow 0 / 가이드 다시 보기 동선. analyze 통과. ⏳ **미검증(스토어/멀티기기 필요)**: 실제 구매→프로 해제→배너 제거(스토어 sandbox 상품 등록 후), 2대 제한 실동작(기기 2~3대), iOS 빌드.
+
+**남은 출시 작업**: AdMob 계정+실 광고단위 ID, Play/App Store 인앱상품(`synchorus_pro`) 등록+가격, GDPR/UMP 동의(EEA), 실결제 내부테스트.
+
+**빌드**: v0.0.127.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

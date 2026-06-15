@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.126+1
+version: 0.0.127+1
 
 environment:
   sdk: ^3.11.4
@@ -55,6 +55,13 @@ dependencies:
   # 온보딩 가이드 오버레이(coach mark) — 첫 실행 자동 + AppBar ? 버튼. 각 버튼
   # GlobalKey 하이라이트 + 설명. 순수 Flutter(네이티브 무관). (v0.0.125)
   tutorial_coach_mark: ^1.3.3
+  # 수익화: 일회성 "프로" IAP(non-consumable). 서버리스 — restorePurchases는
+  # 스토어 계정(Google/Apple) 기준이라 재설치/기기변경 후 복원 가능. (v0.0.127)
+  in_app_purchase: ^3.3.0
+  # 수익화: 무료 사용자 상단 배너(anchored adaptive). 프로 결제 시 숨김. AdMob
+  # App ID는 AndroidManifest meta-data / iOS Info.plist GADApplicationIdentifier.
+  # 현재 Google 테스트 ID — 출시 전 실 ID 교체 필요. (v0.0.127)
+  google_mobile_ads: ^9.0.0
 
 dev_dependencies:
   flutter_test:

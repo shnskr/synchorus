@@ -16,6 +16,8 @@ import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
 import '../services/native_audio_sync_service.dart';
 import '../services/p2p_service.dart';
+import '../widgets/banner_ad_widget.dart';
+import 'settings_screen.dart';
 
 /// 플레이어 모드.
 /// - standalone: 단독 재생. P2P 비활성. UI 컨트롤 권한 보유.
@@ -70,6 +72,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   StreamSubscription? _peerLeaveSub;
   StreamSubscription? _disconnectedSub;
   StreamSubscription? _rejectedSub;
+  StreamSubscription? _proLimitSub;
   // 외부(스피커 모드 게스트가 호스트 broadcast로 받음 또는 호스트 본인 변경)에 의한
   // transpose/speed 값 갱신 시 PlayerScreen rebuild 트리거.
   StreamSubscription<int>? _transposeStreamSub;
@@ -162,6 +165,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       if (!mounted || _mode != PlayerMode.speaker) return;
       _exitSpeakerMode(reason: '호스트 연결이 끊겼습니다');
     });
+    // 무료 호스트가 2대 제한으로 게스트를 거절했을 때 → 호스트에 업그레이드 유도.
+    _proLimitSub = p2p.onProLimitReached.listen((_) {
+      if (!mounted || _mode != PlayerMode.host) return;
+      _showProLimitDialog();
+    });
     // 게스트 측 메시지: welcome / peer-joined / peer-left → peerCount 갱신.
     // 호스트가 보낸 join-rejected는 _enterSpeakerMode에서 별도 처리.
     _rejectedSub = p2p.onMessage.listen((m) {
@@ -215,6 +223,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     _peerLeaveSub?.cancel();
     _disconnectedSub?.cancel();
     _rejectedSub?.cancel();
+    _proLimitSub?.cancel();
     _transposeStreamSub?.cancel();
     _speedStreamSub?.cancel();
     _loadingSub?.cancel();
@@ -377,6 +386,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   @override
   Widget build(BuildContext context) {
+    // 프로면 배너 숨김. 구매/복원 시 proProvider 갱신 → 배너 자동 제거.
+    final isPro = ref.watch(proProvider);
     return Scaffold(
       appBar: AppBar(
         title: Row(
@@ -399,9 +410,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ),
         actions: [
           IconButton(
-            tooltip: '사용법 가이드',
-            icon: const Icon(Icons.help_outline),
-            onPressed: _showGuide,
+            tooltip: '설정',
+            icon: const Icon(Icons.settings),
+            onPressed: _openSettings,
           ),
           IconButton(
             key: _keyP2P,
@@ -412,69 +423,86 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ],
       ),
       body: SafeArea(
-        // 작은 화면(가로 모드·분할 화면·구형 폰) 대응. 아래 Column은 Spacer로
-        // 남는 공간을 흡수하는데, 화면이 짧으면 고정 콘텐츠가 넘쳐 RenderFlex
-        // overflow가 났음. LayoutBuilder+ConstrainedBox(minHeight)+IntrinsicHeight
-        // 조합: 화면이 충분하면 minHeight로 꽉 차 Spacer가 살아 기존 레이아웃 유지,
-        // 짧으면 IntrinsicHeight가 실제 콘텐츠 높이를 잡아 그만큼 스크롤.
-        child: LayoutBuilder(
-          builder: (context, constraints) => SingleChildScrollView(
-            child: ConstrainedBox(
-              constraints: BoxConstraints(minHeight: constraints.maxHeight),
-              child: IntrinsicHeight(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
-                      KeyedSubtree(
-                        key: _keyNowPlaying,
-                        child: _buildNowPlaying(),
+        // 수익화: 무료 사용자는 하단에 고정 배너(스크롤 영역 밖). 프로면 숨김.
+        // 위 Expanded가 남은 높이를 스크롤 영역에 주므로 작은 화면 대응 유지.
+        child: Column(
+          children: [
+            Expanded(
+              // 작은 화면(분할 화면·큰 글꼴·구형 폰) 대응. 아래 Column은 Spacer로
+              // 남는 공간을 흡수하는데, 화면이 짧으면 고정 콘텐츠가 넘쳐 RenderFlex
+              // overflow가 났음. LayoutBuilder+ConstrainedBox(minHeight)+IntrinsicHeight
+              // 조합: 화면이 충분하면 minHeight로 꽉 차 Spacer가 살아 기존 레이아웃 유지,
+              // 짧으면 IntrinsicHeight가 실제 콘텐츠 높이를 잡아 그만큼 스크롤.
+              child: LayoutBuilder(
+                builder: (context, constraints) => SingleChildScrollView(
+                  child: ConstrainedBox(
+                    constraints: BoxConstraints(
+                      minHeight: constraints.maxHeight,
+                    ),
+                    child: IntrinsicHeight(
+                      child: Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Column(
+                          children: [
+                            // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
+                            KeyedSubtree(
+                              key: _keyNowPlaying,
+                              child: _buildNowPlaying(),
+                            ),
+
+                            const Spacer(),
+
+                            // 시크바 + 시간
+                            KeyedSubtree(
+                              key: _keySeekBar,
+                              child: _buildSeekBar(),
+                            ),
+
+                            // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
+                            // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
+                            const SizedBox(height: 8),
+                            KeyedSubtree(
+                              key: _keyAbControls,
+                              child: _buildAbControls(),
+                            ),
+                            const SizedBox(height: 8),
+                            KeyedSubtree(
+                              key: _keySeekSlots,
+                              child: _buildSeekSlots(),
+                            ),
+                            const SizedBox(height: 8),
+                            KeyedSubtree(
+                              key: _keyTranspose,
+                              child: _buildTransposeControls(),
+                            ),
+                            const SizedBox(height: 8),
+                            KeyedSubtree(
+                              key: _keySpeed,
+                              child: _buildSpeedControls(),
+                            ),
+
+                            const SizedBox(height: 16),
+
+                            // 재생 컨트롤
+                            KeyedSubtree(
+                              key: _keyControls,
+                              child: _buildControls(),
+                            ),
+
+                            // 재생 컨트롤 아래 여백. 하단 배너(무료) 또는 화면 끝과의
+                            // 간격. 바깥 Padding(16)과 합쳐 ~24dp. (Sync Info는 디버그용
+                            // — 사용자 요청으로 노출 안 함.)
+                            const SizedBox(height: 8),
+                          ],
+                        ),
                       ),
-
-                      const Spacer(),
-
-                      // 시크바 + 시간
-                      KeyedSubtree(key: _keySeekBar, child: _buildSeekBar()),
-
-                      // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
-                      // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
-                      const SizedBox(height: 8),
-                      KeyedSubtree(
-                        key: _keyAbControls,
-                        child: _buildAbControls(),
-                      ),
-                      const SizedBox(height: 8),
-                      KeyedSubtree(
-                        key: _keySeekSlots,
-                        child: _buildSeekSlots(),
-                      ),
-                      const SizedBox(height: 8),
-                      KeyedSubtree(
-                        key: _keyTranspose,
-                        child: _buildTransposeControls(),
-                      ),
-                      const SizedBox(height: 8),
-                      KeyedSubtree(
-                        key: _keySpeed,
-                        child: _buildSpeedControls(),
-                      ),
-
-                      const SizedBox(height: 16),
-
-                      // 재생 컨트롤
-                      KeyedSubtree(key: _keyControls, child: _buildControls()),
-
-                      const SizedBox(height: 24),
-
-                      // Sync Info는 디버그용 — 사용자 요청으로 노출 안 함.
-                      const SizedBox(height: 16),
-                    ],
+                    ),
                   ),
                 ),
               ),
             ),
-          ),
+            if (!isPro) const BannerAdWidget(),
+          ],
         ),
       ),
     );
@@ -1279,6 +1307,70 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   }
 
   /// 단계별 coach mark 표시 (첫 실행 자동 / ? 버튼 수동 공용).
+  // 2대 제한 팝업 중복 방지(게스트가 연속 접속 시도 시 다이얼로그 쌓임 방지).
+  bool _proDialogOpen = false;
+
+  /// 무료 호스트가 게스트 거절(2대 초과) 시 표시. 결제(설정)로 유도.
+  Future<void> _showProLimitDialog() async {
+    if (_proDialogOpen || !mounted) return;
+    _proDialogOpen = true;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('기기 제한 도달'),
+        content: const Text(
+          '무료 버전은 2대(내 기기 + 1대)까지 동기화할 수 있어요.\n'
+          '프로로 업그레이드하면 기기 제한 없이 연결하고 광고도 사라져요.',
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('나중에'),
+          ),
+          FilledButton(
+            onPressed: () {
+              Navigator.pop(ctx);
+              _openSettings();
+            },
+            child: const Text('업그레이드'),
+          ),
+        ],
+      ),
+    );
+    _proDialogOpen = false;
+  }
+
+  /// 게스트가 2대 제한으로 거절됐을 때 안내 팝업. 게스트는 결제 주체가 아니라
+  /// (호스트가 프로 결제해야 풀림) 상황만 명확히 알림.
+  Future<void> _showGuestRejectedDialog() async {
+    if (!mounted) return;
+    await showDialog<void>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('연결할 수 없어요'),
+        content: const Text(
+          '호스트가 무료 버전이라 2대(호스트 + 1대)까지만 연결할 수 있어요.\n'
+          '호스트가 프로로 업그레이드하면 함께 들을 수 있어요.',
+        ),
+        actions: [
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx),
+            child: const Text('확인'),
+          ),
+        ],
+      ),
+    );
+  }
+
+  /// 설정 화면 열기. 가이드는 GlobalKey가 이 화면에 있어 SettingsScreen이 직접
+  /// 못 띄움 → pop('showGuide') 신호를 받아 여기서 _showGuide() 실행.
+  Future<void> _openSettings() async {
+    final result = await Navigator.of(
+      context,
+    ).push<String>(MaterialPageRoute(builder: (_) => const SettingsScreen()));
+    if (result == 'showGuide' && mounted) _showGuide();
+  }
+
   void _showGuide() {
     final targets = <TargetFocus>[
       _guideTarget(
@@ -1623,6 +1715,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       final p2p = ref.read(p2pServiceProvider);
       final discovery = ref.read(discoveryServiceProvider);
 
+      // 현재 프로 상태 주입(앱 시작 시 이미 프로면 ref.listen 변경 이벤트가 없어
+      // 누락될 수 있어 호스트 시작 시 한 번 명시적으로 push). 무료면 2대 제한.
+      p2p.setProStatus(ref.read(proProvider));
+
       int port;
       try {
         port = await p2p.startHost();
@@ -1739,6 +1835,17 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
       if (reply['type'] == 'join-rejected') {
         await p2p.disconnect();
+        final reason = reply['data']?['reason'] as String?;
+        if (reason == 'pro-required') {
+          // 게스트는 코드 재입력으로 풀 수 없음(호스트가 무료) → 시트 닫고 팝업 안내.
+          // null 반환 시 picker가 시트만 닫음(_mode는 standalone 유지, 연결 안 됨).
+          if (mounted) {
+            WidgetsBinding.instance.addPostFrameCallback((_) {
+              if (mounted) _showGuestRejectedDialog();
+            });
+          }
+          return null;
+        }
         return '입장 코드가 맞지 않습니다';
       }
 

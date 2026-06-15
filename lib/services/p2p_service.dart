@@ -24,6 +24,11 @@ class P2PService {
   final _peerJoinController = StreamController<Peer>.broadcast();
   final _peerLeaveController = StreamController<String>.broadcast();
   final _disconnectedController = StreamController<void>.broadcast();
+  final _proLimitController = StreamController<void>.broadcast();
+
+  // 수익화: 호스트 프로 여부. 무료면 동시 2대(호스트+게스트1)까지만 허용,
+  // 프로면 무제한. proProvider 변경 시 setProStatus로 주입(앱 루트 ref.listen).
+  bool _isPro = false;
 
   /// 메시지 수신 스트림
   Stream<Map<String, dynamic>> get onMessage => _messageController.stream;
@@ -36,6 +41,13 @@ class P2PService {
 
   /// 호스트 연결 끊김 스트림 (게스트용)
   Stream<void> get onDisconnected => _disconnectedController.stream;
+
+  /// 무료 호스트가 기기 제한(2대)에 막혀 게스트를 거절했을 때 발화 (호스트용).
+  /// PlayerScreen이 구독해 "프로 업그레이드" 유도 팝업을 띄운다.
+  Stream<void> get onProLimitReached => _proLimitController.stream;
+
+  /// 호스트 프로 여부 주입. 프로면 게스트 무제한.
+  void setProStatus(bool value) => _isPro = value;
 
   /// 연결된 참가자 목록
   List<Peer> get peers => List.unmodifiable(_peers);
@@ -56,7 +68,11 @@ class P2PService {
   /// 호스트 측에선 join 메시지 없는 connect를 onDone 분기에서 무시 (peer 추가 안 함).
   Future<bool> pingHost(String ip, int port) async {
     try {
-      final s = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
+      final s = await Socket.connect(
+        ip,
+        port,
+        timeout: const Duration(seconds: 2),
+      );
       s.destroy();
       return true;
     } catch (_) {
@@ -67,7 +83,11 @@ class P2PService {
   /// 호스트: TCP 서버 시작
   Future<int> startHost() async {
     await disconnect();
-    _serverSocket = await ServerSocket.bind(InternetAddress.anyIPv4, defaultPort, shared: true);
+    _serverSocket = await ServerSocket.bind(
+      InternetAddress.anyIPv4,
+      defaultPort,
+      shared: true,
+    );
 
     _serverSocket!.listen(
       (socket) {
@@ -85,13 +105,12 @@ class P2PService {
   /// 호스트: heartbeat 시작 (죽은 피어 감지)
   void _startHeartbeat() {
     _heartbeatTimer?.cancel();
-    _heartbeatTimer = Timer.periodic(
-      Duration(seconds: _heartbeatIntervalSec),
-      (_) {
-        _removeDeadPeers();
-        broadcastToAll({'type': 'heartbeat'});
-      },
-    );
+    _heartbeatTimer = Timer.periodic(Duration(seconds: _heartbeatIntervalSec), (
+      _,
+    ) {
+      _removeDeadPeers();
+      broadcastToAll({'type': 'heartbeat'});
+    });
   }
 
   /// 호스트: paused 진입 시 heartbeat 정지 + host-paused 알림.
@@ -155,7 +174,9 @@ class P2PService {
   /// 호스트: 응답 없는 피어 제거
   void _removeDeadPeers() {
     final now = DateTime.now().millisecondsSinceEpoch;
-    final deadPeers = _peers.where((p) => now - p.lastSeen > _heartbeatTimeoutMs).toList();
+    final deadPeers = _peers
+        .where((p) => now - p.lastSeen > _heartbeatTimeoutMs)
+        .toList();
     for (final peer in deadPeers) {
       debugPrint('Heartbeat timeout: ${peer.id}');
       peer.socket.destroy();
@@ -193,7 +214,11 @@ class P2PService {
     required String deviceId,
     required String roomCode,
   }) async {
-    _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
+    _hostSocket = await Socket.connect(
+      ip,
+      port,
+      timeout: const Duration(seconds: 2),
+    );
     _connectedHostIp = ip;
     _lastHostPort = port;
     _lastMyName = myName;
@@ -217,7 +242,13 @@ class P2PService {
     final name = _lastMyName;
     final deviceId = _lastMyDeviceId;
     final roomCode = _lastRoomCode;
-    if (ip == null || port == null || name == null || deviceId == null || roomCode == null) return false;
+    if (ip == null ||
+        port == null ||
+        name == null ||
+        deviceId == null ||
+        roomCode == null) {
+      return false;
+    }
 
     _hostSocket?.destroy();
     _hostSocket = null;
@@ -227,7 +258,11 @@ class P2PService {
       try {
         debugPrint('Reconnect attempt ${i + 1}/$retries to $ip:$port');
         await Future.delayed(Duration(seconds: i + 1)); // 1, 2, 3초 대기
-        _hostSocket = await Socket.connect(ip, port, timeout: const Duration(seconds: 2));
+        _hostSocket = await Socket.connect(
+          ip,
+          port,
+          timeout: const Duration(seconds: 2),
+        );
         _sendTo(_hostSocket!, {
           'type': 'join',
           'data': {'name': name, 'deviceId': deviceId, 'roomCode': roomCode},
@@ -251,83 +286,136 @@ class P2PService {
   }
 
   /// 호스트: 새 참가자 처리
+  /// 현재 접속 중인 **고유 기기 수** (joining deviceId 제외). 2대 제한 판정용.
+  /// deviceId 비어 있는 peer는 셀 수 없으니 제외. 같은 deviceId(재접속)는 stale
+  /// 교체라 카운트하면 안 됨 → joining deviceId와 같은 건 빼고 distinct 집계.
+  int _distinctOtherDeviceCount(String joiningDeviceId) {
+    final ids = <String>{};
+    for (final p in _peers) {
+      if (p.deviceId.isEmpty) continue;
+      if (joiningDeviceId.isNotEmpty && p.deviceId == joiningDeviceId) continue;
+      ids.add(p.deviceId);
+    }
+    return ids.length;
+  }
+
   void _handleNewPeer(Socket socket) {
     final peerId = '${socket.remoteAddress.address}:${socket.remotePort}';
     String peerName = 'Unknown';
     String peerDeviceId = '';
 
-    _listenToSocket(socket, peerId, onFirstMessage: (message) {
-      if (message['type'] != 'join') {
-        debugPrint('Invalid first message from $peerId: ${message['type']}');
-        socket.destroy();
-        return;
-      }
+    _listenToSocket(
+      socket,
+      peerId,
+      onFirstMessage: (message) {
+        if (message['type'] != 'join') {
+          debugPrint('Invalid first message from $peerId: ${message['type']}');
+          socket.destroy();
+          return;
+        }
 
-      // 입장 코드 검증. 게스트가 보낸 roomCode가 호스트 _roomCode와 일치해야 입장.
-      // 누락(빈 문자열 / null)도 reject. join-rejected 메시지로 reason 전달 후 destroy.
-      final claimedCode = message['data']['roomCode'] as String? ?? '';
-      if (_roomCode == null || claimedCode != _roomCode) {
-        debugPrint('Join rejected from $peerId: code=$claimedCode (expected=$_roomCode)');
+        // 입장 코드 검증. 게스트가 보낸 roomCode가 호스트 _roomCode와 일치해야 입장.
+        // 누락(빈 문자열 / null)도 reject. join-rejected 메시지로 reason 전달 후 destroy.
+        final claimedCode = message['data']['roomCode'] as String? ?? '';
+        if (_roomCode == null || claimedCode != _roomCode) {
+          debugPrint(
+            'Join rejected from $peerId: code=$claimedCode (expected=$_roomCode)',
+          );
+          _sendTo(socket, {
+            'type': 'join-rejected',
+            'data': {'reason': 'invalid-code'},
+          });
+          // flush 시간 확보 후 destroy. socket.flush()는 Future이지만 즉시 destroy 시
+          // 게스트가 메시지 못 받을 수 있어 짧은 delay.
+          Future.delayed(const Duration(milliseconds: 100), () {
+            try {
+              socket.destroy();
+            } catch (_) {}
+          });
+          return;
+        }
+
+        peerName = message['data']['name'] ?? 'Unknown';
+        peerDeviceId = message['data']['deviceId'] ?? '';
+
+        // 수익화: 무료(비프로) 호스트는 동시 2대(호스트+게스트1)까지만. 이미 다른
+        // 게스트가 1대 이상 붙어 있으면 새 게스트 거절. 같은 deviceId 재접속은 아래
+        // stale 정리로 교체되는 케이스라 카운트에서 제외(_distinctOtherDeviceCount).
+        // 호스트가 프로면 무제한이라 통과.
+        if (!_isPro && _distinctOtherDeviceCount(peerDeviceId) >= 1) {
+          debugPrint('[P2P] Join rejected (pro-required) from $peerId');
+          _sendTo(socket, {
+            'type': 'join-rejected',
+            'data': {'reason': 'pro-required'},
+          });
+          _proLimitController.add(null); // 호스트 UI에 업그레이드 유도
+          Future.delayed(const Duration(milliseconds: 100), () {
+            try {
+              socket.destroy();
+            } catch (_) {}
+          });
+          return;
+        }
+
+        // 재접속 케이스: peer.id는 "ip:port"라 게스트가 새 socket으로 오면 다른 ID로
+        // 보인다. 같은 디바이스의 stale peer들이 heartbeat timeout(15초) 전까지 남아
+        // 카운트 누적을 일으키는 문제 방지.
+        //
+        // v0.0.32: name만 비교 → 1:N 환경에서 다른 디바이스(같은 'Guest' 이름)를 stale로
+        //          오인해 무한 ping-pong (HISTORY (51)).
+        // v0.0.54: name + remoteAddress 비교로 보강. 단 같은 모델 디바이스 2대가 같은
+        //          microsecond에 join하면 hex suffix가 충돌하는 1/65536 코너 잔존.
+        // v0.0.73: deviceId(SharedPreferences 영속 UUID v4) 단독 비교로 교체. deviceId가
+        //          비어 있으면(누락 메시지) stale 정리 자체를 건너뜀 — 기존 peer를 잘못
+        //          destroy하는 것보다 일시적 중복이 안전.
+        final stalePeers = peerDeviceId.isEmpty
+            ? <Peer>[]
+            : _peers.where((p) => p.deviceId == peerDeviceId).toList();
+        for (final stale in stalePeers) {
+          debugPrint(
+            '[P2P] stale peer 정리 (deviceId=$peerDeviceId, name=$peerName): ${stale.id}',
+          );
+          try {
+            stale.socket.destroy();
+          } catch (_) {}
+          _peers.remove(stale);
+          _peerLeaveController.add(stale.id);
+          broadcastToAll({
+            'type': 'peer-left',
+            'data': {'peerId': stale.id, 'peerCount': _peers.length},
+          });
+        }
+
+        final peer = Peer(
+          id: peerId,
+          name: peerName,
+          deviceId: peerDeviceId,
+          socket: socket,
+        );
+        _peers.add(peer);
+        _peerJoinController.add(peer);
+
+        // 입장 승인
         _sendTo(socket, {
-          'type': 'join-rejected',
-          'data': {'reason': 'invalid-code'},
+          'type': 'welcome',
+          'data': {
+            'peerId': peerId,
+            'peerCount': _peers.length,
+            'roomCode': _roomCode,
+          },
         });
-        // flush 시간 확보 후 destroy. socket.flush()는 Future이지만 즉시 destroy 시
-        // 게스트가 메시지 못 받을 수 있어 짧은 delay.
-        Future.delayed(const Duration(milliseconds: 100), () {
-          try { socket.destroy(); } catch (_) {}
-        });
-        return;
-      }
 
-      peerName = message['data']['name'] ?? 'Unknown';
-      peerDeviceId = message['data']['deviceId'] ?? '';
-
-      // 재접속 케이스: peer.id는 "ip:port"라 게스트가 새 socket으로 오면 다른 ID로
-      // 보인다. 같은 디바이스의 stale peer들이 heartbeat timeout(15초) 전까지 남아
-      // 카운트 누적을 일으키는 문제 방지.
-      //
-      // v0.0.32: name만 비교 → 1:N 환경에서 다른 디바이스(같은 'Guest' 이름)를 stale로
-      //          오인해 무한 ping-pong (HISTORY (51)).
-      // v0.0.54: name + remoteAddress 비교로 보강. 단 같은 모델 디바이스 2대가 같은
-      //          microsecond에 join하면 hex suffix가 충돌하는 1/65536 코너 잔존.
-      // v0.0.73: deviceId(SharedPreferences 영속 UUID v4) 단독 비교로 교체. deviceId가
-      //          비어 있으면(누락 메시지) stale 정리 자체를 건너뜀 — 기존 peer를 잘못
-      //          destroy하는 것보다 일시적 중복이 안전.
-      final stalePeers = peerDeviceId.isEmpty
-          ? <Peer>[]
-          : _peers.where((p) => p.deviceId == peerDeviceId).toList();
-      for (final stale in stalePeers) {
-        debugPrint('[P2P] stale peer 정리 (deviceId=$peerDeviceId, name=$peerName): ${stale.id}');
-        try { stale.socket.destroy(); } catch (_) {}
-        _peers.remove(stale);
-        _peerLeaveController.add(stale.id);
+        // 다른 참가자들에게 알림 (peerCount 포함 — 게스트가 매번 절대값으로 재설정)
         broadcastToAll({
-          'type': 'peer-left',
-          'data': {'peerId': stale.id, 'peerCount': _peers.length},
-        });
-      }
-
-      final peer = Peer(id: peerId, name: peerName, deviceId: peerDeviceId, socket: socket);
-      _peers.add(peer);
-      _peerJoinController.add(peer);
-
-      // 입장 승인
-      _sendTo(socket, {
-        'type': 'welcome',
-        'data': {
-          'peerId': peerId,
-          'peerCount': _peers.length,
-          'roomCode': _roomCode,
-        },
-      });
-
-      // 다른 참가자들에게 알림 (peerCount 포함 — 게스트가 매번 절대값으로 재설정)
-      broadcastToAll({
-        'type': 'peer-joined',
-        'data': {'peerId': peerId, 'name': peerName, 'peerCount': _peers.length},
-      }, exclude: peerId);
-    });
+          'type': 'peer-joined',
+          'data': {
+            'peerId': peerId,
+            'name': peerName,
+            'peerCount': _peers.length,
+          },
+        }, exclude: peerId);
+      },
+    );
 
     // socket.done은 정상/에러 둘 다 종료 신호. 두 분기 모두 broadcast 필요 —
     // iPhone 등 게스트 강제 종료 시 TCP RST로 done이 catchError 분기에 빠지면
@@ -342,11 +430,16 @@ class P2PService {
         'data': {'peerId': peerId, 'peerCount': _peers.length},
       });
     }
+
     socket.done.then((_) => onDone()).catchError((_) => onDone());
   }
 
   /// 소켓에서 메시지 수신 리스너
-  void _listenToSocket(Socket socket, String sourceId, {Function(Map<String, dynamic>)? onFirstMessage}) {
+  void _listenToSocket(
+    Socket socket,
+    String sourceId, {
+    Function(Map<String, dynamic>)? onFirstMessage,
+  }) {
     // v0.0.107: TCP Nagle off (tcpNoDelay). broadcast(audio-tempo/obs/seek)는 응답
     // 없는 단방향이라 Nagle + 수신자 delayed-ACK 상호작용으로 ~200ms+ 지연됨
     // (실측: audio-tempo 전파 256ms vs ping RTT 11ms). 모든 소켓(peer + host)이
@@ -372,7 +465,9 @@ class P2PService {
       // 호스트: 게스트 leave 수신 → 즉시 퇴장 처리
       if (message['type'] == 'leave' && sourceId != 'host') {
         final peer = _peers.cast<Peer?>().firstWhere(
-            (p) => p!.id == sourceId, orElse: () => null);
+          (p) => p!.id == sourceId,
+          orElse: () => null,
+        );
         if (peer != null) {
           peer.socket.destroy();
           _peers.remove(peer);
@@ -387,7 +482,9 @@ class P2PService {
       // 호스트: heartbeat-ack 수신 → lastSeen 갱신
       if (message['type'] == 'heartbeat-ack') {
         final peer = _peers.cast<Peer?>().firstWhere(
-            (p) => p!.id == sourceId, orElse: () => null);
+          (p) => p!.id == sourceId,
+          orElse: () => null,
+        );
         if (peer != null) {
           peer.lastSeen = DateTime.now().millisecondsSinceEpoch;
         }
@@ -544,5 +641,6 @@ class P2PService {
     _peerJoinController.close();
     _peerLeaveController.close();
     _disconnectedController.close();
+    _proLimitController.close();
   }
 }
