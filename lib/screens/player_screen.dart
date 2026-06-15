@@ -131,8 +131,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   final GlobalKey _keySpeed = GlobalKey();
   final GlobalKey _keyControls = GlobalKey();
 
-  NativeAudioSyncService get _audio =>
-      ref.read(nativeAudioSyncServiceProvider);
+  NativeAudioSyncService get _audio => ref.read(nativeAudioSyncServiceProvider);
 
   @override
   void initState() {
@@ -253,9 +252,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _abPointB = newPoint;
       }
       // 둘 다 지정됐고 순서가 뒤집혔으면 swap.
-      if (_abPointA != null &&
-          _abPointB != null &&
-          _abPointA! > _abPointB!) {
+      if (_abPointA != null && _abPointB != null && _abPointA! > _abPointB!) {
         final tmp = _abPointA;
         _abPointA = _abPointB;
         _abPointB = tmp;
@@ -336,8 +333,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final totalMs = ts.totalFrames * 1000 / ts.sampleRate;
     // 효과적 A/B로 clamp. A 없으면 0, B 없으면 곡끝.
     final minMs = _effectiveA.inMilliseconds.toDouble();
-    final maxMs =
-        _effectiveB?.inMilliseconds.toDouble() ?? totalMs.toDouble();
+    final maxMs = _effectiveB?.inMilliseconds.toDouble() ?? totalMs.toDouble();
     final newMs = (currentMs + seconds * 1000).clamp(minMs, maxMs);
     _audio.syncSeek(Duration(milliseconds: newMs.round()));
   }
@@ -356,11 +352,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       final totalMs = ts != null && ts.sampleRate > 0
           ? ts.totalFrames * 1000 / ts.sampleRate
           : 0.0;
-      final atEnd =
-          totalMs > 0 && _lastPosition.inMilliseconds >= totalMs - 50;
-      final outside = _lastPosition < a ||
-          (b != null && _lastPosition >= b) ||
-          atEnd;
+      final atEnd = totalMs > 0 && _lastPosition.inMilliseconds >= totalMs - 50;
+      final outside =
+          _lastPosition < a || (b != null && _lastPosition >= b) || atEnd;
       if (outside) startFrom = a;
     }
     _audio.syncPlay(startFrom: startFrom);
@@ -396,10 +390,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               _versionLabel,
               style: TextStyle(
                 fontSize: 11,
-                color: Theme.of(context)
-                    .colorScheme
-                    .onSurface
-                    .withValues(alpha: 0.5),
+                color: Theme.of(
+                  context,
+                ).colorScheme.onSurface.withValues(alpha: 0.5),
               ),
             ),
           ],
@@ -419,40 +412,68 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         ],
       ),
       body: SafeArea(
-        child: Padding(
-          padding: const EdgeInsets.all(16.0),
-          child: Column(
-            children: [
-              // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
-              KeyedSubtree(key: _keyNowPlaying, child: _buildNowPlaying()),
+        // 작은 화면(가로 모드·분할 화면·구형 폰) 대응. 아래 Column은 Spacer로
+        // 남는 공간을 흡수하는데, 화면이 짧으면 고정 콘텐츠가 넘쳐 RenderFlex
+        // overflow가 났음. LayoutBuilder+ConstrainedBox(minHeight)+IntrinsicHeight
+        // 조합: 화면이 충분하면 minHeight로 꽉 차 Spacer가 살아 기존 레이아웃 유지,
+        // 짧으면 IntrinsicHeight가 실제 콘텐츠 높이를 잡아 그만큼 스크롤.
+        child: LayoutBuilder(
+          builder: (context, constraints) => SingleChildScrollView(
+            child: ConstrainedBox(
+              constraints: BoxConstraints(minHeight: constraints.maxHeight),
+              child: IntrinsicHeight(
+                child: Padding(
+                  padding: const EdgeInsets.all(16.0),
+                  child: Column(
+                    children: [
+                      // 파일 정보 카드 — 클릭 시 파일 선택. 별도 버튼 없음.
+                      KeyedSubtree(
+                        key: _keyNowPlaying,
+                        child: _buildNowPlaying(),
+                      ),
 
-              const Spacer(),
+                      const Spacer(),
 
-              // 시크바 + 시간
-              KeyedSubtree(key: _keySeekBar, child: _buildSeekBar()),
+                      // 시크바 + 시간
+                      KeyedSubtree(key: _keySeekBar, child: _buildSeekBar()),
 
-              // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
-              // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
-              const SizedBox(height: 8),
-              KeyedSubtree(key: _keyAbControls, child: _buildAbControls()),
-              const SizedBox(height: 8),
-              KeyedSubtree(key: _keySeekSlots, child: _buildSeekSlots()),
-              const SizedBox(height: 8),
-              KeyedSubtree(key: _keyTranspose, child: _buildTransposeControls()),
-              const SizedBox(height: 8),
-              KeyedSubtree(key: _keySpeed, child: _buildSpeedControls()),
+                      // A-B 구간 반복 + seek 메모리 + §H transpose + §I 속도.
+                      // 스피커 모드에서도 표시 그대로, 내부 컨트롤만 비활성 (호스트 영향 안 줌).
+                      const SizedBox(height: 8),
+                      KeyedSubtree(
+                        key: _keyAbControls,
+                        child: _buildAbControls(),
+                      ),
+                      const SizedBox(height: 8),
+                      KeyedSubtree(
+                        key: _keySeekSlots,
+                        child: _buildSeekSlots(),
+                      ),
+                      const SizedBox(height: 8),
+                      KeyedSubtree(
+                        key: _keyTranspose,
+                        child: _buildTransposeControls(),
+                      ),
+                      const SizedBox(height: 8),
+                      KeyedSubtree(
+                        key: _keySpeed,
+                        child: _buildSpeedControls(),
+                      ),
 
-              const SizedBox(height: 16),
+                      const SizedBox(height: 16),
 
-              // 재생 컨트롤
-              KeyedSubtree(key: _keyControls, child: _buildControls()),
+                      // 재생 컨트롤
+                      KeyedSubtree(key: _keyControls, child: _buildControls()),
 
-              const SizedBox(height: 24),
+                      const SizedBox(height: 24),
 
-              // Sync Info는 디버그용 — 사용자 요청으로 노출 안 함.
-
-              const SizedBox(height: 16),
-            ],
+                      // Sync Info는 디버그용 — 사용자 요청으로 노출 안 함.
+                      const SizedBox(height: 16),
+                    ],
+                  ),
+                ),
+              ),
+            ),
           ),
         ),
       ),
@@ -506,8 +527,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 ),
               );
             } else {
-              title = fileName ??
-                  (_isController ? '오디오를 선택하세요' : '음악 대기 중');
+              title = fileName ?? (_isController ? '오디오를 선택하세요' : '음악 대기 중');
               leading = const Icon(Icons.music_note, size: 40);
             }
             return Card(
@@ -539,13 +559,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           stream: _audio.positionStream,
           builder: (context, positionSnap) {
             final position = positionSnap.data ?? Duration.zero;
-            final maxMs =
-                duration.inMilliseconds.toDouble().clamp(1.0, double.maxFinite);
+            final maxMs = duration.inMilliseconds.toDouble().clamp(
+              1.0,
+              double.maxFinite,
+            );
             // 효과적 [A, B] 범위로 clamp. 시크바 max는 곡 끝(시각적으로 전체
             // 표시)이지만 thumb은 [A, B] 안에서만 움직임. A 없으면 0, B 없으면 곡끝.
             final minSeekMs = _effectiveA.inMilliseconds.toDouble();
-            final maxSeekMs =
-                _effectiveB?.inMilliseconds.toDouble() ?? maxMs;
+            final maxSeekMs = _effectiveB?.inMilliseconds.toDouble() ?? maxMs;
             return Column(
               children: [
                 // A/B 마커 영역 — 모드 무관 항상 reserve해서 시크바 높이 고정.
@@ -553,33 +574,36 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 _buildAbMarkers(maxMs),
                 SliderTheme(
                   data: Theme.of(context).sliderTheme.copyWith(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: _sliderHorizontalPadding),
-                      ),
+                    padding: const EdgeInsets.symmetric(
+                      horizontal: _sliderHorizontalPadding,
+                    ),
+                  ),
                   child: Slider(
-                  min: 0,
-                  max: maxMs,
-                  value: _isDragging
-                      ? _dragValue.clamp(0.0, maxMs)
-                      : position.inMilliseconds.toDouble().clamp(0.0, maxMs),
-                  onChanged: (_isController && _audio.currentFileName != null)
-                      ? (value) {
-                          final clamped = value.clamp(minSeekMs, maxSeekMs);
-                          setState(() {
-                            _isDragging = true;
-                            _dragValue = clamped;
-                          });
-                        }
-                      : null,
-                  onChangeEnd: (_isController && _audio.currentFileName != null)
-                      ? (value) {
-                          final clamped = value.clamp(minSeekMs, maxSeekMs);
-                          setState(() => _isDragging = false);
-                          _audio.syncSeek(
-                              Duration(milliseconds: clamped.toInt()));
-                        }
-                      : null,
-                ),
+                    min: 0,
+                    max: maxMs,
+                    value: _isDragging
+                        ? _dragValue.clamp(0.0, maxMs)
+                        : position.inMilliseconds.toDouble().clamp(0.0, maxMs),
+                    onChanged: (_isController && _audio.currentFileName != null)
+                        ? (value) {
+                            final clamped = value.clamp(minSeekMs, maxSeekMs);
+                            setState(() {
+                              _isDragging = true;
+                              _dragValue = clamped;
+                            });
+                          }
+                        : null,
+                    onChangeEnd:
+                        (_isController && _audio.currentFileName != null)
+                        ? (value) {
+                            final clamped = value.clamp(minSeekMs, maxSeekMs);
+                            setState(() => _isDragging = false);
+                            _audio.syncSeek(
+                              Duration(milliseconds: clamped.toInt()),
+                            );
+                          }
+                        : null,
+                  ),
                 ),
                 // 슬롯 마커 영역 — 모드 무관 항상 reserve해서 시크바 높이 고정.
                 _buildSlotMarkers(maxMs),
@@ -588,9 +612,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   child: Row(
                     mainAxisAlignment: MainAxisAlignment.spaceBetween,
                     children: [
-                      Text(_formatDuration(_isDragging
-                          ? Duration(milliseconds: _dragValue.toInt())
-                          : position)),
+                      Text(
+                        _formatDuration(
+                          _isDragging
+                              ? Duration(milliseconds: _dragValue.toInt())
+                              : position,
+                        ),
+                      ),
                       Text(_formatDuration(duration)),
                     ],
                   ),
@@ -619,8 +647,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               children: [
                 IconButton(
                   iconSize: 40,
-                  onPressed:
-                      (_isController && hasAudio) ? () => _skipSeconds(-5) : null,
+                  onPressed: (_isController && hasAudio)
+                      ? () => _skipSeconds(-5)
+                      : null,
                   icon: const Icon(Icons.replay_5),
                 ),
                 const SizedBox(width: 16),
@@ -636,8 +665,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 const SizedBox(width: 16),
                 IconButton(
                   iconSize: 40,
-                  onPressed:
-                      (_isController && hasAudio) ? () => _skipSeconds(5) : null,
+                  onPressed: (_isController && hasAudio)
+                      ? () => _skipSeconds(5)
+                      : null,
                   icon: const Icon(Icons.forward_5),
                 ),
               ],
@@ -647,9 +677,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               child: IconButton(
                 iconSize: 28,
                 onPressed: hasAudio ? _toggleMute : null,
-                icon: Icon(
-                  _muted ? Icons.volume_off : Icons.volume_up,
-                ),
+                icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
               ),
             ),
           ],
@@ -679,8 +707,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       color: Theme.of(context).colorScheme.tertiary,
       points: [
         for (int i = 0; i < 3; i++)
-          if (_seekSlots[i] != null)
-            (point: _seekSlots[i]!, label: '${i + 1}'),
+          if (_seekSlots[i] != null) (point: _seekSlots[i]!, label: '${i + 1}'),
       ],
     );
   }
@@ -717,9 +744,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 translation: const Offset(-0.5, 0),
                 child: Column(
                   mainAxisSize: MainAxisSize.min,
-                  children: below
-                      ? [bar, textWidget]
-                      : [textWidget, bar],
+                  children: below ? [bar, textWidget] : [textWidget, bar],
                 ),
               ),
             );
@@ -727,9 +752,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
           return Stack(
             clipBehavior: Clip.none,
-            children: [
-              for (final p in points) marker(p.point, p.label),
-            ],
+            children: [for (final p in points) marker(p.point, p.label)],
           );
         },
       ),
@@ -753,8 +776,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             color: _abActive
                 ? Theme.of(context).colorScheme.primary
                 : (_abAnySet
-                    ? Theme.of(context).colorScheme.onSurface
-                    : Theme.of(context).disabledColor),
+                      ? Theme.of(context).colorScheme.onSurface
+                      : Theme.of(context).disabledColor),
           ),
           onPressed: (_abAnySet && _isController) ? _resetAb : null,
         ),
@@ -772,16 +795,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // duration이 1시간 넘는 곡이면 placeholder도 HH:MM:SS 길이로 reserve.
     final dur = _audio.currentDuration ?? Duration.zero;
     final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
-    const tabular = TextStyle(
-      fontFeatures: [FontFeature.tabularFigures()],
-    );
+    const tabular = TextStyle(fontFeatures: [FontFeature.tabularFigures()]);
     return OutlinedButton(
       onPressed: enabled ? () => _setAbPoint(isA: isA) : null,
-      onLongPress:
-          (enabled && hasPoint) ? () => _clearAbPoint(isA: isA) : null,
+      onLongPress: (enabled && hasPoint) ? () => _clearAbPoint(isA: isA) : null,
       style: OutlinedButton.styleFrom(
-        foregroundColor:
-            hasPoint ? Theme.of(context).colorScheme.primary : null,
+        foregroundColor: hasPoint
+            ? Theme.of(context).colorScheme.primary
+            : null,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       ),
       child: Stack(
@@ -823,18 +844,16 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final hasPoint = point != null;
     final dur = _audio.currentDuration ?? Duration.zero;
     final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
-    const tabular = TextStyle(
-      fontFeatures: [FontFeature.tabularFigures()],
-    );
+    const tabular = TextStyle(fontFeatures: [FontFeature.tabularFigures()]);
     final label = '${idx + 1}';
     return OutlinedButton(
       onPressed: enabled ? () => _onSlotTap(idx) : null,
-      onLongPress:
-          (enabled && hasPoint) ? () => _onSlotLongPress(idx) : null,
+      onLongPress: (enabled && hasPoint) ? () => _onSlotLongPress(idx) : null,
       style: OutlinedButton.styleFrom(
         // 시크바 마커와 통일 — 슬롯은 tertiary로 A/B(primary)와 시각 구분.
-        foregroundColor:
-            hasPoint ? Theme.of(context).colorScheme.tertiary : null,
+        foregroundColor: hasPoint
+            ? Theme.of(context).colorScheme.tertiary
+            : null,
         padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
       ),
       child: Stack(
@@ -878,14 +897,20 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // 오른쪽 끝(아이콘 옆) 기준으로 값 위치가 고정됨.
             SizedBox(
               width: 36,
-              child: Text(
-                label,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: semitone != 0 ? scheme.primary : null,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+              // 큰 글꼴 설정에서 '+12' 등이 36px를 넘어 wrap되던 것 방지.
+              // scaleDown은 폭 초과 시에만 축소(평소 무변화), centerRight 유지.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: Text(
+                  label,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: semitone != 0 ? scheme.primary : null,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
               ),
             ),
@@ -980,14 +1005,21 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // (아이콘 옆) 기준으로 위치가 고정됨.
             SizedBox(
               width: 52,
-              child: Text(
-                label,
-                textAlign: TextAlign.right,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.bold,
-                  color: !isDefault ? scheme.primary : null,
-                  fontFeatures: const [FontFeature.tabularFigures()],
+              // 큰 글꼴 설정(textScaler)에서 '1.00x'가 52px를 넘어 2줄로
+              // wrap되던 것 방지. scaleDown은 폭 초과 시에만 축소(평소 무변화),
+              // centerRight로 우측정렬 유지.
+              child: FittedBox(
+                fit: BoxFit.scaleDown,
+                alignment: Alignment.centerRight,
+                child: Text(
+                  label,
+                  textAlign: TextAlign.right,
+                  style: TextStyle(
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold,
+                    color: !isDefault ? scheme.primary : null,
+                    fontFeatures: const [FontFeature.tabularFigures()],
+                  ),
                 ),
               ),
             ),
@@ -1020,7 +1052,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 min: 500,
                 max: 2000,
                 divisions: 30, // 5% step
-                value: _audio.playbackSpeedX1000.toDouble().clamp(500.0, 2000.0),
+                value: _audio.playbackSpeedX1000.toDouble().clamp(
+                  500.0,
+                  2000.0,
+                ),
                 onChanged: hasAudio
                     ? (v) {
                         final newVal = (v / 50).round() * 50;
@@ -1075,11 +1110,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                Text('Sync Info',
-                    style: TextStyle(
-                        fontWeight: FontWeight.bold,
-                        fontSize: 12,
-                        color: Colors.grey[600])),
+                Text(
+                  'Sync Info',
+                  style: TextStyle(
+                    fontWeight: FontWeight.bold,
+                    fontSize: 12,
+                    color: Colors.grey[600],
+                  ),
+                ),
                 const SizedBox(height: 4),
                 Text(
                   'drift: ${drift != null ? "${drift.toStringAsFixed(1)}ms" : "—"}'
@@ -1089,10 +1127,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   '  |  stable: ${sync.isOffsetStable ? "✓" : "✗"}',
                   style: TextStyle(
                     fontSize: 11,
-                    color: Theme.of(context)
-                        .colorScheme
-                        .onSurface
-                        .withValues(alpha: 0.6),
+                    color: Theme.of(
+                      context,
+                    ).colorScheme.onSurface.withValues(alpha: 0.6),
                     fontFamily: 'monospace',
                   ),
                 ),
@@ -1180,15 +1217,23 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(title,
-            style: const TextStyle(
-                color: Colors.white,
-                fontSize: 19,
-                fontWeight: FontWeight.bold)),
+        Text(
+          title,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 19,
+            fontWeight: FontWeight.bold,
+          ),
+        ),
         const SizedBox(height: 8),
-        Text(body,
-            style: const TextStyle(
-                color: Colors.white, fontSize: 15, height: 1.4)),
+        Text(
+          body,
+          style: const TextStyle(
+            color: Colors.white,
+            fontSize: 15,
+            height: 1.4,
+          ),
+        ),
         const SizedBox(height: 12),
         Align(
           alignment: Alignment.centerRight,
@@ -1197,11 +1242,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             style: TextButton.styleFrom(
               foregroundColor: Colors.white,
               backgroundColor: Colors.white.withValues(alpha: 0.18),
-              padding:
-                  const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
+              padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
             ),
-            child: Text(isLast ? '완료 ✓' : '다음 →',
-                style: const TextStyle(fontWeight: FontWeight.bold)),
+            child: Text(
+              isLast ? '완료 ✓' : '다음 →',
+              style: const TextStyle(fontWeight: FontWeight.bold),
+            ),
           ),
         ),
       ],
@@ -1210,9 +1256,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
 
   /// coach mark 타겟 helper. 가로로 긴 위젯도 적절히 감싸도록 RRect(사각) 하이라이트
   /// + 오버레이 아무 곳이나 탭해도 다음 단계로(enableOverlayTab).
-  TargetFocus _guideTarget(String id, GlobalKey key, ContentAlign align,
-      String title, String body,
-      {bool isLast = false}) {
+  TargetFocus _guideTarget(
+    String id,
+    GlobalKey key,
+    ContentAlign align,
+    String title,
+    String body, {
+    bool isLast = false,
+  }) {
     return TargetFocus(
       identify: id,
       keyTarget: key,
@@ -1220,7 +1271,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       radius: 12,
       contents: [
         TargetContent(
-            align: align, child: _guideText(title, body, isLast: isLast)),
+          align: align,
+          child: _guideText(title, body, isLast: isLast),
+        ),
       ],
     );
   }
@@ -1228,23 +1281,63 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// 단계별 coach mark 표시 (첫 실행 자동 / ? 버튼 수동 공용).
   void _showGuide() {
     final targets = <TargetFocus>[
-      _guideTarget('nowPlaying', _keyNowPlaying, ContentAlign.bottom, '음악 선택',
-          '여기를 눌러 재생할 음악을 골라요. 선택한 곡 이름이 여기 표시돼요.'),
-      _guideTarget('seekBar', _keySeekBar, ContentAlign.top, '재생 위치',
-          '지금 재생 중인 위치예요. 좌우로 드래그하면 원하는 지점으로 이동해요.'),
-      _guideTarget('abControls', _keyAbControls, ContentAlign.top, 'A-B 구간 반복',
-          'A·B로 시작과 끝을 찍으면 그 구간만 반복돼요. A·B를 길게 누르면 그 지점만, Ⓧ로 전체를 해제해요.'),
-      _guideTarget('seekSlots', _keySeekSlots, ContentAlign.top, '위치 저장',
-          '1·2·3에 현재 위치를 저장하고, 다시 누르면 그 위치로 이동해요. 길게 누르면 해제돼요.'),
-      _guideTarget('transpose', _keyTranspose, ContentAlign.top, '음정',
-          '음 높낮이를 반음씩 바꿔요. ↻로 원래 음으로 되돌려요.'),
-      _guideTarget('speed', _keySpeed, ContentAlign.top, '재생 속도',
-          '빠르기를 0.5~2.0배로 바꿔요. ↻로 원래 속도로 되돌려요.'),
-      _guideTarget('controls', _keyControls, ContentAlign.top, '재생 컨트롤',
-          '가운데로 재생·일시정지하고, 양옆 화살표로 5초씩 이동해요. 맨 오른쪽은 음소거예요.'),
-      _guideTarget('p2p', _keyP2P, ContentAlign.bottom, '싱크 모드',
-          '여러 폰을 동기화된 스피커로 묶어 같은 음악을 함께 들어요. 이 버튼으로 시작해요.',
-          isLast: true),
+      _guideTarget(
+        'nowPlaying',
+        _keyNowPlaying,
+        ContentAlign.bottom,
+        '음악 선택',
+        '여기를 눌러 재생할 음악을 골라요. 선택한 곡 이름이 여기 표시돼요.',
+      ),
+      _guideTarget(
+        'seekBar',
+        _keySeekBar,
+        ContentAlign.top,
+        '재생 위치',
+        '지금 재생 중인 위치예요. 좌우로 드래그하면 원하는 지점으로 이동해요.',
+      ),
+      _guideTarget(
+        'abControls',
+        _keyAbControls,
+        ContentAlign.top,
+        'A-B 구간 반복',
+        'A·B로 시작과 끝을 찍으면 그 구간만 반복돼요. A·B를 길게 누르면 그 지점만, Ⓧ로 전체를 해제해요.',
+      ),
+      _guideTarget(
+        'seekSlots',
+        _keySeekSlots,
+        ContentAlign.top,
+        '위치 저장',
+        '1·2·3에 현재 위치를 저장하고, 다시 누르면 그 위치로 이동해요. 길게 누르면 해제돼요.',
+      ),
+      _guideTarget(
+        'transpose',
+        _keyTranspose,
+        ContentAlign.top,
+        '음정',
+        '음 높낮이를 반음씩 바꿔요. ↻로 원래 음으로 되돌려요.',
+      ),
+      _guideTarget(
+        'speed',
+        _keySpeed,
+        ContentAlign.top,
+        '재생 속도',
+        '빠르기를 0.5~2.0배로 바꿔요. ↻로 원래 속도로 되돌려요.',
+      ),
+      _guideTarget(
+        'controls',
+        _keyControls,
+        ContentAlign.top,
+        '재생 컨트롤',
+        '가운데로 재생·일시정지하고, 양옆 화살표로 5초씩 이동해요. 맨 오른쪽은 음소거예요.',
+      ),
+      _guideTarget(
+        'p2p',
+        _keyP2P,
+        ContentAlign.bottom,
+        '싱크 모드',
+        '여러 폰을 동기화된 스피커로 묶어 같은 음악을 함께 들어요. 이 버튼으로 시작해요.',
+        isLast: true,
+      ),
     ];
     _coachMark = TutorialCoachMark(
       targets: targets,
@@ -1293,8 +1386,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   clipBehavior: Clip.none,
                   children: [
                     switch (_mode) {
-                      PlayerMode.standalone =>
-                        _buildStandaloneSheet(sheetContext),
+                      PlayerMode.standalone => _buildStandaloneSheet(
+                        sheetContext,
+                      ),
                       PlayerMode.host => _buildHostSheet(sheetContext),
                       PlayerMode.speaker => _buildSpeakerSheet(sheetContext),
                     },
@@ -1337,9 +1431,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.stretch,
         children: [
-          const Text('모드 선택',
-              style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-              textAlign: TextAlign.center),
+          const Text(
+            '모드 선택',
+            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+            textAlign: TextAlign.center,
+          ),
           const SizedBox(height: 16),
           OutlinedButton.icon(
             // sheet 닫지 않고 호스트 진입 — _enterHostMode 안 _setStateAndSheet
@@ -1365,11 +1461,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             children: [
               const Icon(Icons.speaker, size: 18),
               const SizedBox(width: 8),
-              Text('스피커 모드',
-                  style: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.bold,
-                      color: Theme.of(context).colorScheme.onSurface)),
+              Text(
+                '스피커 모드',
+                style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.bold,
+                  color: Theme.of(context).colorScheme.onSurface,
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 8),
@@ -1377,7 +1476,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             discovery: ref.read(discoveryServiceProvider),
             onConnect: (ip, port, code) =>
                 _enterSpeakerMode(ip: ip, port: port, roomCode: code),
-            onPing: (ip, port) => ref.read(p2pServiceProvider).pingHost(ip, port),
+            onPing: (ip, port) =>
+                ref.read(p2pServiceProvider).pingHost(ip, port),
             onSuccess: () => Navigator.pop(sheetContext),
           ),
         ],
@@ -1390,9 +1490,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('호스트 모드',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center),
+        const Text(
+          '호스트 모드',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+        ),
         const SizedBox(height: 12),
         Card(
           child: Padding(
@@ -1416,7 +1518,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             await _exitHostMode();
           },
           style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red[400], foregroundColor: Colors.white),
+            backgroundColor: Colors.red[400],
+            foregroundColor: Colors.white,
+          ),
           child: const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
             child: Text('호스트 모드 종료'),
@@ -1431,9 +1535,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       mainAxisSize: MainAxisSize.min,
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: [
-        const Text('스피커 모드',
-            style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
-            textAlign: TextAlign.center),
+        const Text(
+          '스피커 모드',
+          style: TextStyle(fontSize: 16, fontWeight: FontWeight.bold),
+          textAlign: TextAlign.center,
+        ),
         const SizedBox(height: 12),
         Card(
           child: Padding(
@@ -1457,7 +1563,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             await _exitSpeakerMode();
           },
           style: ElevatedButton.styleFrom(
-              backgroundColor: Colors.red[400], foregroundColor: Colors.white),
+            backgroundColor: Colors.red[400],
+            foregroundColor: Colors.white,
+          ),
           child: const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
             child: Text('스피커 모드 종료'),
@@ -1472,20 +1580,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       children: [
         SizedBox(
           width: 90,
-          child: Text(label,
-              style: TextStyle(
-                  fontSize: 13,
-                  color: Theme.of(context)
-                      .colorScheme
-                      .onSurface
-                      .withValues(alpha: 0.6))),
+          child: Text(
+            label,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(
+                context,
+              ).colorScheme.onSurface.withValues(alpha: 0.6),
+            ),
+          ),
         ),
         Expanded(
-          child: Text(value,
-              style: TextStyle(
-                  fontSize: emphasize ? 18 : 14,
-                  fontWeight: emphasize ? FontWeight.bold : FontWeight.normal,
-                  fontFeatures: const [FontFeature.tabularFigures()])),
+          child: Text(
+            value,
+            style: TextStyle(
+              fontSize: emphasize ? 18 : 14,
+              fontWeight: emphasize ? FontWeight.bold : FontWeight.normal,
+              fontFeatures: const [FontFeature.tabularFigures()],
+            ),
+          ),
         ),
       ],
     );
@@ -1605,8 +1718,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           .timeout(const Duration(seconds: 5));
 
       try {
-        await p2p.connectToHost(ip, port, guestName,
-            deviceId: deviceId, roomCode: roomCode);
+        await p2p.connectToHost(
+          ip,
+          port,
+          guestName,
+          deviceId: deviceId,
+          roomCode: roomCode,
+        );
       } catch (e) {
         return e is SocketException ? '호스트에 연결할 수 없습니다' : '연결 실패';
       }
@@ -1665,7 +1783,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       sync.reset();
       final result = await sync.syncWithHost();
       debugPrint(
-          '[GUEST-STARTUP] sync done: offset=${result.offsetMs}ms RTT=${result.rttMs}ms isSynced=${sync.isSynced}');
+        '[GUEST-STARTUP] sync done: offset=${result.offsetMs}ms RTT=${result.rttMs}ms isSynced=${sync.isSynced}',
+      );
       sync.startPeriodicSync();
       debugPrint('[GUEST-STARTUP] startPeriodicSync OK');
     } catch (e) {
@@ -1677,8 +1796,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // 2. sync 완료 후 audio-request → 호스트가 audio-url 응답 → 다운로드.
     if (!mounted || _mode != PlayerMode.speaker) return;
     debugPrint('[GUEST-STARTUP] audio-request');
-    ref.read(p2pServiceProvider)
-        .sendToHost({'type': 'audio-request', 'data': <String, dynamic>{}});
+    ref.read(p2pServiceProvider).sendToHost({
+      'type': 'audio-request',
+      'data': <String, dynamic>{},
+    });
   }
 
   /// 스피커 모드 종료 — disconnect + 단독 복귀 (재생 상태 유지).
@@ -1731,8 +1852,11 @@ Widget _buildInlineError(BuildContext context, String message) {
     ),
     child: Row(
       children: [
-        Icon(Icons.error_outline,
-            size: 18, color: Theme.of(context).colorScheme.onErrorContainer),
+        Icon(
+          Icons.error_outline,
+          size: 18,
+          color: Theme.of(context).colorScheme.onErrorContainer,
+        ),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
@@ -1936,10 +2060,9 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
                         _isSearching ? '주변 방을 찾는 중...' : '방을 찾을 수 없습니다',
                         style: TextStyle(
                           fontSize: 13,
-                          color: Theme.of(context)
-                              .colorScheme
-                              .onSurface
-                              .withValues(alpha: 0.5),
+                          color: Theme.of(
+                            context,
+                          ).colorScheme.onSurface.withValues(alpha: 0.5),
                         ),
                       ),
                     ),
@@ -1956,8 +2079,8 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
                         subtitle: Text(h.ip, maxLines: 1),
                         onTap: _isConnecting
                             ? null
-                            : () => _promptCodeAndConnect(
-                                ip: h.ip, port: h.port),
+                            : () =>
+                                  _promptCodeAndConnect(ip: h.ip, port: h.port),
                       );
                     },
                   ),
@@ -1994,7 +2117,9 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
                         return;
                       }
                       await _promptCodeAndConnect(
-                          ip: ip, port: P2PService.defaultPort);
+                        ip: ip,
+                        port: P2PService.defaultPort,
+                      );
                     },
               child: const Text('연결'),
             ),
@@ -2052,10 +2177,7 @@ class _CodeInputDialogState extends State<_CodeInputDialog> {
         autofocus: true,
         keyboardType: TextInputType.number,
         maxLength: 4,
-        decoration: const InputDecoration(
-          hintText: '4자리 숫자',
-          counterText: '',
-        ),
+        decoration: const InputDecoration(hintText: '4자리 숫자', counterText: ''),
         onSubmitted: (_) => _submit(),
       ),
       actions: [
@@ -2066,10 +2188,7 @@ class _CodeInputDialogState extends State<_CodeInputDialog> {
           },
           child: const Text('취소'),
         ),
-        TextButton(
-          onPressed: _submit,
-          child: const Text('연결'),
-        ),
+        TextButton(onPressed: _submit, child: const Text('연결')),
       ],
     );
   }

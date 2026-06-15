@@ -143,6 +143,7 @@
 - ✅ **방 만들기 WiFi 미연결 silent fail fix (v0.0.94, HISTORY (111))** — 2026-05-29 v0.0.90 SM-S947N "방 만들기 클릭 무반응" 보고는 사용자 진단으로 WiFi 미연결이 root cause로 확인. `_createRoom` 진입 시 `NativeAudioSyncService.getLocalIP()` 사전 체크 + SnackBar "WiFi 연결이 필요합니다" 안내로 마감. iOS 제어센터 WiFi 토글 케이스도 IP 직접 체크라 robust.
 
 - ✅ **온보딩 가이드 오버레이(coach mark) — v0.0.125 (HISTORY (151))**. UI 폴리싱 트랙 중 사용자 요청. `tutorial_coach_mark 1.3.3`(순수 Flutter, 추가 의존성 1개)로 8개 영역(파일선택/시크바/A-B/슬롯/음정/속도/재생/싱크모드) `GlobalKey`+RRect 하이라이트 + 해요체 설명. 첫 실행 자동(`hasSeenGuide_v1`, 강제 유지 결정) + AppBar `?` 버튼. 각 말풍선 "다음→/완료✓" 버튼(`next()`)으로 진행(오버레이 빈 곳 탭은 패키지 미수신). 손가락 탭 검증 OK(adb 탭은 불안정). → DECISIONS.
+- ✅ **작은 화면 대응 — PlayerScreen 스크롤 fallback + 큰 글꼴 wrap fix + iOS 세로 고정 (v0.0.126, HISTORY (153)/(154))**. 출시 전 점검 중 발견. ① body가 스크롤 없는 `Column`+`Spacer`라 짧은 화면(분할화면·큰 글꼴·구형폰)에서 RenderFlex overflow → `LayoutBuilder`+`SingleChildScrollView`+`ConstrainedBox(minHeight)`+`IntrinsicHeight`로 "충분하면 기존 Spacer 레이아웃 유지 / 짧으면 스크롤". ② 큰 글꼴서 SPEED `1.00x`·TRANSPOSE 값이 고정 width(52/36) 안에서 2줄 wrap → `FittedBox(scaleDown, centerRight)`로 폭 초과 시만 축소. ③ iOS도 세로 고정(`Info.plist` iPhone/iPad 모두 Portrait 단일 → Android와 일치). S947N 검증: 포트레이트 무변화·intrinsic assert 0·강제 단축화면(1080x1300+글꼴1.8) overflow 0·스크롤로 하단 컨트롤 접근·SPEED 한 줄 복원. 추정 최소 높이 body ~652dp. (※ 두 작업이지만 한 세션 묶음이라 patch 1회만 bump.)
 
 **🆕 §H Transpose PoC 트랙** (2026-05-29 시작) — `docs/SYNC_ALGORITHM_V2.md` §H 디자인.
 

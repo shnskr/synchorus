@@ -7022,6 +7022,40 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-16 (153) — 작은 화면 대응: PlayerScreen 스크롤 fallback (v0.0.126)
+
+**배경**: 출시 전 작은 화면 대응 점검. 사용자 "우리 앱 최소 필요 높이가 얼마야?" → PlayerScreen body 구조 조사.
+
+**조사**: body가 **스크롤 없는 단일 `Column` + 맨 위 `Spacer` 하나**(`player_screen.dart:424` 당시). Spacer가 남는 공간 흡수용 → 화면이 짧으면 Spacer가 0으로 collapse하고 그 아래 고정 콘텐츠가 넘쳐 RenderFlex overflow. 코드 라인 기준 고정 콘텐츠 합산 추정 ≈ **620dp**(콘텐츠) + Padding 32 = body **~652dp**, 윈도우 **~760dp**(AppBar 56 + 상태바/제스처 inset 포함). 개별 위젯 높이는 코드 근거지만 실제 렌더 ±10% 변동이라 추정.
+
+**도달 가능 케이스 정정**: Android는 `main.dart:16-17` `SystemChrome.setPreferredOrientations([portraitUp, portraitDown])`로 **세로 고정** → 가로 모드 overflow는 도달 불가(처음엔 가로를 주 위험으로 들었으나 정정). 실제 도달 = **분할 화면(split-screen)** + **글꼴 크게 설정**(accessibility, `fontScale` configChanges) + 구형/작은 폰. iOS Info.plist는 landscape 허용이라 iOS는 가로도 해당.
+
+**fix (v0.0.126)**: body를 `LayoutBuilder` + `SingleChildScrollView` + `ConstrainedBox(minHeight: constraints.maxHeight)` + `IntrinsicHeight`로 감쌈(`player_screen.dart:421~`). 표준 "fill if tall, scroll if short" 패턴 — 화면 충분하면 minHeight로 꽉 차 Spacer 살아 **기존 레이아웃 보존**, 짧으면 IntrinsicHeight가 실제 콘텐츠 높이 잡아 그만큼 스크롤. 내부 `_build*` 위젯은 무수정.
+
+**검증** (SM S947N debug):
+- 포트레이트 정상(1080x2340): 기존과 동일 레이아웃, Flutter 예외 0.
+- IntrinsicHeight + Slider 조합의 "intrinsic 미지원 assert" 우려 → **에러 0** 확인(logcat `intrinsic`/`does not support returning`/`was not laid out` 검색 무결과).
+- 짧은 화면 강제(`wm size 1080x1300` + `font_scale 1.8`): **overflow 노란줄 0**, Spacer collapse + 우측 스크롤바 + 하단 컨트롤이 화면 아래로. 위로 스크롤 시 재생/skip/mute 컨트롤 전부 정상 노출. AppBar 고정.
+- 검증 후 기기 설정 원복(wm size reset / font_scale 1.0 / rotation auto).
+
+**빌드**: v0.0.126.
+
+---
+
+### 2026-06-16 (154) — iOS 세로 고정 + 큰 글꼴 SPEED/TRANSPOSE 2줄 wrap fix (v0.0.126, (153)과 동일 버전)
+
+**배경**: (153) 검증 캡처에서 큰 글꼴(fontScale 1.8) 시 `SPEED 1.00x`가 `1.0`/`0x` **2줄로 wrap**되는 것 + iOS도 Android처럼 세로 고정 요청.
+
+**fix 1 — iOS 세로 고정**: `ios/Runner/Info.plist` `UISupportedInterfaceOrientations`(iPhone)와 `~ipad`를 모두 `UIInterfaceOrientationPortrait` 단일로(landscape/upsideDown 제거). Android는 이미 `main.dart:16-17` `setPreferredOrientations([portraitUp, portraitDown])`로 세로 고정 → **양 플랫폼 세로 고정 일치**. (iOS Info.plist가 setPreferredOrientations보다 우선이라 plist 수정 필요했음.)
+
+**fix 2 — 값 텍스트 2줄 wrap**: root cause = SPEED 값 `Text`가 `SizedBox(width: 52)`(위치 고정용, `player_screen.dart`)에 갇혀 큰 글꼴 시 intrinsic width가 52 초과 → wrap. TRANSPOSE 값도 동일(width 36). 둘 다 `FittedBox(fit: BoxFit.scaleDown, alignment: centerRight)`로 감쌈 — 폭 초과 시에만 축소(평소 무변화), 우측정렬·width 고정 유지. clip/ellipsis 아니라 축소라 글자 안 잘림.
+
+**검증** (SM S947N, fontScale 1.8): SPEED `1.00x` **한 줄** 복원(이전 2줄) + TRANSPOSE 정상. analyze 통과. 검증 후 font_scale 1.0 원복.
+
+**빌드**: v0.0.126 ((153)과 같은 버전 — 한 세션 내 작은 화면 대응 묶음이라 patch 1회만 bump).
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
