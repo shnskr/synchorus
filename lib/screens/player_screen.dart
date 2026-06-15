@@ -1365,18 +1365,42 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   /// 설정 화면 열기. 가이드는 GlobalKey가 이 화면에 있어 SettingsScreen이 직접
   /// 못 띄움 → pop('showGuide') 신호를 받아 여기서 _showGuide() 실행.
   Future<void> _openSettings() async {
+    // PlayerScreen route의 secondaryAnimation = 위에 덮이는 SettingsScreen 전환을
+    // 반영(0=설정 없음, 1=완전히 덮임). pop 후 dismissed(0) 도달 = 전환 완료 신호.
+    final route = ModalRoute.of(context);
     final result = await Navigator.of(
       context,
     ).push<String>(MaterialPageRoute(builder: (_) => const SettingsScreen()));
-    if (result == 'showGuide' && mounted) {
-      // 설정 화면 pop 전환(기본 ~300ms)이 끝나고 메인 화면 레이아웃이 정착한 뒤
-      // 가이드 표시. `await push`는 pop이 '호출'되는 순간 반환되어 전환 애니메이션이
-      // 아직 진행 중일 수 있음 → 그 사이 _showGuide가 GlobalKey renderBox를 읽으면
-      // 첫 타겟(카드) highlight가 좁게 좌측으로 잡힘(전환 중 레이아웃 미정착).
-      // 첫 실행 가이드는 전환이 없어 정상이라 이 경로에서만 발생. 전환+여유 대기.
-      await Future.delayed(const Duration(milliseconds: 400));
-      if (mounted) _showGuide();
+    if (result != 'showGuide' || !mounted) return;
+
+    // 설정 화면 pop 전환이 완전히 끝나고 메인 레이아웃이 정착한 뒤 가이드 표시.
+    // `await push`는 pop이 '호출'되는 순간 반환되어 전환 애니메이션이 아직 진행
+    // 중일 수 있음 → 그 사이 _showGuide가 GlobalKey renderBox를 읽으면 첫 타겟(카드)
+    // highlight가 좁게 좌측으로 잡힘(전환 중 레이아웃 미정착). 첫 실행 가이드는 전환이
+    // 없어 정상이라 이 경로에서만 발생.
+    //
+    // 고정 delay는 기기/애니메이션 배율마다 전환 시간이 달라 부정확 → secondaryAnimation
+    // 이 dismissed될 때까지 리스너로 대기(애니메이션 꺼진 환경은 즉시 dismissed라 대기 0).
+    final anim = route?.secondaryAnimation;
+    if (anim != null && anim.status != AnimationStatus.dismissed) {
+      final completer = Completer<void>();
+      void onStatus(AnimationStatus s) {
+        if (s == AnimationStatus.dismissed) {
+          anim.removeStatusListener(onStatus);
+          if (!completer.isCompleted) completer.complete();
+        }
+      }
+
+      anim.addStatusListener(onStatus);
+      // 안전장치: 전환이 비정상적으로 안 끝나도 최대 1초 후 진행.
+      await completer.future.timeout(
+        const Duration(seconds: 1),
+        onTimeout: () => anim.removeStatusListener(onStatus),
+      );
     }
+    // 전환 완료 후 한 프레임 더 — 최종 레이아웃 정착 보장.
+    await WidgetsBinding.instance.endOfFrame;
+    if (mounted) _showGuide();
   }
 
   void _showGuide() {

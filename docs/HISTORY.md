@@ -7085,9 +7085,9 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 **root cause**: `_openSettings`의 `await Navigator.push`는 SettingsScreen이 **pop '호출'되는 순간 반환**되는데, 이때 pop 전환 애니메이션(기본 ~300ms)이 아직 진행 중 → 메인 화면 레이아웃 미정착 상태에서 `_showGuide()`가 GlobalKey `renderBox`를 읽어 첫 타겟 크기/위치가 틀어짐(0.75~0.8배 축소). 첫 실행은 전환이 없어 정상.
 
-**fix (v0.0.128)**: `_openSettings`에서 `result=='showGuide'` 시 `await Future.delayed(400ms)`(전환+여유) 후 `_showGuide()` 호출. 검증: 다시보기 focus **812→(21,1058) full width**로 정상화(첫 실행과 동일), 픽셀+육안 확인.
+**fix (v0.0.128 → v0.0.129 보강)**: `_openSettings`에서 `result=='showGuide'` 시 전환 완료 대기 후 `_showGuide()`. v0.0.128은 `Future.delayed(400ms)` 고정이었으나 사용자 지적("모든 기기에서 동일하게 동작하냐")대로 **느린 기기/애니메이션 배율에 부정확** → v0.0.129에서 **리스너 기반**으로 교체: PlayerScreen route의 `secondaryAnimation`(=위에 덮인 SettingsScreen 전환, dismissed=완전히 닫힘)에 status 리스너 달아 dismissed까지 대기 + `endOfFrame` 1프레임 + 안전 timeout 1s. 기기/배율 무관, 애니메이션 꺼진 환경은 즉시 진행. 검증: 다시보기 focus **812→(24,1055) full width**(첫 실행과 동일), **애니메이션 10배(전환 ~3초)에서도 (26,1053) 정상**(고정 400ms였다면 깨질 상황) — 픽셀 측정 확인.
 
-**빌드**: v0.0.128.
+**빌드**: v0.0.128(고정 delay) → **v0.0.129(리스너 robust)**.
 
 ---
 
