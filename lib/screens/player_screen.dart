@@ -1368,7 +1368,15 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final result = await Navigator.of(
       context,
     ).push<String>(MaterialPageRoute(builder: (_) => const SettingsScreen()));
-    if (result == 'showGuide' && mounted) _showGuide();
+    if (result == 'showGuide' && mounted) {
+      // 설정 화면 pop 전환(기본 ~300ms)이 끝나고 메인 화면 레이아웃이 정착한 뒤
+      // 가이드 표시. `await push`는 pop이 '호출'되는 순간 반환되어 전환 애니메이션이
+      // 아직 진행 중일 수 있음 → 그 사이 _showGuide가 GlobalKey renderBox를 읽으면
+      // 첫 타겟(카드) highlight가 좁게 좌측으로 잡힘(전환 중 레이아웃 미정착).
+      // 첫 실행 가이드는 전환이 없어 정상이라 이 경로에서만 발생. 전환+여유 대기.
+      await Future.delayed(const Duration(milliseconds: 400));
+      if (mounted) _showGuide();
+    }
   }
 
   void _showGuide() {
