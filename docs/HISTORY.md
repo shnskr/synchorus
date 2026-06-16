@@ -7091,6 +7091,30 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-17 (157) — 디자인 시스템 적용: Pretendard/DM Mono 폰트 + 라벤더/로즈 토큰 + Material Symbols Rounded 아이콘 (v0.0.130)
+
+**배경**: 사용자가 외부에서 만든 **"Synchorus Design System"**(바탕화면, Claude DesignSync 산출물 — 앱의 Material-You deepPurple dark 스킴을 역설계해 정리)을 앱에 적용. 컬러는 마음에 드나 로고/아이콘 이미지(노래하는 음표 마스코트)는 비선호 → **폰트·색·모양만 코드 적용, 로고/아이콘 이미지는 사용자가 따로 제작**으로 분리. (Gemini 제작 `logo.png`를 사용자가 선호 — 탐색용 `design_preview/`는 사용자가 삭제, throwaway)
+
+**① 폰트 (번들)**: 디자인 시스템 폰트가 woff2(웹)라 Flutter 불가 → **Pretendard Variable TTF + DM Mono 400/500 TTF**를 공식 배포처(GitHub/google-fonts, 둘 다 OFL)에서 받아 `assets/fonts/`에 번들(+ OFL 라이선스 동봉), pubspec `fonts:` 등록. Pretendard가 google_fonts에 없어 google_fonts 대신 **둘 다 직접 번들**(오프라인 P2P 앱에 적합). 역할: **글자=Pretendard, 숫자=DM Mono(tabular)**. PretendardVariable.ttf 6.4MB.
+
+**② 테마 (lib/theme/ 4파일 신설)**: `app_colors.dart`(colors.css 토큰 — 라벤더 `#CBB4FF`/로즈 `#F2B8CE`/ink `#100E15` + surface/semantic, 알파값은 const 위해 0xAARRGGBB 선계산) · `app_typography.dart`(타입스케일 TextTheme + `monoStyle()`/`roomCode`/`eyebrow` 헬퍼) · `app_dimens.dart`(radii/spacing/motion/AppShadows glow) · `app_theme.dart`(ColorScheme.fromSeed+copyWith로 토큰 매핑 + 컴포넌트 테마). `main.dart` → `AppTheme.dark` 교체(기존 `fromSeed(deepPurple)` 삭제), 다크 고정. 화면들이 `Theme.of`(15곳)로 상속해 **색·폰트 전역 자동 적용**.
+
+**③ player_screen 폴리싱**: 숫자 **DM Mono**(시크바 시간/방코드/IP/±반음/×속도/A-B 버튼/슬롯 버튼) · 재생버튼+방코드 카드 **라벤더 glow**(`AppShadows.glowSoft`/`glowPrimary`) · TRANSPOSE/SPEED **eyebrow** · 하드코딩 색 10곳 → 토큰(Sync Info grey→textLow, 종료버튼 red[400]→danger coral, 가이드 흰색→textHi/primary, coach scrim black→ink950).
+
+**④ 아이콘 → Material Symbols Rounded**: `material_symbols_icons ^4.2951.0` 추가. `Icons.* → Symbols.*_rounded` **25개 전부 교체**(player_screen + settings_screen). 디자인 시스템 권장 Rounded 변형. **play/pause만 `fill:1`**(디자인 시스템: "play/pause는 FILL 1"). 기능 버튼은 폰트 글리프라 이미지 0개. ※ 인앱 버튼 아이콘과 로고/앱아이콘은 별개 — 로고/앱아이콘은 이미지 작업.
+
+**⑤ 가이드 포커스 가시성**: 사용자 보고 "다크라 포커스 어디 잡혔는지 안 보임" → `TargetFocus.borderSide` 라벤더(width 3) + 기본 pulse로 강조.
+
+**검증**: SM S947N(Android 16) debug 설치·육안 확인 — 색/폰트/아이콘 정상, RenderFlex overflow 0(작은화면 스크롤 fallback (153) + TRANSPOSE/SPEED FittedBox가 폰트 폭 변화 흡수). `flutter analyze lib` 0건.
+
+**저작권 확인(WebSearch)**: 폰트 OFL(번들·상업 OK). AI 생성 이미지(Gemini/Claude)는 상업 사용 권리 있음(Google 약관 소유권 귀속/Anthropic "Customer owns Outputs")이나 순수 AI 생성물은 저작권 등록(독점권)은 안 될 수 있음 + 상표 유사 주의 → 로고 확정 전 상표/역이미지 검색 권장.
+
+**빌드**: v0.0.130 (작업 중 0.0.131까지 갔다가 "디자인 세션 전체 = patch 1회" 원칙으로 0.0.130으로 정리).
+
+**남은(이미지 작업 — 사용자 제작 후 세팅)**: ⓐ 앱 런처 아이콘(1024² 마스터 사용자가 만듦 → `flutter_launcher_icons` **미적용**) ⓑ 인앱 로고 마크(헤더 "싱코러스" 좌측) ⓒ 스플래시(1152² 투명, 중앙 768, `flutter_native_splash` + 다크배경 — 현재 기본 흰 launch 화면) ⓓ Android 알림 흰 실루엣(현재 `ic_launcher` 컬러라 상태바 뭉개짐). 스토어 등록물(피처그래픽 1024×500/스크린샷)·release 서명은 별도 출시 트랙.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

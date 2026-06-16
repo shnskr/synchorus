@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_symbols_icons/symbols.dart';
 
 import '../providers/app_providers.dart';
 
@@ -67,7 +68,10 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                   children: [
                     Row(
                       children: [
-                        Icon(Icons.workspace_premium, color: scheme.primary),
+                        Icon(
+                          Symbols.workspace_premium_rounded,
+                          color: scheme.primary,
+                        ),
                         const SizedBox(width: 8),
                         const Text(
                           'Synchorus 프로',
@@ -83,7 +87,7 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
                       Row(
                         children: [
                           Icon(
-                            Icons.check_circle,
+                            Symbols.check_circle_rounded,
                             color: scheme.primary,
                             size: 20,
                           ),
@@ -134,9 +138,9 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
             // ── 사용 가이드 ────────────────────────────────────────────
             Card(
               child: ListTile(
-                leading: const Icon(Icons.help_outline),
+                leading: const Icon(Symbols.help_rounded),
                 title: const Text('사용법 가이드 다시 보기'),
-                trailing: const Icon(Icons.chevron_right),
+                trailing: const Icon(Symbols.chevron_right_rounded),
                 onTap: () => Navigator.pop(context, 'showGuide'),
               ),
             ),

@@ -10,6 +10,7 @@ import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'providers/app_providers.dart';
 import 'screens/player_screen.dart';
 import 'services/audio_handler.dart';
+import 'theme/app_theme.dart';
 
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -70,13 +71,9 @@ class _SynchorusAppState extends ConsumerState<SynchorusApp> {
     });
     return MaterialApp(
       title: 'Synchorus',
-      theme: ThemeData(
-        colorScheme: ColorScheme.fromSeed(
-          seedColor: Colors.deepPurple,
-          brightness: Brightness.dark,
-        ),
-        useMaterial3: true,
-      ),
+      theme: AppTheme.dark, // 디자인 시스템 다크 테마 (lib/theme/)
+      darkTheme: AppTheme.dark,
+      themeMode: ThemeMode.dark, // 다크 전용
       home: const PlayerScreen(),
     );
   }

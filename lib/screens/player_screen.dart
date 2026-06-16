@@ -9,6 +9,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:material_symbols_icons/symbols.dart';
 import 'package:shared_preferences/shared_preferences.dart';
 import 'package:tutorial_coach_mark/tutorial_coach_mark.dart';
 
@@ -16,6 +17,9 @@ import '../providers/app_providers.dart';
 import '../services/discovery_service.dart';
 import '../services/native_audio_sync_service.dart';
 import '../services/p2p_service.dart';
+import '../theme/app_colors.dart';
+import '../theme/app_dimens.dart';
+import '../theme/app_typography.dart';
 import '../widgets/banner_ad_widget.dart';
 import 'settings_screen.dart';
 
@@ -411,13 +415,13 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         actions: [
           IconButton(
             tooltip: '설정',
-            icon: const Icon(Icons.settings),
+            icon: const Icon(Symbols.settings_rounded),
             onPressed: _openSettings,
           ),
           IconButton(
             key: _keyP2P,
             tooltip: 'P2P 모드',
-            icon: const Icon(Icons.group_add),
+            icon: const Icon(Symbols.group_add_rounded),
             onPressed: _isModeTransitioning ? null : _showModeSheet,
           ),
         ],
@@ -556,7 +560,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               );
             } else {
               title = fileName ?? (_isController ? '오디오를 선택하세요' : '음악 대기 중');
-              leading = const Icon(Icons.music_note, size: 40);
+              leading = const Icon(Symbols.music_note_rounded, size: 40);
             }
             return Card(
               child: ListTile(
@@ -646,8 +650,19 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                               ? Duration(milliseconds: _dragValue.toInt())
                               : position,
                         ),
+                        style: AppTypography.monoStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                          color: AppColors.textHi,
+                        ),
                       ),
-                      Text(_formatDuration(duration)),
+                      Text(
+                        _formatDuration(duration),
+                        style: AppTypography.monoStyle(
+                          fontSize: 14,
+                          color: AppColors.textMid,
+                        ),
+                      ),
                     ],
                   ),
                 ),
@@ -678,16 +693,27 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   onPressed: (_isController && hasAudio)
                       ? () => _skipSeconds(-5)
                       : null,
-                  icon: const Icon(Icons.replay_5),
+                  icon: const Icon(Symbols.replay_5_rounded),
                 ),
                 const SizedBox(width: 16),
-                IconButton(
-                  iconSize: 64,
-                  onPressed: (_isController && hasAudio) ? _togglePlay : null,
-                  icon: Icon(
-                    playing
-                        ? Icons.pause_circle_filled
-                        : Icons.play_circle_filled,
+                // 강조 = 라벤더 glow (디자인 시스템: 재생 버튼·방 코드에만).
+                // 재생 가능할 때만 후광 — 비활성(게스트/무파일)이면 끔.
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    boxShadow: (_isController && hasAudio)
+                        ? AppShadows.glowSoft
+                        : null,
+                  ),
+                  child: IconButton(
+                    iconSize: 64,
+                    onPressed: (_isController && hasAudio) ? _togglePlay : null,
+                    icon: Icon(
+                      playing
+                          ? Symbols.pause_circle_rounded
+                          : Symbols.play_circle_rounded,
+                      fill: 1, // 디자인 시스템: play/pause만 채움(FILL 1)
+                    ),
                   ),
                 ),
                 const SizedBox(width: 16),
@@ -696,7 +722,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                   onPressed: (_isController && hasAudio)
                       ? () => _skipSeconds(5)
                       : null,
-                  icon: const Icon(Icons.forward_5),
+                  icon: const Icon(Symbols.forward_5_rounded),
                 ),
               ],
             ),
@@ -705,7 +731,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               child: IconButton(
                 iconSize: 28,
                 onPressed: hasAudio ? _toggleMute : null,
-                icon: Icon(_muted ? Icons.volume_off : Icons.volume_up),
+                icon: Icon(
+                  _muted
+                      ? Symbols.volume_off_rounded
+                      : Symbols.volume_up_rounded,
+                ),
               ),
             ),
           ],
@@ -800,7 +830,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         IconButton(
           tooltip: 'A-B 해제',
           icon: Icon(
-            Icons.cancel_outlined,
+            Symbols.cancel_rounded,
             color: _abActive
                 ? Theme.of(context).colorScheme.primary
                 : (_abAnySet
@@ -823,7 +853,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     // duration이 1시간 넘는 곡이면 placeholder도 HH:MM:SS 길이로 reserve.
     final dur = _audio.currentDuration ?? Duration.zero;
     final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
-    const tabular = TextStyle(fontFeatures: [FontFeature.tabularFigures()]);
+    // DM Mono + tabular. color는 미지정 → 버튼 foregroundColor(A-B=primary/
+    // 슬롯=tertiary) 상속. label('A'/'B'/'1')도 Latin이라 DM Mono로 잘 렌더됨.
+    const tabular = TextStyle(
+      fontFamily: AppTypography.mono,
+      fontFeatures: [FontFeature.tabularFigures()],
+    );
     return OutlinedButton(
       onPressed: enabled ? () => _setAbPoint(isA: isA) : null,
       onLongPress: (enabled && hasPoint) ? () => _clearAbPoint(isA: isA) : null,
@@ -872,7 +907,12 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     final hasPoint = point != null;
     final dur = _audio.currentDuration ?? Duration.zero;
     final placeholderTime = dur.inHours > 0 ? '0:00:00' : '00:00';
-    const tabular = TextStyle(fontFeatures: [FontFeature.tabularFigures()]);
+    // DM Mono + tabular. color는 미지정 → 버튼 foregroundColor(A-B=primary/
+    // 슬롯=tertiary) 상속. label('A'/'B'/'1')도 Latin이라 DM Mono로 잘 렌더됨.
+    const tabular = TextStyle(
+      fontFamily: AppTypography.mono,
+      fontFeatures: [FontFeature.tabularFigures()],
+    );
     final label = '${idx + 1}';
     return OutlinedButton(
       onPressed: enabled ? () => _onSlotTap(idx) : null,
@@ -912,14 +952,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(
-              'TRANSPOSE',
-              style: TextStyle(
-                fontSize: 10,
-                letterSpacing: 1.2,
-                color: scheme.onSurface.withValues(alpha: 0.6),
-              ),
-            ),
+            const Text('TRANSPOSE', style: AppTypography.eyebrow),
             const SizedBox(width: 12),
             // 우측정렬 + tabularFigures: 부호(+/−) 유무·자릿수가 바뀌어도
             // 오른쪽 끝(아이콘 옆) 기준으로 값 위치가 고정됨.
@@ -933,11 +966,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 child: Text(
                   label,
                   textAlign: TextAlign.right,
-                  style: TextStyle(
+                  style: AppTypography.monoStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: semitone != 0 ? scheme.primary : null,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                    fontWeight: FontWeight.w500,
+                    color: semitone != 0 ? scheme.primary : AppColors.textHi,
                   ),
                 ),
               ),
@@ -946,7 +978,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // 아이콘은 항상 같은 자리에 두되 기본값(0)일 땐 비활성
             // (onPressed=null → disabled 회색). 등장/소멸이 없어 흔들림 없음.
             IconButton(
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Symbols.refresh_rounded),
               iconSize: 18,
               visualDensity: VisualDensity.compact,
               padding: EdgeInsets.zero,
@@ -960,7 +992,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Row(
           children: [
             IconButton(
-              icon: const Icon(Icons.remove),
+              icon: const Icon(Symbols.remove_rounded),
               iconSize: 20,
               onPressed: hasAudio && semitone > -12
                   ? () => _adjustTranspose(-1)
@@ -984,7 +1016,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.add),
+              icon: const Icon(Symbols.add_rounded),
               iconSize: 20,
               onPressed: hasAudio && semitone < 12
                   ? () => _adjustTranspose(1)
@@ -1020,14 +1052,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Row(
           mainAxisAlignment: MainAxisAlignment.center,
           children: [
-            Text(
-              'SPEED',
-              style: TextStyle(
-                fontSize: 10,
-                letterSpacing: 1.2,
-                color: scheme.onSurface.withValues(alpha: 0.6),
-              ),
-            ),
+            const Text('SPEED', style: AppTypography.eyebrow),
             const SizedBox(width: 12),
             // 우측정렬 + tabularFigures: 값 폭이 바뀌어도 오른쪽 끝
             // (아이콘 옆) 기준으로 위치가 고정됨.
@@ -1042,11 +1067,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 child: Text(
                   label,
                   textAlign: TextAlign.right,
-                  style: TextStyle(
+                  style: AppTypography.monoStyle(
                     fontSize: 16,
-                    fontWeight: FontWeight.bold,
-                    color: !isDefault ? scheme.primary : null,
-                    fontFeatures: const [FontFeature.tabularFigures()],
+                    fontWeight: FontWeight.w500,
+                    color: !isDefault ? scheme.primary : AppColors.textHi,
                   ),
                 ),
               ),
@@ -1055,7 +1079,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // 아이콘은 항상 같은 자리에 두되 기본값(1.00x)일 땐 비활성
             // (onPressed=null → disabled 회색). 등장/소멸이 없어 흔들림 없음.
             IconButton(
-              icon: const Icon(Icons.refresh),
+              icon: const Icon(Symbols.refresh_rounded),
               iconSize: 18,
               visualDensity: VisualDensity.compact,
               padding: EdgeInsets.zero,
@@ -1069,7 +1093,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Row(
           children: [
             IconButton(
-              icon: const Icon(Icons.remove),
+              icon: const Icon(Symbols.remove_rounded),
               iconSize: 20,
               onPressed: hasAudio && _audio.playbackSpeedX1000 > 500
                   ? () => _adjustSpeed(-50)
@@ -1096,7 +1120,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               ),
             ),
             IconButton(
-              icon: const Icon(Icons.add),
+              icon: const Icon(Symbols.add_rounded),
               iconSize: 20,
               onPressed: hasAudio && _audio.playbackSpeedX1000 < 2000
                   ? () => _adjustSpeed(50)
@@ -1140,10 +1164,10 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               children: [
                 Text(
                   'Sync Info',
-                  style: TextStyle(
+                  style: const TextStyle(
                     fontWeight: FontWeight.bold,
                     fontSize: 12,
-                    color: Colors.grey[600],
+                    color: AppColors.textLow,
                   ),
                 ),
                 const SizedBox(height: 4),
@@ -1248,7 +1272,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Text(
           title,
           style: const TextStyle(
-            color: Colors.white,
+            color: AppColors.textHi,
             fontSize: 19,
             fontWeight: FontWeight.bold,
           ),
@@ -1257,7 +1281,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         Text(
           body,
           style: const TextStyle(
-            color: Colors.white,
+            color: AppColors.textHi,
             fontSize: 15,
             height: 1.4,
           ),
@@ -1268,8 +1292,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           child: TextButton(
             onPressed: () => _coachMark?.next(),
             style: TextButton.styleFrom(
-              foregroundColor: Colors.white,
-              backgroundColor: Colors.white.withValues(alpha: 0.18),
+              foregroundColor: AppColors.primary,
+              backgroundColor: AppColors.primarySoft,
               padding: const EdgeInsets.symmetric(horizontal: 18, vertical: 8),
             ),
             child: Text(
@@ -1297,6 +1321,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       keyTarget: key,
       shape: ShapeLightFocus.RRect,
       radius: 12,
+      // 다크 UI라 포커스 구멍이 배경과 잘 구분 안 됨 → 라벤더 테두리로 강조.
+      // pulseEnable(기본 on)과 합쳐 깜빡이며 "여기!"가 또렷하게 보임.
+      borderSide: const BorderSide(color: AppColors.primary, width: 3),
       contents: [
         TargetContent(
           align: align,
@@ -1465,7 +1492,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     ];
     _coachMark = TutorialCoachMark(
       targets: targets,
-      colorShadow: Colors.black,
+      colorShadow: AppColors.ink950, // violet-tinted near-black scrim
       opacityShadow: 0.85,
       textSkip: '건너뛰기',
       paddingFocus: 8,
@@ -1520,7 +1547,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                       top: -8,
                       right: -8,
                       child: IconButton(
-                        icon: const Icon(Icons.close),
+                        icon: const Icon(Symbols.close_rounded),
                         onPressed: () => Navigator.pop(sheetContext),
                         tooltip: '닫기',
                         visualDensity: VisualDensity.compact,
@@ -1566,7 +1593,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             // (_mode=host)이 sheet rebuild → switch에서 _buildHostSheet으로 전환.
             // OutlinedButton — 스피커 검색 버튼과 시각 통일 (사용자 요청).
             onPressed: () => _enterHostMode(),
-            icon: const Icon(Icons.cast_connected),
+            icon: const Icon(Symbols.cast_connected_rounded),
             label: const Padding(
               padding: EdgeInsets.symmetric(vertical: 8),
               child: Text('호스트 모드'),
@@ -1583,7 +1610,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           const SizedBox(height: 8),
           Row(
             children: [
-              const Icon(Icons.speaker, size: 18),
+              const Icon(Symbols.speaker_rounded, size: 18),
               const SizedBox(width: 8),
               Text(
                 '스피커 모드',
@@ -1620,18 +1647,25 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           textAlign: TextAlign.center,
         ),
         const SizedBox(height: 12),
-        Card(
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                _infoRow('입장 코드', _roomCode ?? '—', emphasize: true),
-                const SizedBox(height: 8),
-                _infoRow('IP', _hostIp ?? '—'),
-                const SizedBox(height: 8),
-                _infoRow('접속자', '${_peerCount + 1}명'),
-              ],
+        // 방 코드 카드 — 라벤더 glow로 강조 (디자인 시스템).
+        DecoratedBox(
+          decoration: const BoxDecoration(
+            borderRadius: AppRadii.cardBorder,
+            boxShadow: AppShadows.glowPrimary,
+          ),
+          child: Card(
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  _infoRow('입장 코드', _roomCode ?? '—', emphasize: true),
+                  const SizedBox(height: 8),
+                  _infoRow('IP', _hostIp ?? '—', mono: true),
+                  const SizedBox(height: 8),
+                  _infoRow('접속자', '${_peerCount + 1}명'),
+                ],
+              ),
             ),
           ),
         ),
@@ -1642,8 +1676,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             await _exitHostMode();
           },
           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red[400],
-            foregroundColor: Colors.white,
+            backgroundColor: AppColors.danger,
+            foregroundColor: AppColors.ink950,
           ),
           child: const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
@@ -1671,9 +1705,9 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                _infoRow('호스트 IP', _connectedHostIp ?? '—'),
+                _infoRow('호스트 IP', _connectedHostIp ?? '—', mono: true),
                 const SizedBox(height: 8),
-                _infoRow('입장 코드', _connectedRoomCode ?? '—'),
+                _infoRow('입장 코드', _connectedRoomCode ?? '—', mono: true),
                 const SizedBox(height: 8),
                 _infoRow('접속자', '${_peerCount + 1}명'),
               ],
@@ -1687,8 +1721,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
             await _exitSpeakerMode();
           },
           style: ElevatedButton.styleFrom(
-            backgroundColor: Colors.red[400],
-            foregroundColor: Colors.white,
+            backgroundColor: AppColors.danger,
+            foregroundColor: AppColors.ink950,
           ),
           child: const Padding(
             padding: EdgeInsets.symmetric(vertical: 8),
@@ -1699,31 +1733,40 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     );
   }
 
-  Widget _infoRow(String label, String value, {bool emphasize = false}) {
+  /// 정보 행. [emphasize]=방 코드(hero mono+라벤더), [mono]=IP 등 숫자값.
+  /// 한글이 섞인 값('3명' 등)은 mono를 켜지 말 것 (DM Mono엔 한글 글리프 없음).
+  Widget _infoRow(
+    String label,
+    String value, {
+    bool emphasize = false,
+    bool mono = false,
+  }) {
+    final TextStyle valueStyle;
+    if (emphasize) {
+      valueStyle = AppTypography.monoStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w500,
+        color: AppColors.primary,
+        letterSpacing: 2,
+      );
+    } else if (mono) {
+      valueStyle = AppTypography.monoStyle(
+        fontSize: 14,
+        color: AppColors.textHi,
+      );
+    } else {
+      valueStyle = const TextStyle(fontSize: 14, color: AppColors.textHi);
+    }
     return Row(
       children: [
         SizedBox(
           width: 90,
           child: Text(
             label,
-            style: TextStyle(
-              fontSize: 13,
-              color: Theme.of(
-                context,
-              ).colorScheme.onSurface.withValues(alpha: 0.6),
-            ),
+            style: const TextStyle(fontSize: 13, color: AppColors.textMid),
           ),
         ),
-        Expanded(
-          child: Text(
-            value,
-            style: TextStyle(
-              fontSize: emphasize ? 18 : 14,
-              fontWeight: emphasize ? FontWeight.bold : FontWeight.normal,
-              fontFeatures: const [FontFeature.tabularFigures()],
-            ),
-          ),
-        ),
+        Expanded(child: Text(value, style: valueStyle)),
       ],
     );
   }
@@ -1992,7 +2035,7 @@ Widget _buildInlineError(BuildContext context, String message) {
     child: Row(
       children: [
         Icon(
-          Icons.error_outline,
+          Symbols.error_rounded,
           size: 18,
           color: Theme.of(context).colorScheme.onErrorContainer,
         ),
@@ -2179,7 +2222,9 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
             Expanded(
               child: OutlinedButton.icon(
                 onPressed: _isConnecting ? null : _toggleSearch,
-                icon: Icon(_isSearching ? Icons.stop : Icons.search),
+                icon: Icon(
+                  _isSearching ? Symbols.stop_rounded : Symbols.search_rounded,
+                ),
                 label: Text(_isSearching ? '검색 중단' : '호스트 검색'),
               ),
             ),
@@ -2213,7 +2258,7 @@ class _SpeakerModePickerState extends State<_SpeakerModePicker> {
                       final h = _hosts[i];
                       return ListTile(
                         dense: true,
-                        leading: const Icon(Icons.cast),
+                        leading: const Icon(Symbols.cast_rounded),
                         title: Text(h.name, maxLines: 1),
                         subtitle: Text(h.ip, maxLines: 1),
                         onTap: _isConnecting
