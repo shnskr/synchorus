@@ -123,6 +123,7 @@
 - [x] 16KB page size 대응 (SM S947N, HISTORY)
 - [x] 핵심 기능(재생/시크/A-B/슬롯/음정/속도/P2P/온보딩) + sync 1배속 양호 + iOS 크래시 fix(v0.0.121)
 - [x] **디자인 시스템 적용 (v0.0.130, HISTORY (157))** — Pretendard/DM Mono 폰트 + 라벤더/로즈/ink 토큰 + Material Symbols Rounded 아이콘 + glow/eyebrow/mono숫자. S947N 검증, overflow 0. (이미지 에셋은 위 🔴 참조)
+- [x] **출시 전 코드 정리 (HISTORY (159))** — 죽은 코드(room.dart·미사용 게터)·미사용 의존성(connectivity_plus) 제거 + 디버그/측정 계측 게이팅(로그 release-off / CSV `--dart-define=MEASURE=true` 게이트). ⚠️ **측정 재개 시**: `flutter build --profile --dart-define=MEASURE=true` 라야 CSV 로거 가동(평소 빌드는 CSV 안 만듦). 로그는 debug/profile 빌드에서 그대로 보임.
 
 ---
 

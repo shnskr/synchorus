@@ -1,8 +1,8 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
+import 'package:flutter/foundation.dart';
 import 'package:nsd/nsd.dart' as nsd;
 
 class DiscoveredHost {
@@ -49,8 +49,7 @@ class DiscoveryService {
     required int tcpPort,
     required String roomCode,
   }) async {
-    // ignore: avoid_print
-    print('[DISCOVERY] startBroadcast: name=$hostName port=$tcpPort code=$roomCode');
+    debugPrint('[DISCOVERY] startBroadcast: name=$hostName port=$tcpPort code=$roomCode');
     // 이전 호스트 등록만 정리 (게스트 검색은 별개 — 같은 디바이스에서 검색 활성이
     // 가능성은 낮지만 안전상).
     await stopBroadcast();
@@ -63,11 +62,9 @@ class DiscoveryService {
           _txtRoomCodeKey: Uint8List.fromList(utf8.encode(roomCode)),
         },
       ));
-      // ignore: avoid_print
-      print('[DISCOVERY] startBroadcast OK: registered=${_registration != null}');
+      debugPrint('[DISCOVERY] startBroadcast OK: registered=${_registration != null}');
     } catch (e) {
-      // ignore: avoid_print
-      print('[DISCOVERY] startBroadcast FAILED: $e');
+      debugPrint('[DISCOVERY] startBroadcast FAILED: $e');
       rethrow;
     }
   }
@@ -76,8 +73,7 @@ class DiscoveryService {
   /// `addresses`에 IPv4가 들어오면 emit. 같은 호스트가 여러 번 found될 수 있어
   /// 호출자가 중복 처리 책임.
   Stream<DiscoveredHost> discoverHosts() async* {
-    // ignore: avoid_print
-    print('[DISCOVERY] discoverHosts: starting nsd discovery type=$serviceType');
+    debugPrint('[DISCOVERY] discoverHosts: starting nsd discovery type=$serviceType');
     // 이전 검색만 정리 (광고는 영향 없음).
     await stopDiscovery();
     final controller = StreamController<DiscoveredHost>();
@@ -89,11 +85,9 @@ class DiscoveryService {
         serviceType,
         ipLookupType: nsd.IpLookupType.any,
       );
-      // ignore: avoid_print
-      print('[DISCOVERY] discoverHosts: startDiscovery OK');
+      debugPrint('[DISCOVERY] discoverHosts: startDiscovery OK');
     } catch (e) {
-      // ignore: avoid_print
-      print('[DISCOVERY] discoverHosts FAILED to start: $e');
+      debugPrint('[DISCOVERY] discoverHosts FAILED to start: $e');
       controller.addError(e);
       await controller.close();
       _hostController = null;
@@ -146,8 +140,7 @@ class DiscoveryService {
         port: port,
         roomCode: roomCode,
       );
-      // ignore: avoid_print
-      print('[DISCOVERY] discoverHosts found: name=${host.name} ip=${host.ip}:${host.port} code=$roomCode');
+      debugPrint('[DISCOVERY] discoverHosts found: name=${host.name} ip=${host.ip}:${host.port} code=$roomCode');
       _knownHosts[serviceName] = host;
       controller.add(host);
     });

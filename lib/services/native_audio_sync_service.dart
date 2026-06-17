@@ -11,6 +11,12 @@ import 'p2p_service.dart';
 import 'sync_service.dart';
 import 'sync_measurement_logger.dart';
 
+/// 측정 모드 — `--dart-define=MEASURE=true` 빌드일 때만 CSV 측정 로거 가동.
+/// 평소/출시 빌드는 false라 호스트 시작 시 CSV를 안 만든다(불필요 파일 I/O 제거 +
+/// HISTORY (30) 경로 이슈로 호스트 시작이 깨질 여지 제거). log/stop/dispose는 비활성
+/// 시 no-op(가드 있음)이라 안전. 측정 시: flutter build --profile --dart-define=MEASURE=true
+const bool kMeasureMode = bool.fromEnvironment('MEASURE');
+
 // ── drift / seek 파라미터 (PoC Phase 4 검증 완료) ──────────────
 const double _driftSeekThresholdMs = 20.0;
 const double _seekCorrectionGain = 0.8;
@@ -191,7 +197,7 @@ class NativeAudioSyncService {
     // 이전 세션의 잔여 temp 파일 정리 (호스트: audio_*, 게스트: dl_*)
     await _cleanupTempDir();
 
-    if (isHost) {
+    if (isHost && kMeasureMode) {
       await _logger.start();
     }
   }

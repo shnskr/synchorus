@@ -1141,54 +1141,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     setState(() {});
   }
 
-  // ignore: unused_element — 디버그용. 사용자 요청으로 build에서 노출 제거.
-  Widget _buildSyncInfo() {
-    // v0.0.81: positionStream(100ms 주기 native poll) 구독으로 매번 rebuild —
-    // drift / seekCount / offset / RTT 실시간 표시. 기존엔 한 번 read만 해서 갱신 안 됨.
-    return StreamBuilder<Duration>(
-      stream: _audio.positionStream,
-      builder: (context, _) {
-        final drift = _audio.latestDriftMs;
-        final seeks = _audio.seekCount;
-        final sync = ref.read(syncServiceProvider);
-
-        return Card(
-          child: Padding(
-            padding: const EdgeInsets.all(12),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  'Sync Info',
-                  style: const TextStyle(
-                    fontWeight: FontWeight.bold,
-                    fontSize: 12,
-                    color: AppColors.textLow,
-                  ),
-                ),
-                const SizedBox(height: 4),
-                Text(
-                  'drift: ${drift != null ? "${drift.toStringAsFixed(1)}ms" : "—"}'
-                  '  |  seeks: $seeks'
-                  '  |  offset: ${sync.filteredOffsetMs.toStringAsFixed(1)}ms'
-                  '  |  RTT: ${sync.bestRtt}ms'
-                  '  |  stable: ${sync.isOffsetStable ? "✓" : "✗"}',
-                  style: TextStyle(
-                    fontSize: 11,
-                    color: Theme.of(
-                      context,
-                    ).colorScheme.onSurface.withValues(alpha: 0.6),
-                    fontFamily: 'monospace',
-                  ),
-                ),
-              ],
-            ),
-          ),
-        );
-      },
-    );
-  }
-
   // ═══════════════════════════════════════════════════════════════════════════
   // P2P 모드 진입/종료 — Phase 4(호스트) + Phase 5(스피커, 일부 stub)
   // ═══════════════════════════════════════════════════════════════════════════

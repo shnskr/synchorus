@@ -7139,6 +7139,28 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-18 (159) — 출시 전 코드 정리: 죽은 코드 제거 + 디버그/측정 계측 release 게이팅
+
+출시 준비 중 코드 정리. 전수조사(Explore + grep) 후 **삭제 vs 게이팅** 논의 → **계측(로그/CSV/SyncInfo)은 게이팅, 명확한 죽은 코드만 삭제**로 결정.
+
+**A. 죽은 코드/미사용 정리 (commit d9d32ef)**:
+- `lib/models/room.dart` 삭제 — orphan(import 0, RoomScreen 삭제(v0.0.97) 잔재). peer.dart는 p2p_service 실사용이라 유지.
+- `_isHostP2P`/`_modeLabel` 미사용 게터 삭제 (grep 호출 0). `_resolveDeviceId`는 "Phase 5 예정" 주석이 **거짓**(실사용 `:1892`)이라 주석만 정정.
+- `connectivity_plus` 의존성 제거 (Dart 미사용, RoomLifecycleCoordinator 삭제 잔재).
+- ⚠️ Explore가 `_resolveDeviceId`를 "미사용"으로 **오분류** → grep 재확인으로 정정(실사용). 에이전트 결과도 검증 필수 교훈.
+
+**B. 디버그/측정 계측 = 게이팅 (삭제 아님)**:
+- **로그**: `main`에 `if(kReleaseMode) debugPrint=no-op` → release만 로그 끔, debug/profile은 그대로. discovery_service `print` 7개→`debugPrint`(release 게이트에 같이 묶임, `avoid_print` ignore 제거).
+- **CSV 측정 로거**: `const kMeasureMode = bool.fromEnvironment('MEASURE')` 게이트 → `if(isHost && kMeasureMode)`만 `_logger.start()`. **평소/출시 호스트는 CSV 안 만듦.** 측정 시 `flutter build --profile --dart-define=MEASURE=true`. log/stop/dispose는 `_isActive` 가드로 비활성 시 no-op이라 안전. drift-report 프로토콜은 무변경(호스트 logger no-op).
+  - **부수 효과(중요)**: `_logger.start()`가 호스트 시작마다 try/catch 없이 파일 I/O를 하던 fragility(HISTORY (30) Samsung `/data/user/95` 경로 이슈로 호스트 시작이 깨질 여지)도 production에서 제거됨.
+- **SyncInfo 위젯**(`_buildSyncInfo`): 화면 미노출 죽은 코드(게이팅이 무의미 — 켤 진입점 없음) → **삭제**(사용자 요청). drift/RTT/offset 필요 시 다시 추가는 git 히스토리에서.
+
+**왜 게이팅(삭제 X)**: ① release 결과물은 삭제와 동일(로그·CSV 0) ② 회귀 위험 0(삭제는 sync 코어 drift-report teardown + 86 로그 + catch블록 95곳 수술) ③ 디버그 가시성·측정 도구 보존(특히 catch 블록 로그는 삼켜진 에러의 유일한 흔적) ④ "야생 유저 로그는 어차피 못 봄(원격 텔레메트리 필요)" → local 로그 가치는 *내 hands-on 디버깅뿐* → 디버그 빌드가 그걸 유지. 상세 [DECISIONS.md].
+
+**검증**: `flutter analyze lib` 0건. sync 로직 무변경이라 회귀 위험 최소.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
