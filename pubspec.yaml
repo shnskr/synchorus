@@ -90,10 +90,11 @@ flutter:
   # the material Icons class.
   uses-material-design: true
 
-  # 측정 자동화용 비프음 (1초 주기, 100ms 1000Hz sine + 900ms 무음, 12분).
-  # AUTO_MEASURE_MODE 빌드 시에만 사용. 출시 빌드에 포함되나 entry에서 미참조라 죽은 데이터.
   assets:
-    - assets/measure_audio.mp3
+    # 측정 자동화용 비프음 (12분). AUTO_MEASURE_MODE 측정 시에만 필요 → 평소/출시
+    # 번들에서 제외(release APK ~11MB 절감, 일반 entry에선 미참조). 파일은 repo에
+    # 남겨둠 — 다시 측정할 땐 아래 줄 주석 해제 후 빌드.
+    # - assets/measure_audio.mp3
     # 런타임 번들은 logo.png만 (인앱 헤더 + 알림 카드 아트). app.png/app_icon.png/
     # app_fg.png/splash.png는 빌드 시 launcher_icons·native_splash 입력일 뿐 런타임 미사용.
     - assets/branding/logo.png
