@@ -7111,7 +7111,31 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 **빌드**: v0.0.130 (작업 중 0.0.131까지 갔다가 "디자인 세션 전체 = patch 1회" 원칙으로 0.0.130으로 정리).
 
-**남은(이미지 작업 — 사용자 제작 후 세팅)**: ⓐ 앱 런처 아이콘(1024² 마스터 사용자가 만듦 → `flutter_launcher_icons` **미적용**) ⓑ 인앱 로고 마크(헤더 "싱코러스" 좌측) ⓒ 스플래시(1152² 투명, 중앙 768, `flutter_native_splash` + 다크배경 — 현재 기본 흰 launch 화면) ⓓ Android 알림 흰 실루엣(현재 `ic_launcher` 컬러라 상태바 뭉개짐). 스토어 등록물(피처그래픽 1024×500/스크린샷)·release 서명은 별도 출시 트랙.
+**남은(이미지 작업 — 사용자 제작 후 세팅)**: ⓐ 앱 런처 아이콘(1024² 마스터 사용자가 만듦 → `flutter_launcher_icons` **미적용**) ⓑ 인앱 로고 마크(헤더 "싱코러스" 좌측) ⓒ 스플래시(1152² 투명, 중앙 768, `flutter_native_splash` + 다크배경 — 현재 기본 흰 launch 화면) ⓓ Android 알림 흰 실루엣(현재 `ic_launcher` 컬러라 상태바 뭉개짐). 스토어 등록물(피처그래픽 1024×500/스크린샷)·release 서명은 별도 출시 트랙. **→ 전부 (158)에서 적용 완료.**
+
+---
+
+### 2026-06-17 (158) — 브랜드 이미지 적용: 앱 아이콘/스플래시/인앱 로고/알림 + 음표 활성색 (v0.0.131)
+
+(157) "남은 이미지 작업" 처리. 사용자가 제작한 4개 이미지(바탕화면 `app.png` 1024² 불투명 / `splash.png` 1152² 투명 / `logo.png` 675×451 투명 / `logo.svg`)를 `assets/branding/`로 들여와 적용.
+
+**① 앱 아이콘 (`flutter_launcher_icons` 0.14.4)** — `app.png` 검수: 1024 불투명 정사각 ✅. 마스크별 미리보기로 확인 — iOS 둥근사각은 꽉, **Android 원형은 파형 끝 잘림** → **하이브리드**: iOS/legacy = `app_icon.png`(app.png **1.15× 줌**, 여백 트림해 그림 크게), adaptive = `app_fg.png`(내용 ~72%로 원형 안전) + `adaptive_icon_background: #19131F`(app.png 코너색 — 잘려도 이음새 없음). 사용자 줌 1.0/1.15/1.30 비교 후 **1.15× 선택**(깨짐 우려=기우, 1024 마스터 1.15 업스케일은 아이콘 표시 크기≤192px라 무영향).
+
+**② 스플래시 (`flutter_native_splash` 2.4.7)** — `splash.png`(투명, 내용 bbox 299~869/319~822 = Android 12 안전영역 192~960 안, 검증) on `color: #100E15`(다크). **기존 기본 흰 launch 화면 → 다크+로고**로 교체(흰 플래시 제거). 원형/전체는 플랫폼 강제(iOS·안드11↓=전체 중앙 / 안드12+=원형 마스크), 토글 불가.
+
+**③ 인앱 로고 (헤더)** — AppBar title에 `Image.asset(logo.png, height:24)` + "Synchorus". **⚠️ `logo.svg`는 폐기**: Illustrator export라 `<filter>`(글로우)·`feGaussianBlur`·`<mask>`(luminosity-invert)·임베드 `<image>` 포함 → `flutter_svg`가 filter 미지원이라 실기기서 **까만 덩어리**로 렌더(실측 확인). PNG는 글로우 보존 → **PNG 확정, flutter_svg 의존성 제거.**
+
+**④ 알림 (audio_service) — 2부분**: 안드로이드 알림은 (a) **상태바 작은 아이콘** = OS 강제 흰 실루엣(`androidNotificationIcon: 'drawable/ic_stat_synchorus'`, logo.png alpha→흰색 추출, drawable-mdpi~xxxhdpi 24~96px) + (b) **알림 카드 큰 아트** = 컬러 가능 → `MediaItem.artUri`에 logo.png를 file로 복사(`main.dart`에서 support dir로 1회 복사, `NativeAudioHandler.notifArtUri`)해 **컬러 로고 표시**. "다른 앱이 잘 보이는 건 (b) 앨범아트 자리"라는 사용자 의문 해소 — 상태바는 모든 앱이 흰 실루엣.
+
+**⑤ 음표 활성/비활성 색** — 파일 카드 leading 음표(`Symbols.music_note_rounded`): 파일 선택 시 라벤더+`fill:1`(활성), 미선택 시 `textLow`+외곽선(비활성). 사용자 요청.
+
+**번들 최적화**: 런타임 에셋은 `assets/branding/logo.png`만 등록(인앱+알림아트). app.png/app_icon.png/app_fg.png/splash.png는 빌드 시 생성기 입력일 뿐 런타임 미사용이라 번들 제외.
+
+**검증**: S947N — 앱 아이콘(런처)·스플래시·헤더 로고·알림 컬러카드·음표 활성색 육안 OK. analyze 0건.
+
+**남은(디자인 외)**: release 서명·스토어 등록물(피처그래픽/스크린샷)·실 AdMob/IAP ID = 출시 트랙(PLAN). iOS 실기기 아이콘/스플래시 검증은 Mac/기기에서.
+
+**빌드**: v0.0.131.
 
 ---
 

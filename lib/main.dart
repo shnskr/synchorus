@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 
 import 'package:audio_service/audio_service.dart';
 import 'package:audio_session/audio_session.dart';
@@ -6,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
+import 'package:path_provider/path_provider.dart';
 
 import 'providers/app_providers.dart';
 import 'screens/player_screen.dart';
@@ -27,12 +29,28 @@ Future<void> main() async {
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
 
+  // 알림 카드 컬러 아트: 번들 logo.png를 파일로 1회 복사해 artUri로 사용
+  // (Android 알림 large art는 file/content URI 필요 — asset 직접 참조 불가).
+  // 상태바 작은 아이콘은 drawable 흰 실루엣(androidNotificationIcon)이 따로 담당.
+  try {
+    final dir = await getApplicationSupportDirectory();
+    final artFile = File('${dir.path}/notif_art.png');
+    if (!await artFile.exists()) {
+      final bytes = await rootBundle.load('assets/branding/logo.png');
+      await artFile.writeAsBytes(bytes.buffer.asUint8List());
+    }
+    NativeAudioHandler.notifArtUri = Uri.file(artFile.path);
+  } catch (_) {
+    // 복사 실패 시 artUri=null → 카드 아트만 생략(크래시 없음).
+  }
+
   final audioHandler = await AudioService.init(
     builder: () => NativeAudioHandler(),
     config: AudioServiceConfig(
       androidNotificationChannelId: 'com.synchorus.audio',
       androidNotificationChannelName: 'Synchorus',
       androidStopForegroundOnPause: false,
+      androidNotificationIcon: 'drawable/ic_stat_synchorus', // 상태바 흰 실루엣
     ),
   );
 

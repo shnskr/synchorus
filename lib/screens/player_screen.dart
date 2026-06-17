@@ -396,9 +396,11 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       appBar: AppBar(
         title: Row(
           mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.baseline,
-          textBaseline: TextBaseline.alphabetic,
           children: [
+            // 인앱 브랜드 마크 (logo.png — SVG는 글로우 filter/mask 미지원으로
+            // flutter_svg에서 까맣게 깨져 PNG 사용. 검증 v0.0.131.)
+            Image.asset('assets/branding/logo.png', height: 24),
+            const SizedBox(width: 8),
             const Text('Synchorus'),
             const SizedBox(width: 8),
             Text(
@@ -560,7 +562,14 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
               );
             } else {
               title = fileName ?? (_isController ? '오디오를 선택하세요' : '음악 대기 중');
-              leading = const Icon(Symbols.music_note_rounded, size: 40);
+              // 파일 선택 시 활성(라벤더+채움), 미선택 시 비활성(흐린 외곽선).
+              final hasFile = fileName != null;
+              leading = Icon(
+                Symbols.music_note_rounded,
+                size: 40,
+                fill: hasFile ? 1 : 0,
+                color: hasFile ? AppColors.primary : AppColors.textLow,
+              );
             }
             return Card(
               child: ListTile(

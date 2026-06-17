@@ -99,8 +99,8 @@
 
 ### 🔴 블로커 (이게 안 되면 출시 불가)
 - [ ] **Android release 서명** — 현재 release도 **debug keystore** 사용(`android/app/build.gradle.kts` `signingConfig = signingConfigs.getByName("debug")`). release keystore 생성 + 서명 config 필요 (debug 서명은 Play 업로드 거부).
-- [ ] **앱 아이콘** — 현재 기본 Flutter `ic_launcher.png`. 사용자가 1024² 마스터 제작 완료, **`flutter_launcher_icons` 적용은 미완**(파일 받으면 세팅). 마스터: 정사각·불투명, iOS는 투명/둥근모서리 금지, Android adaptive는 로고 중앙 ~66% 안전영역.
-- [ ] **나머지 브랜드 이미지 (디자인 시스템 코드는 v0.0.130 적용 완료)** — ⓐ 인앱 로고 마크(헤더 "싱코러스" 좌측, SVG/투명PNG) ⓑ 스플래시(`flutter_native_splash`+다크 배경 — 현재 **기본 흰 launch 화면**이라 다크 앱에 흰 플래시) 1152² 투명·중앙768 ⓒ Android 알림 흰 실루엣(현재 `ic_launcher` 컬러라 상태바 뭉개짐). 전부 사용자 이미지 제작 후 세팅. HISTORY (157).
+- [x] **앱 아이콘 — 적용 완료 (v0.0.131, HISTORY (158))**. 사용자 `app.png`(1024²) → `flutter_launcher_icons`. iOS/legacy=`app_icon.png`(1.15× 줌), Android adaptive=`app_fg.png`+bg `#19131F`. ⏳ iOS 실기기 아이콘 검증만 Mac/기기에서.
+- [x] **나머지 브랜드 이미지 — 적용 완료 (v0.0.131, HISTORY (158))**. ⓐ 인앱 로고(헤더 logo.png, SVG는 flutter_svg 글로우 미지원이라 PNG) ⓑ 스플래시(splash.png + 다크 `#100E15`, 흰 플래시 제거) ⓒ 알림(상태바 흰 실루엣 `ic_stat_synchorus` + 카드 컬러 아트 artUri=logo.png). + 음표 활성/비활성 색. S947N 검증. ⏳ iOS 스플래시 실기기 검증만 남음.
 - [~] **수익화 구현 — 코드 완료(v0.0.127, HISTORY (155)), 스토어 등록 남음**. 배너(`google_mobile_ads` 하단 adaptive) + 프로 IAP(`in_app_purchase`, non-consumable `synchorus_pro`, 구매/복원) + 2대 제한(호스트 기준) + 설정 화면 + 업셀 팝업 모두 구현·실기기 검증(테스트 ID). **남은 것**: ⓐ AdMob 계정+실 광고단위/App ID 교체(현재 테스트 ID) ⓑ Play/App Store 인앱상품 `synchorus_pro` 등록+가격 ⓒ 실결제 내부테스트(구매→프로 해제→배너 제거) ⓓ 2대 제한 멀티기기 실검증 ⓔ GDPR/UMP 동의(EEA, 블로커 아님). **2026-06-01 "광고 안 함" 결정은 뒤집힘**(DECISIONS).
 
 ### 🟡 스토어 등록물

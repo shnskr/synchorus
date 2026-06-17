@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.130+1
+version: 0.0.131+1
 
 environment:
   sdk: ^3.11.4
@@ -76,6 +76,8 @@ dev_dependencies:
   # package. See that file for information about deactivating specific lint
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
+  flutter_launcher_icons: ^0.14.4
+  flutter_native_splash: ^2.4.7
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec
@@ -92,6 +94,9 @@ flutter:
   # AUTO_MEASURE_MODE 빌드 시에만 사용. 출시 빌드에 포함되나 entry에서 미참조라 죽은 데이터.
   assets:
     - assets/measure_audio.mp3
+    # 런타임 번들은 logo.png만 (인앱 헤더 + 알림 카드 아트). app.png/app_icon.png/
+    # app_fg.png/splash.png는 빌드 시 launcher_icons·native_splash 입력일 뿐 런타임 미사용.
+    - assets/branding/logo.png
 
   # 디자인 시스템 폰트 (둘 다 OFL — assets/fonts/*-OFL.txt):
   #  - Pretendard: 모든 UI/본문/제목 (한글+영문). Variable 1파일로 w400~w800 커버.
@@ -137,3 +142,25 @@ flutter:
   #
   # For details regarding fonts from package dependencies,
   # see https://flutter.dev/to/font-from-package
+
+# 앱 런처 아이콘 (dart run flutter_launcher_icons). app.png(1024 불투명)=iOS/legacy,
+# adaptive는 app_fg.png(80% 패딩, 투명) + 배경 #19131F(app.png 코너색)로 원형 런처서 안 잘림.
+flutter_launcher_icons:
+  android: true
+  ios: true
+  image_path: "assets/branding/app_icon.png" # 1.15× 줌 버전 (app.png 원본 보존)
+  remove_alpha_ios: true
+  min_sdk_android: 21
+  adaptive_icon_background: "#19131F"
+  adaptive_icon_foreground: "assets/branding/app_fg.png"
+
+# 스플래시 (dart run flutter_native_splash:create). 투명 splash.png를 다크 #100E15 위에.
+# 다크 전용 앱이라 흰 플래시 제거. Android 12+는 원형 마스크(안전영역 안에 들어감).
+flutter_native_splash:
+  color: "#100E15"
+  image: assets/branding/splash.png
+  android_12:
+    image: assets/branding/splash.png
+    color: "#100E15"
+  android: true
+  ios: true

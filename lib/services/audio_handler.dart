@@ -9,6 +9,9 @@ import 'native_audio_sync_service.dart';
 /// - 잠금화면/알림바 미디어 컨트롤 → syncPlay/syncPause/syncSeek
 /// - 동기화 서비스 상태 변경 → PlaybackState/MediaItem 업데이트
 class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
+  /// 알림 카드 컬러 아트 (logo.png 복사본 file URI). main()에서 1회 세팅.
+  static Uri? notifArtUri;
+
   NativeAudioSyncService? _syncService;
   bool _isHost = false;
   StreamSubscription? _playingSub;
@@ -45,9 +48,16 @@ class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
     _durationSub = service.durationStream.listen((duration) {
       _audioReady = duration != null;
       final fileName = service.currentFileName ?? 'Unknown';
-      mediaItem.add(duration != null
-          ? MediaItem(id: fileName, title: fileName, duration: duration)
-          : null);
+      mediaItem.add(
+        duration != null
+            ? MediaItem(
+                id: fileName,
+                title: fileName,
+                duration: duration,
+                artUri: notifArtUri, // 알림 카드 컬러 로고
+              )
+            : null,
+      );
       _emitPlaybackState();
     });
 
@@ -83,16 +93,18 @@ class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
       processingState = AudioProcessingState.idle;
     }
 
-    playbackState.add(PlaybackState(
-      controls: _isHost
-          ? [_playing ? MediaControl.pause : MediaControl.play]
-          : [],
-      systemActions: _isHost ? const {MediaAction.seek} : const {},
-      androidCompactActionIndices: _isHost ? const [0] : const [],
-      processingState: processingState,
-      playing: _playing,
-      updatePosition: _lastPosition,
-    ));
+    playbackState.add(
+      PlaybackState(
+        controls: _isHost
+            ? [_playing ? MediaControl.pause : MediaControl.play]
+            : [],
+        systemActions: _isHost ? const {MediaAction.seek} : const {},
+        androidCompactActionIndices: _isHost ? const [0] : const [],
+        processingState: processingState,
+        playing: _playing,
+        updatePosition: _lastPosition,
+      ),
+    );
   }
 
   @override
