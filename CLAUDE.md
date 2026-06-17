@@ -84,6 +84,7 @@ poc/ 하위 프로젝트는 version bump 예외 (측정/실험용).
 - **플랫폼 분기 표기**: `Platform.isIOS` / `Platform.isAndroid` 분기 작성 시 각 분기 아래에 **왜 분기했는지 주석**. 안 그러면 나중에 사유를 알 수 없어 되돌릴 위험.
 
 ### 빌드/배포/테스트
+- ⚠️ **release/profile 빌드는 반드시 `--no-tree-shake-icons` 플래그** (`flutter build apk/appbundle --release --no-tree-shake-icons`). `material_symbols_icons`(가변 아이콘 폰트)를 쓰는데, Flutter 기본 아이콘 tree-shaking이 가변 폰트의 Rounded 글리프를 잘못 제거해서 **release에서 모든 아이콘 버튼이 빈 글리프(투명)로 렌더**됨(버튼은 동작하나 안 보임). debug는 tree-shake 안 해서 정상 → release만 증상. 2026-06-18 (160) 실측 확정. (대가: 아이콘 폰트 전체 포함으로 ~16MB↑ — 추후 Rounded만 subset으로 최적화 가능)
 - flutter run 백그라운드 실행 후 불필요하게 상태 계속 확인하지 말 것. 빌드 진행 중이면 간단히 알려주고 기다릴 것.
 - 에뮬/기기의 앱/프로세스 재시작·종료 전 반드시 사용자 확인.
 - **PoC**: 실기기 우선. 에뮬은 알고리즘 로직 verify 목적에서만 선택적 추가.

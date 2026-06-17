@@ -7161,6 +7161,22 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-18 (160) — 수익화 출시 STEP 1~2 (AdMob 실 ID + Play 내부테스트) + release 아이콘 tree-shaking 버그 fix
+
+출시 준비: Android 수익화 등록 착수 중 **release 빌드 치명 버그** 발견·해결.
+
+**A. AdMob STEP 1 (commit fe9ea53)**: Android 실 App ID(AndroidManifest)·실 배너 광고단위. **무효 클릭 방지 2중 안전장치**: ① debug 빌드=테스트 광고단위(`kDebugMode` 게이트, 기기 무관) ② `main.dart` `_kTestDeviceIds`에 S947N(`0F9E...ED1`) 등록 → release도 등록 기기는 테스트 광고. iOS 광고 ID는 테스트 유지(iOS 라운드), UMP 동의는 글로벌 출시 시.
+
+**B. Play 내부테스트 STEP 2**: 앱 생성(`Synchorus - 여러 폰을 하나의 스피커로`, 무료) + Play 앱 서명 + 자동 보호(Protected with Play) 사용 + 서명 AAB 업로드. 앱명은 Play 스토어 제목(런처명은 코드 "Synchorus" 별개). 스토어 아이콘(512²)·개인정보처리방침 등은 정식 출시 전.
+
+**C. ⚠️ release 아이콘 tree-shaking 버그 (핵심)**: 내부테스트본(첫 release-mode 실행)에서 **모든 아이콘 버튼이 안 보임**(재생/설정/모드/±). **단 버튼은 동작**(tappable) — 즉 IconButton은 멀쩡, 글리프만 투명. **root cause**: `material_symbols_icons`(가변 아이콘 폰트)를 Flutter 기본 아이콘 tree-shaking이 **Rounded 글리프를 잘못 제거**(빌드 로그에 `MaterialSymbolsRounded` 유지 라인 없음, Sharp/MaterialIcons만 제거됨). debug는 tree-shake 안 해 정상 → **release만 증상**(그래서 그동안 debug 설치론 멀쩡했음, 첫 release 실행에서 발각). **fix: `--no-tree-shake-icons`** — 로컬 release APK로 검증(아이콘 복원 확인) 후 AAB 재빌드. **대가**: 아이콘 폰트 전체 포함으로 APK 65.7→81.8MB(~16MB↑). 추후 Rounded만 subset으로 최적화 가능. **CLAUDE.md 빌드 섹션에 "release=`--no-tree-shake-icons` 필수" 박음.** versionCode +1→+2(재업로드용, versionName 0.0.131 유지).
+
+**배너 미표시**: 아이콘과 별개. 신규 AdMob 광고단위 게재 지연(수 시간) 추정 — 배너 위젯은 광고 로드 전 빈 공간이라 정상 동작. logcat 정밀 진단은 앱 포그라운드 유지 시 가능(현재 frozen process라 미확보). 추후 확인.
+
+**남은**: AAB 재업로드(versionCode 2) → STEP 3 IAP `synchorus_pro` 등록 → STEP 4 실결제 테스트. iOS 광고·UMP·스토어 등록물은 각 라운드.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
