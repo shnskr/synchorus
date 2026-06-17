@@ -1,0 +1,17 @@
+# Android release 서명 설정 템플릿.
+# 이 파일을 복사해 android/key.properties 로 만들고 값을 채운다 (key.properties는 gitignore됨).
+#
+#   cp android/key.properties.example android/key.properties
+#
+# keystore는 repo 밖(홈 등)에 두고 storeFile에 절대경로를 적는다. keystore 생성:
+#
+#   keytool -genkeypair -v -keystore ~/synchorus-upload-keystore.jks \
+#     -keyalg RSA -keysize 2048 -validity 10000 -alias synchorus \
+#     -dname "CN=Synchorus, OU=Mobile, O=Synchorus, L=Seoul, S=Seoul, C=KR"
+#
+# ⚠️ keystore 파일과 비밀번호는 절대 분실 금지 — 잃으면 Play 앱 업데이트 불가.
+
+storePassword=여기에_키스토어_비밀번호
+keyPassword=여기에_키_비밀번호
+keyAlias=synchorus
+storeFile=/Users/dal/synchorus-upload-keystore.jks
