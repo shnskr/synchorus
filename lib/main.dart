@@ -15,6 +15,14 @@ import 'screens/player_screen.dart';
 import 'services/audio_handler.dart';
 import 'theme/app_theme.dart';
 
+/// 테스트 기기 — 여기 등록된 기기는 **release 빌드에서도 테스트 광고만** 노출
+/// (개발자 본인 기기 무효 클릭으로 AdMob 계정 정지되는 것 방지). 새 기기는 ID 추가.
+/// ID 얻는 법: 앱 실행 시 logcat에 `setTestDeviceIds(["XXXX..."])` 줄이 뜸 → 그 값 추가.
+/// (debug 빌드는 어차피 테스트 광고단위라 이 목록과 무관하게 안전.)
+const List<String> _kTestDeviceIds = <String>[
+  '0F9E5626455023F56EA6AA7FD9C02ED1', // SM S947N (R3KL207HBBF)
+];
+
 Future<void> main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
@@ -32,6 +40,12 @@ Future<void> main() async {
 
   // AdMob 초기화(배너 광고). 무료 사용자에게만 표시되지만 SDK는 앱 시작 시 1회 초기화.
   unawaited(MobileAds.instance.initialize());
+  // 등록된 테스트 기기는 release에서도 테스트 광고만 (무효 트래픽 방지).
+  if (_kTestDeviceIds.isNotEmpty) {
+    MobileAds.instance.updateRequestConfiguration(
+      RequestConfiguration(testDeviceIds: _kTestDeviceIds),
+    );
+  }
 
   final session = await AudioSession.instance;
   await session.configure(const AudioSessionConfiguration.music());
