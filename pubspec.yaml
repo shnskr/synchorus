@@ -35,7 +35,6 @@ dependencies:
   audio_service: ^0.18.15
   file_picker: ^11.0.2
   path_provider: ^2.1.5
-  connectivity_plus: ^7.1.0
   audio_session: ^0.2.3
   package_info_plus: ^9.0.1
   # nsd: 시스템 mDNS(Bonjour) wrap. iOS NSNetService + Android NsdManager.

@@ -61,8 +61,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   // sheet 안에 inline 표시 (스피커 picker의 _lastError와 동일 패턴). 재진입 시 clear.
   String? _hostModeError;
   bool get _isController => _mode != PlayerMode.speaker;
-  // ignore: unused_element — Phase 4 호스트 시작/종료 로직에서 사용 예정.
-  bool get _isHostP2P => _mode == PlayerMode.host;
 
   // P2P 정보 (BottomSheet 카드 + 모드 전환용).
   // 호스트 모드: _roomCode + _hostIp + _peerCount. 스피커 모드: _connectedHostIp +
@@ -87,17 +85,6 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
   bool _isSyncing = false;
   // AppBar 우측에 작게 표시할 버전 (예: "v0.0.95"). 초기 빈 문자열, initState에서 load.
   String _versionLabel = '';
-  // ignore: unused_element — 노출 제거됐지만 모드 분기에 재사용 가능성 위해 보존.
-  String get _modeLabel {
-    switch (_mode) {
-      case PlayerMode.standalone:
-        return '단독';
-      case PlayerMode.host:
-        return '호스트';
-      case PlayerMode.speaker:
-        return '스피커';
-    }
-  }
 
   bool _isDragging = false;
   double _dragValue = 0;
@@ -1230,8 +1217,8 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
     return base;
   }
 
-  /// 영구 디바이스 식별자 (32자 hex). SharedPreferences 영속. (home_screen.dart 동일)
-  // ignore: unused_element — Phase 5 _enterSpeakerMode에서 사용 예정.
+  /// 영구 디바이스 식별자 (32자 hex). SharedPreferences 영속.
+  /// _enterSpeakerMode 스피커 입장 시 사용 (게스트 고유 식별 → 호스트 stale peer 정리).
   Future<String> _resolveDeviceId() async {
     final prefs = await SharedPreferences.getInstance();
     String? id = prefs.getString('device_uuid');
