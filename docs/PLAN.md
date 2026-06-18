@@ -98,20 +98,20 @@
 2026-06-11 (152) 점검. **출시 = 기능 + 기능 외**(서명·아이콘·수익화·스토어). 기능 MVP는 탄탄하나 "기능 외"가 남음. **전략(무료 먼저 vs 수익화 포함) 미정** — 아래로 남은 일 파악 후 결정.
 
 ### 🔴 블로커 (이게 안 되면 출시 불가)
-- [ ] **Android release 서명** — 현재 release도 **debug keystore** 사용(`android/app/build.gradle.kts` `signingConfig = signingConfigs.getByName("debug")`). release keystore 생성 + 서명 config 필요 (debug 서명은 Play 업로드 거부).
+- [x] **Android release 서명 — 완료 (HISTORY (160))**. release keystore(`android/key.properties`, repo 밖 보관) 생성 + `build.gradle.kts`가 key.properties 있으면 release 키, 없으면 debug fallback. Play 앱 서명 사용. apksigner V2 확인.
 - [x] **앱 아이콘 — 적용 완료 (v0.0.131, HISTORY (158))**. 사용자 `app.png`(1024²) → `flutter_launcher_icons`. iOS/legacy=`app_icon.png`(1.15× 줌), Android adaptive=`app_fg.png`+bg `#19131F`. ⏳ iOS 실기기 아이콘 검증만 Mac/기기에서.
 - [x] **나머지 브랜드 이미지 — 적용 완료 (v0.0.131, HISTORY (158))**. ⓐ 인앱 로고(헤더 logo.png, SVG는 flutter_svg 글로우 미지원이라 PNG) ⓑ 스플래시(splash.png + 다크 `#100E15`, 흰 플래시 제거) ⓒ 알림(상태바 흰 실루엣 `ic_stat_synchorus` + 카드 컬러 아트 artUri=logo.png). + 음표 활성/비활성 색. S947N 검증. ⏳ iOS 스플래시 실기기 검증만 남음.
-- [~] **수익화 구현 — 코드 완료(v0.0.127, HISTORY (155)), 스토어 등록 남음**. 배너(`google_mobile_ads` 하단 adaptive) + 프로 IAP(`in_app_purchase`, non-consumable `synchorus_pro`, 구매/복원) + 2대 제한(호스트 기준) + 설정 화면 + 업셀 팝업 모두 구현·실기기 검증(테스트 ID). **남은 것**: ⓐ AdMob 계정+실 광고단위/App ID 교체(현재 테스트 ID) ⓑ Play/App Store 인앱상품 `synchorus_pro` 등록+가격 ⓒ 실결제 내부테스트(구매→프로 해제→배너 제거) ⓓ 2대 제한 멀티기기 실검증 ⓔ GDPR/UMP 동의(EEA, 블로커 아님). **2026-06-01 "광고 안 함" 결정은 뒤집힘**(DECISIONS).
+- [x] **수익화 — 코드 + Android 스토어 등록·실결제·서빙 검증 완료 (HISTORY (160)/(161))**. 배너(`google_mobile_ads` 하단 adaptive) + 프로 IAP(`synchorus_pro` non-consumable, 구매/복원) + 2대 제한 + 설정/업셀 구현. **Android 완료**: AdMob 실 ID/App ID, IAP 등록·가격(₩4,900)·실결제("프로 사용 중"), 배너 서빙 확인(결제 프로필 완료 후 실 광고 로드), 테스트기기(S947N/S22) 무효트래픽 안전. **남은 것**: ⓐ iOS AdMob 실 ID(iOS 라운드) ⓑ GDPR/UMP 동의(EEA, 블로커 아님) ⓒ 무료 체험 재검증=다른 계정(현 계정 환불-후-권한회수 불가로 영구 프로 — 실유저 무관). **2026-06-01 "광고 안 함" 뒤집힘**(DECISIONS).
 
 ### 🟡 스토어 등록물
 - [ ] 개인정보처리방침 URL (P2P라 수집 적어도 스토어 필수)
 - [ ] 스크린샷 (Play 폰/태블릿 · App Store 사이즈별)
 - [ ] 스토어 설명(제목/짧은·긴, 한/영), 카테고리, 연령등급 설문
 - [ ] 데이터 안전성(Play) / 앱 개인정보(App Store) 양식
-- [ ] 버전 `0.0.125` → `1.0.0`
+- [ ] 버전 `0.0.132` → `1.0.0`
 
 ### ⚙️ 마무리 점검
-- [ ] release 빌드 실기기 회귀 (Android + iOS)
+- [~] release 빌드 실기기 회귀 — **Android 완료**(v0.0.132, R3KL207HBBF Android 16: 세로/미니플레이어/배너/스와이프종료/알림권한, HISTORY (161)). **iOS 남음**.
 - [ ] 잔여 iOS 이슈(§I-6 과도기 / realign 톤 누락(148) / 잔음(142)) — 블로커 아님(일상 1배속 영향 없음). 알려진 한계로 명시할지 결정.
 - [ ] 개발자 계정: Play Console($25 1회) / Apple Developer($99/년) + (IAP 시) 세금·은행 정보
 - [ ] iOS 배포 인증서/프로비저닝 (Mac/Xcode 필요)
@@ -134,6 +134,14 @@
 세션 마감 시 "지금까지 한 것"은 [HISTORY.md](HISTORY.md)에 기록, 이 리스트는 **앞으로 할 것**만.
 
 ### HIGH
+
+**🆕 출시 마무리 트랙 (2026-06-18)** — Android 수익화·release 버그 정리 후 정식 출시까지.
+
+- ✅ **수익화 출시 STEP 1~4 (HISTORY (160)/(161))** — AdMob Android 실 ID/App ID + Play 내부테스트 업로드 + IAP `synchorus_pro` 등록·가격(₩4,900)·실결제 검증("프로 사용 중") + 배너 서빙 확인(결제 프로필 완료 후 실 광고 로드). Play·AdMob 결제 프로필 각각 완료.
+- ✅ **release 빌드 버그 3종 + 스와이프 종료 (v0.0.132, HISTORY (161))** — ① 미니플레이어 release 미표시 = **R8 minify가 audio_service MediaStyle 클래스 제거** → `isMinifyEnabled=false` ② 세로 manifest 하드락 ③ 알림 권한(POST_NOTIFICATIONS+런타임+재승인 카드) + 배너 init await/재시도. 스와이프 종료 시 알림+음원 정지(stopWithTask + onDestroy `nativeStop`), 백그라운드는 유지. R3KL207HBBF(Android 16) 실측.
+- ⏳ **다음 (즉시)**: ⓐ `git push`(사용자) ⓑ AAB 재빌드 `flutter build appbundle --release --no-tree-shake-icons`(⚠️ 플래그 필수), versionCode **3**(0.0.132+3) → Play 내부테스트 재업로드 → 실유저 검증 ⓒ 무료 체험 재검증은 **다른 구글 계정**(현 테스트 계정은 환불-후-권한회수 불가로 영구 프로).
+- ⏳ **iOS 라운드**: AdMob iOS 실 ID + UMP, 스플래시/아이콘 실기기 검증, 알림 권한 iOS 경로, release 회귀.
+- ⏳ **정식 출시**: 스토어 등록물(개인정보처리방침/스크린샷/설명/데이터안전성/연령등급) + 버전 0.0.132→1.0.0 + 프로덕션 승격. (출시 체크리스트 🟡 참조)
 
 **🆕 UI 폴리싱 트랙 (2026-05-29 시작)** — 단독 플레이어 앱 사용성 + 호스트 모드 UX 정리.
 
