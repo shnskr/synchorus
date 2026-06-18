@@ -20,6 +20,8 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
   BannerAd? _ad;
   bool _loaded = false;
   bool _requested = false;
+  int _retryCount = 0;
+  static const int _maxRetries = 3;
 
   // debug = 테스트 단위(어떤 기기든 테스트 광고 → 무효 트래픽 방지).
   // release = 실 단위(Android만 실 ID, iOS는 iOS 라운드 때). 등록 기기는 testDeviceIds로 테스트.
@@ -45,6 +47,13 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
   }
 
   Future<void> _loadAd() async {
+    // 공식 문서(AdMob Flutter)는 "광고 로드 전 MobileAds 초기화 완료를 기다리는 게
+    // 중요"라고 명시 — init 미완 상태로 요청하면 첫 요청에서 광고가 안 붙을 수 있음.
+    // main.dart에서 unawaited로 먼저 시작해두므로 여기 await는 대개 즉시 반환하고,
+    // initialize()는 완료/30초 타임아웃 후 반환하는 Future라 영구 hang도 없음.
+    // (testDeviceIds 설정도 main에서 init 직후 동기 적용돼 이 시점엔 이미 반영됨.)
+    await MobileAds.instance.initialize();
+    if (!mounted) return;
     final width = MediaQuery.sizeOf(context).width.truncate();
     final size = await AdSize.getLargeAnchoredAdaptiveBannerAdSize(width);
     if (size == null || !mounted) return;
@@ -64,8 +73,16 @@ class _BannerAdWidgetState extends State<BannerAdWidget> {
           });
         },
         onAdFailedToLoad: (failedAd, err) {
-          debugPrint('[Ads] banner failed: $err');
+          debugPrint('[Ads] banner failed (try ${_retryCount + 1}): $err');
           failedAd.dispose();
+          // 일시 오류(NO_FILL·네트워크·init 타이밍)는 지수 백오프로 제한 재시도.
+          // 계정 미승인 같은 영구 사유면 재시도해도 안 뜨지만 무한 루프는 _maxRetries로 차단.
+          if (_retryCount < _maxRetries && mounted) {
+            _retryCount++;
+            Future.delayed(Duration(seconds: 2 * _retryCount), () {
+              if (mounted && !_loaded) _loadAd();
+            });
+          }
         },
       ),
     );

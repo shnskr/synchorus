@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import 'providers/app_providers.dart';
 import 'screens/player_screen.dart';
@@ -21,6 +22,7 @@ import 'theme/app_theme.dart';
 /// (debug 빌드는 어차피 테스트 광고단위라 이 목록과 무관하게 안전.)
 const List<String> _kTestDeviceIds = <String>[
   '0F9E5626455023F56EA6AA7FD9C02ED1', // SM S947N (R3KL207HBBF)
+  '0BFACB8F367F18AD86CF1E3BFD6B7B78', // SM S901N / S22 (R3CT60D20XE)
 ];
 
 Future<void> main() async {
@@ -94,11 +96,25 @@ class _SynchorusAppState extends ConsumerState<SynchorusApp> {
   @override
   void initState() {
     super.initState();
-    // 인앱결제 초기화(구독+상품조회+이전 구매 복원). 스토어 계정 기준 복원이라
-    // 재설치/기기변경 후에도 같은 계정이면 프로가 자동 복원된다.
     WidgetsBinding.instance.addPostFrameCallback((_) {
+      // 인앱결제 초기화(구독+상품조회+이전 구매 복원). 스토어 계정 기준 복원이라
+      // 재설치/기기변경 후에도 같은 계정이면 프로가 자동 복원된다.
       ref.read(purchaseServiceProvider).init();
+      // 미디어 알림(미니플레이어/잠금화면 컨트롤) 표시 권한. Android 13+만 런타임 권한이고
+      // 거절해도 재생·동기화는 정상(알림 UI만 숨김). 영구 거절(2회 거절) 뒤엔 OS가 다이얼로그를
+      // 더 안 띄워 설정 화면의 "알림 켜기"(openAppSettings)로만 재승인 가능 → cold-start에선
+      // 설정 강제 이동 없이 요청만 한다. permission_handler 공식 패턴.
+      unawaited(_requestNotificationPermissionIfNeeded());
     });
+  }
+
+  Future<void> _requestNotificationPermissionIfNeeded() async {
+    if (!Platform.isAndroid) return; // iOS 알림은 추후 라운드(audio_service 경유)
+    // Android <13은 permission_handler가 자동 granted 반환 → isDenied=false라 통과.
+    final status = await Permission.notification.status;
+    if (status.isDenied) {
+      await Permission.notification.request();
+    }
   }
 
   @override

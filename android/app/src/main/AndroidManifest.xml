@@ -6,6 +6,8 @@
     <uses-permission android:name="android.permission.WAKE_LOCK"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE"/>
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MEDIA_PLAYBACK"/>
+    <!-- Android 13+ 미디어 알림(미니플레이어/잠금화면) 표시에 필요. 없으면 알림 안 뜸. -->
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS"/>
     <application
         android:usesCleartextTraffic="true"
         android:label="Synchorus"
@@ -16,6 +18,7 @@
             android:exported="true"
             android:launchMode="singleTop"
             android:taskAffinity=""
+            android:screenOrientation="portrait"
             android:theme="@style/LaunchTheme"
             android:configChanges="orientation|keyboardHidden|keyboard|screenSize|smallestScreenSize|locale|layoutDirection|fontScale|screenLayout|density|uiMode"
             android:hardwareAccelerated="true"
@@ -36,7 +39,11 @@
         <service
             android:name="com.ryanheise.audioservice.AudioService"
             android:foregroundServiceType="mediaPlayback"
+            android:stopWithTask="true"
             android:exported="true">
+            <!-- stopWithTask: recents에서 앱 스와이프 종료 시 서비스 종료 → 미디어 알림
+                 제거(+재생 정지). 미디어 FGS는 알림 없이 못 돌아 "알림만 닫기"는 불가하므로
+                 닫기=정지로 묶임. 동기화 앱 특성상 자연스러움. (audio_service #74 권장 방식) -->
             <intent-filter>
                 <action android:name="android.media.browse.MediaBrowserService" />
             </intent-filter>

@@ -115,4 +115,13 @@ class MainActivity : AudioServiceActivity() {
                 }
             }
     }
+
+    override fun onDestroy() {
+        // 앱을 recents에서 스와이프 종료(task 제거)하면 액티비티가 onDestroy를 거친다.
+        // 네이티브 oboe 엔진은 audio_service FGS와 별개라, stopWithTask는 알림만 없애고
+        // 오디오는 프로세스가 살아있는 동안 계속 재생됨 → 여기서 엔진을 명시 정지.
+        // (백그라운드 전환은 onStop이라 여기 안 옴 → 백그라운드 재생·미니플레이어는 유지.)
+        NativeAudio.nativeStop()
+        super.onDestroy()
+    }
 }

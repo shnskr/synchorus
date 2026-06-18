@@ -80,6 +80,15 @@ android {
             } else {
                 signingConfigs.getByName("debug")
             }
+            // R8 코드 축소/난독화 OFF. 켜져 있으면(AGP/Flutter 기본) audio_service의
+            // MediaStyle 알림용 androidx.media 클래스가 release에서 제거돼 미디어 알림이
+            // 기본 FGS 알림("실행 중")으로 깨졌음 — MediaSession(매니페스트 등록 클래스라
+            // 유지)만 살아있고 미니플레이어/잠금화면 컨트롤이 안 떴다. debug(R8 미적용)는 정상.
+            // 네이티브 스택(oboe/nsd/ffi/audio_service) 많아 keep 규칙 누락 위험 커 v1은
+            // minify를 끄는 게 안전. 크기 최적화 필요 시 추후 keep 규칙 추가 후 재검증.
+            // (2026-06-18 실측: minify ON일 때만 미디어 알림 깨짐 확인.)
+            isMinifyEnabled = false
+            isShrinkResources = false
         }
     }
 }

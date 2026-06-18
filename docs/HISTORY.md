@@ -7177,6 +7177,24 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-18 (161) — release 미디어 알림 깨짐(R8 minify) + 세로 하드락 + 알림 권한 + 스와이프 종료 (v0.0.132)
+
+내부테스트(release)에서만 나던 버그 3개 + 스와이프 종료 기능. 전부 R3KL207HBBF(SM S947N, Android 16/API36) 실측.
+
+**A. ⚠️ 미니플레이어(미디어 알림) release 미표시 = R8 minify (핵심)**: 재생 중 홈 가면 미디어 알림 대신 Android 기본 FGS 알림("Synchorus 실행 중")만 뜸. `adb dumpsys media_session`=정상(active PLAYING + metadata=파일명), `dumpsys notification`=MediaStyle 템플릿 없는 기본 알림 → **세션은 살아있는데 MediaStyle 알림만 안 붙음**. **debug 정상 / release만 깨짐**이 결정적 단서. `build/app/outputs/mapping/release/mapping.txt` 존재로 **R8 minify가 (build.gradle 명시 없이 AGP/Flutter 기본으로) 켜져 있음** 확인 → R8이 audio_service의 **MediaStyle용 androidx.media 클래스 제거**(MediaButtonReceiver는 매니페스트 등록이라 유지 → 세션만 동작). **fix: release `isMinifyEnabled=false`+`isShrinkResources=false`**(네이티브 스택 oboe/nsd/ffi 많아 keep규칙 누락 위험↑ → v1은 끔. APK 81.8→87.7MB). **(160)의 "Play 내부테스트 미니플레이어 미표시"도 이거**(그 빌드도 minify ON). 헛다리(빌드로 배제): 컨트롤 빔, art `file://` URI.
+
+**B. 세로 고정 하드락**: `setPreferredOrientations`(소프트 preference)만으론 release에서 회전됨 → manifest `MainActivity android:screenOrientation="portrait"`(액티비티 생성부터 OS 강제, 빌드모드·기기·삼성 회전버튼 무관). debug/release가 왜 갈렸는지 메커니즘은 **확정 못 함** — 하드락으로 무관하게 해결.
+
+**C. 알림 권한(Android 13+)**: `POST_NOTIFICATIONS` manifest + `permission_handler`로 앱 시작 시 런타임 요청(`main.dart`, Android 한정, <13/iOS는 자동 granted). 거절 시 설정 화면에 "알림 켜기" 카드 → 영구거절이면 `openAppSettings()`, 아니면 재요청(공식 패턴).
+
+**D. 배너 서빙**: init await(공식 — 로드 전 `MobileAds.initialize()` 완료 대기) + 실패 시 지수백오프 재시도(최대3). 원래 미표시 주범은 **AdMob 결제 프로필 미완(검토 보류)** — 완료 후 S22서 실 광고 로드 확인(`Ads: jsLoaded`). S22(`0BFAC...B78`)도 `_kTestDeviceIds` 등록(두 기기 테스트 광고).
+
+**E. 스와이프 종료 → 정지**: recents 스와이프 시 미디어 알림+음원 둘 다 정지. (a) audio_service 서비스 `android:stopWithTask="true"`(알림/서비스) (b) `MainActivity.onDestroy()`→`NativeAudio.nativeStop()`(oboe 엔진은 audio_service와 별개라 stopWithTask로 안 멈춤 — 프로세스 생존 중 계속 재생됨). 백그라운드 전환(onStop)은 안 건드려 **재생·미니플레이어 유지**.
+
+**프로/환불 한계**: 테스트 계정 환불 시 "권한 회수" 미체크 → 사후 회수 불가(Google 공식)+재구매도 "소유"라 막힘. 서버리스라 `setPro(false)` 경로 없음 → restore가 "소유"로 주면 프로 유지. **무료 체험 테스트는 다른 구글 계정으로.** 실유저·정상 환불(회수 체크 시)엔 무관.
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**

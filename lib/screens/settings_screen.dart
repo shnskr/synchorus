@@ -1,6 +1,9 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:material_symbols_icons/symbols.dart';
+import 'package:permission_handler/permission_handler.dart';
 
 import '../providers/app_providers.dart';
 
@@ -14,8 +17,51 @@ class SettingsScreen extends ConsumerStatefulWidget {
   ConsumerState<SettingsScreen> createState() => _SettingsScreenState();
 }
 
-class _SettingsScreenState extends ConsumerState<SettingsScreen> {
+class _SettingsScreenState extends ConsumerState<SettingsScreen>
+    with WidgetsBindingObserver {
   bool _busy = false;
+  // Android 미디어 알림 권한 차단 여부. true면 "알림 켜기" 카드 노출.
+  bool _notifBlocked = false;
+
+  @override
+  void initState() {
+    super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    _refreshNotifStatus();
+  }
+
+  @override
+  void dispose() {
+    WidgetsBinding.instance.removeObserver(this);
+    super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 시스템 설정에서 알림 켜고 돌아오면(resumed) 상태 재확인 → 카드 자동 사라짐.
+    if (state == AppLifecycleState.resumed) _refreshNotifStatus();
+  }
+
+  // 미디어 알림(미니플레이어/잠금화면) 권한 상태 갱신.
+  // Android <13/iOS는 granted 취급이라 카드 숨김.
+  Future<void> _refreshNotifStatus() async {
+    if (!Platform.isAndroid) return; // iOS 알림은 추후 라운드
+    final status = await Permission.notification.status;
+    if (!mounted) return;
+    setState(() => _notifBlocked = !status.isGranted);
+  }
+
+  // 거절 1회면 다이얼로그 재요청, 영구 거절(2회)이면 설정 앱으로 유도(openAppSettings).
+  // permission_handler 공식 패턴.
+  Future<void> _fixNotif() async {
+    final status = await Permission.notification.status;
+    if (status.isPermanentlyDenied) {
+      await openAppSettings();
+    } else {
+      await Permission.notification.request();
+    }
+    await _refreshNotifStatus();
+  }
 
   Future<void> _buy() async {
     setState(() => _busy = true);
@@ -135,6 +181,24 @@ class _SettingsScreenState extends ConsumerState<SettingsScreen> {
               ),
             ),
             const SizedBox(height: 8),
+            // ── 미디어 알림 (Android 13+ 권한 거절 시에만 노출) ─────────────
+            if (_notifBlocked) ...[
+              Card(
+                child: ListTile(
+                  leading: Icon(
+                    Symbols.notifications_off_rounded,
+                    color: scheme.error,
+                  ),
+                  title: const Text('미디어 알림이 꺼져 있어요'),
+                  subtitle: const Text(
+                    '재생 중 알림·잠금화면 컨트롤이 보이지 않아요. 탭해서 켜기',
+                  ),
+                  trailing: const Icon(Symbols.chevron_right_rounded),
+                  onTap: _fixNotif,
+                ),
+              ),
+              const SizedBox(height: 8),
+            ],
             // ── 사용 가이드 ────────────────────────────────────────────
             Card(
               child: ListTile(
