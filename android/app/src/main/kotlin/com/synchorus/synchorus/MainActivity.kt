@@ -121,7 +121,18 @@ class MainActivity : AudioServiceActivity() {
         // 네이티브 oboe 엔진은 audio_service FGS와 별개라, stopWithTask는 알림만 없애고
         // 오디오는 프로세스가 살아있는 동안 계속 재생됨 → 여기서 엔진을 명시 정지.
         // (백그라운드 전환은 onStop이라 여기 안 옴 → 백그라운드 재생·미니플레이어는 유지.)
-        NativeAudio.nativeStop()
+        //
+        // v0.0.133 (HISTORY (162) T1): stop()=pause만이라 stuck 스트림이 프로세스에
+        // 살아남아 스와이프-재실행으로는 복구 안 됨(force-stop만 복구)이 결함. 진짜 종료
+        // (스와이프/뒤로)에선 unload()로 **완전 close** → 재실행이 항상 fresh 스트림.
+        // 단 config 변경 재생성(isChangingConfigurations)은 프로세스·엔진이 살아있고 곧
+        // onCreate로 복귀하므로 엔진 통째 정리 금지(stopDecodeThread().join() 블로킹/vf=0
+        // 회귀 방지) → 기존 stop(pause) 유지. 그 외(finishing 등)는 모두 완전 정리 안전.
+        if (isChangingConfigurations) {
+            NativeAudio.nativeStop()
+        } else {
+            NativeAudio.nativeUnload()
+        }
         super.onDestroy()
     }
 }

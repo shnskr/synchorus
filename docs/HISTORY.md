@@ -7195,9 +7195,52 @@ PLAN 129줄 "30분 stress 측정 보고서"의 **선행 작업** = 무음(underr
 
 ---
 
+### 2026-06-19~20 (162) — 릴리즈 첫 재생 간헐 멈춤: stuck Oboe 스트림 (v0.0.132 진단 → v0.0.133 T1 부분수정)
+
+SM S947N(Android 16/API36) 내부테스트(release v0.0.132)에서 "파일 로드 후 재생 눌러도 시간 안 가고 무음" 신고 → `adb logcat` 진단. (실기기 R3KL207HBBF, 디버거 attach 불가라 native logcat으로만 진단)
+
+**관측 사실**
+- 설치 = Play 내부테스트 release (`installerPackageName=com.android.vending`, pkgFlags에 `DEBUGGABLE` 없음).
+- 파일 로드 **성공**: `I/OboeEngine loadFile: sr=48000 ch=2 dur=720.0s mime=audio/mpeg` + 디코드 스레드 시작.
+- stuck 스트림: `calculateLatencyMillis()` → **`ErrorInvalidState` 1250회+ 연속, recover 0회**. `getTimestamp streak ... state=Started`(스트림 상태는 Started인데 timestamp 영구 실패).
+- 인앱 시계 멈춤 + 무음인데 **시스템 미니플레이어(미디어 알림) 시간은 흐름** → audio_service가 "playing" 보고 시 OS 알림 크로노미터가 경과시간으로 **자체 외삽**(실제 엔진 위치와 독립). 사용자 관찰 "미니플레이어만 흐름"과 일치.
+- 강제종료(`am force-stop`) 후 재실행→로드→재생: **정상**. `start stream OK: reqSR=48000 actualSR=48000 burst=96`, `calcLatency abnormal[0]` 1회(50ms) 뒤 `calcLatency recovered after 1 abnormal: 5.43ms`, 소리 남.
+- 사용자 관측: **스와이프 종료로는 복구 안 됨, force-stop만 복구.** 멈출 땐 "엄청 자주".
+
+**원인 (확정 — 코드+실측)**
+- 인앱 position = `virtualFrame` 기반(native_audio_sync_service.dart:575-577, `vf*1000/sr`). 시계 멈춤 = **vf 동결**. `onAudioReady`는 muted/decode-underrun/ring-밖에서도 vf를 ++하므로(:894-911,826) 그 경로들은 배제(시계가 흘렀어야 함) → vf 동결은 콜백이 vf++ 직전에 빠지는 경우(콜백 미호출 또는 `mPrewarmIdle`)로 좁혀짐.
+- **persistence(스와이프로 안 풀리는 이유)**: `MainActivity.onDestroy()`(스와이프 시 진입) → `nativeStop()` → `engine().stop()` = **`requestPause()`(close 아님)** (oboe_engine.cpp:506-521,1373 / MainActivity.kt:124). 엔진은 **프로세스 싱글톤**이고 프로세스는 task 제거 후에도 생존(audio_service FGS) → stuck 스트림이 pause 상태로 남고, 재실행 시 `start()`가 기존 스트림을 `requestStart`로 resume(:436-444) → **여전히 죽은 스트림**. `am force-stop`만 프로세스 kill → 싱글톤 파괴 → fresh. ⇒ **"엄청 자주"의 실체 = stuck이 한 번 생기면 스와이프-재실행으로는 영구 지속**(매번 새로 생기는 게 아님). ← 코드 + 사용자 관찰 일치로 확정.
+
+**원인 (🔶 강한 추론 — 직접 계측 안 함)**
+- vf 동결의 직접 원인 = "스트림이 `Started`인데 `onAudioReady`가 실제 렌더링을 안 함"(콜백 미호출). 무음 + 시계동결 + `ErrorInvalidState` 영구의 조합에 가장 부합. 단 stuck 순간 vf/getState/`mPrewarmIdle`/`requestStart` 반환값을 **직접 찍지 않음**. 미배제 대안: (a) `mPrewarmIdle` stuck(가능성 낮음 — 그 경로는 무음 렌더라 getTimestamp가 곧 valid돼야 함), (b) stuck 케이스 `requestStart` 에러 리턴(해당 로그는 버퍼 clear 전이라 미관측).
+
+**원인 (❓ 추측 — 미재현/미입증)**
+- 최초로 스트림이 stuck되는 트리거. Exclusive+LowLatency(MMAP, oboe_engine.cpp:468-469) 글리치 / 오디오 포커스 경합(이전 로그에 youtube media session 동시 존재) / 라이프사이클·prewarm idle 회수 — **전부 가설, 재현 못 함**. fresh 프로세스에선 재현 안 됨(force-stop 직후 즉시 정상). HISTORY (30)/(31) "host HAL getTimestamp 간헐 실패"의 더 심한 변종으로 보임(그땐 vf는 돌아 소리는 났고 sync만 폴백 / 이번엔 시계+무음 동시). 엔진에 Oboe `onError`(disconnect) 콜백·진행 watchdog **부재**(grep 0건).
+
+**확신 상향 방법 (다음 작업 — 사용자가 "재현/조사 우선" 선택, 2026-06-19 (162))**
+- 진단 로그 심은 profile 빌드: `start()`에 `requestStart` 결과 + `getState()` + 300ms 후 vf 델타 + `mPrewarmIdle` 1회 로그 → 🔶/❓ 가름. + 표적 재현(로드 후 idle/백그라운드 두고 play / 출력 포커스 점유 후 play).
+
+**수정 방향 (확정 설계 — 멀티에이전트 검토 반영, 2026-06-19~20)**
+1. **T1 재실행 fresh 보장 ✅ v0.0.133 구현**: `MainActivity.onDestroy`를 `if (isChangingConfigurations) nativeStop() else nativeUnload()`로. 진짜 종료(스와이프/뒤로)는 완전 close → 재실행 항상 fresh = **스와이프만으로 stuck 복구**(전엔 force-stop 필요). config 변경 재생성은 stop 유지(검토 🔴).
+2. **T2 start/연속 watchdog (다음 트랙, 강제주입 테스트 후)**: `_playing && vf 300ms 정지 && seek쿨다운 아님`이면 `reopenStream()` + `_resetDriftState()`. 트리거=vf정지(무음 아님). Android 게이트(iOS fast-follow). on/off 컴파일 상수 + 디버그 전용 강제-stuck 훅으로 테스트.
+3. **T3 Oboe `onErrorAfterClose`(폴리시)**: disconnect 자동 재오픈. started 스트림 disconnect에만 불려 start실패/조용한사망은 T2가 커버 → 상보적.
+4. **fallback**: 반복 실패 시 Exclusive→Shared.
+
+**멀티에이전트 설계 검토 (구현 전, 5영역 병렬) — 회귀 2건 사전 차단**
+- 🔴 **onDestroy unload는 `isChangingConfigurations` 가드 필수**: SIM(mcc/mnc) 등 미선언 config 재생성 시 unload하면 `stopDecodeThread().join()` 메인스레드 블로킹(ANR) + vf=0 회귀 → T1에 가드 반영(AndroidManifest.xml:23 configChanges 확인).
+- 🔴 **reopen이 HAL framePos를 0으로 리셋 → P2P 게스트 drift 폭발**: obs는 framePos+virtualFrame 둘 다 전송(:706), anchor/drift가 framePos 의존(:1587,:1727). framePos=0은 framePos<0 fallback(:1573)에 안 걸려 한 폴 폭발 → **T2 구현 시 reopen 후 `_resetDriftState()`(accum까지) + obs에 reopen-epoch 추가**(게스트 즉시 재정렬) 필요.
+- 🟡 reopenStream: stop→close 순서(기존 SR-mismatch :426 패턴), transpose/speed ON 시 `mSTOutRing.clear()`, `mStreamSampleRate/mLatDiagCount/mPrewarmIdle` 재설정·vf/ring 보존, **재시도 상한+백오프**. SoundTouch worker·디코드 스레드는 스트림과 독립=안전.
+- 🟠 iOS: `AudioEngine.swift`에 reopenStream 없음 → Dart watchdog 호출 시 PlatformException. **v1은 watchdog `Platform.isAndroid` 게이트**. iOS는 이미 route/interruption 시 `rebuildEngineAndResume()`(:387-433) 반응형 복구 보유 → 위험 낮음, fast-follow.
+- ✅ 오탐 정정: EOS/seek는 무음이나 **vf는 계속 ++**(:873,910) → vf-정지 트리거는 오탐 안 함(에이전트 "EOS 위험 높음"은 무음↔vf정지 혼동). seek쿨다운 게이트만 필요.
+
+진단 로그(세션 한정): `/tmp/synchorus_repro.log`(stuck), `/tmp/synchorus_clean.log`(정상). **출시 차단급** → PLAN HIGH 등록. **v0.0.133 = T1만(안전망 — 스와이프 복구). T2/T3는 강제주입 테스트 후 별도 트랙.**
+
+---
+
 #### 미해결 이슈
 
 **싱크/재생**
+- [ ] ⚠️ **(출시 차단) 릴리즈 첫 재생 간헐 멈춤 — stuck Oboe 스트림(Started인데 콜백 사망)** (2026-06-19 (162) 신규). 인앱 시계 동결+무음, 미니플레이어만 외삽으로 흐름. **스와이프 종료로 복구 안 됨**(onDestroy=pause-only + 엔진 프로세스 싱글톤 생존), force-stop만 복구. 최초 트리거 미확정(MMAP exclusive 글리치 가설). 수정 방향: start watchdog + Oboe onError 콜백 + 재실행 fresh 보장. 상세 (162) / SYNC_REDESIGN 합의 후 착수.
 - [x] ~~seek 연타 시 싱크 틀어짐~~ — absolute targetMs + cooldown으로 해결 (2026-04-20)
 - [x] ~~Android↔iOS 싱크 정확도~~ — sampleRate 정규화 + cross-rate ms 비교로 ±4ms 달성 (2026-04-20)
 - [x] ~~iOS 게스트에서 총 재생시간(duration) 0:00 표시~~ — loadFile 반환값에 totalFrames 포함 (2026-04-20)
