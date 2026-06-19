@@ -17,6 +17,8 @@ object NativeAudio {
     external fun nativeSetMuted(muted: Boolean)
     external fun nativeIsMuted(): Boolean
     external fun nativeUnload(): Boolean
+    external fun nativeReopenStream(): Boolean
+    external fun nativeSetDebugForceStuck(stuck: Boolean)
     external fun nativeSetSemitoneCents(cents: Int)
     external fun nativeGetSemitoneCents(): Int
     external fun nativeSetPlaybackSpeedX1000(speedX1000: Int)

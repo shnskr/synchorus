@@ -543,7 +543,40 @@ public:
         stopDecodeThread();
         resetState();
         mVirtualFrame.store(0, std::memory_order_relaxed);
+        // v0.0.134 디버그: 강제 stuck 플래그도 해제(스와이프 재실행 시 또 stuck 안 되게).
+        mDebugForceStuck.store(false, std::memory_order_release);
         return true;
+    }
+
+    // v0.0.134 (HISTORY (162) T2): stuck 스트림(Started인데 데이터 콜백 사망) 자동복구용.
+    // 출력 스트림만 close→reopen 한다. **vf·디코드 ring·파일 상태는 보존**(resetState
+    // 호출 안 함) → 현재 재생 위치에서 즉시 재개. close가 콜백 정지를 보장하므로
+    // stop→close 순서(기존 SR-mismatch reopen :428 패턴)로 안전. ST out-ring의 옛 스트림
+    // 잔재는 mPitchDirty/mTempoDirty=true로 SoundTouch 워커가 안전 clear(loadFile :221
+    // idiom — 현재 cents/speed 재적용이라 값 보존). P2P 재정렬(reopen 후 _resetDriftState
+    // + obs reopen-epoch)은 Dart 측 담당. fresh 스트림은 항상 정상 동작이 실측(HISTORY (162)).
+    bool reopenStream() {
+        std::lock_guard<std::mutex> lock(mLock);
+        if (!mFileLoaded) {
+            LOGE("reopenStream: no file loaded");
+            return false;
+        }
+        if (mStream) {
+            mStream->requestStop();
+            mStream->close();
+            mStream.reset();
+            mStreamSampleRate = 0;
+        }
+        // 디버그 강제 stuck 해제(=fresh 스트림은 정상이므로 복구). release 무영향.
+        mDebugForceStuck.store(false, std::memory_order_release);
+        // ST out-ring 옛 스트림 잔재 → 워커가 다음 iteration에 안전 clear (현재 pitch/tempo 재적용).
+        mPitchDirty.store(true, std::memory_order_release);
+        mTempoDirty.store(true, std::memory_order_release);
+        // open + requestStart + mPrewarmIdle=false + mLatDiagCount=0 까지 처리.
+        const bool ok = prewarmInternal_locked();
+        LOGI("reopenStream: %s (vf=%lld 보존)", ok ? "OK" : "FAILED",
+             static_cast<long long>(mVirtualFrame.load(std::memory_order_relaxed)));
+        return ok;
     }
 
     bool getLatestTimestamp(
@@ -730,6 +763,11 @@ public:
         return mMuted.load(std::memory_order_relaxed);
     }
 
+    // v0.0.134 (HISTORY (162) T2) 디버그 전용: watchdog 검증용 강제 stuck 토글.
+    void setDebugForceStuck(bool stuck) {
+        mDebugForceStuck.store(stuck, std::memory_order_release);
+    }
+
     /// §H Transpose: pitch를 cents 단위로 변경 (1 semitone = 100 cents, ±2400).
     /// UI thread는 atomic store만, setPitchSemiTones는 콜백 thread가 mPitchDirty
     /// 체크 후 적용 (SoundTouch는 thread-safe X).
@@ -818,6 +856,15 @@ public:
         // 깨어있어 워밍업 효과는 유지되지만 PCM은 0이고 시간도 진행 안 함.
         // start() 시 mPrewarmIdle=false로 전환되면 다음 콜백부터 정상 출력. (v0.0.44)
         if (mPrewarmIdle.load(std::memory_order_acquire)) {
+            memset(audioData, 0,
+                   static_cast<size_t>(numFrames * outCh) * sizeof(float));
+            return oboe::DataCallbackResult::Continue;
+        }
+
+        // v0.0.134 (HISTORY (162) T2) 디버그 전용: 강제 stuck — vf++ 도달 전에 무음
+        // 반환해 vf를 동결(실제 stuck 재현). watchdog가 300ms 뒤 감지→reopenStream,
+        // reopenStream이 이 플래그를 풀어 복구. release엔 트리거 없음(상시 false).
+        if (mDebugForceStuck.load(std::memory_order_acquire)) {
             memset(audioData, 0,
                    static_cast<size_t>(numFrames * outCh) * sizeof(float));
             return oboe::DataCallbackResult::Continue;
@@ -945,6 +992,10 @@ private:
     std::atomic<bool> mMuted{false};
     // prewarm 상태에서 콜백을 무음 + vf 동결 모드로 만드는 플래그. (v0.0.44)
     std::atomic<bool> mPrewarmIdle{false};
+    // v0.0.134 (HISTORY (162) T2) 디버그 전용: watchdog 검증용 강제 stuck.
+    // true면 onAudioReady가 vf++ 전에 무음 반환 → vf 동결(실제 "Started인데 콜백 사망"
+    // 재현). release에선 호출부(kDebugMode 버튼)가 없어 항상 false.
+    std::atomic<bool> mDebugForceStuck{false};
     // v0.0.124: 무음(underrun) 객관 카운터 (측정 보고서용, PLAN ②). 콜백에서 로컬
     // 누적 후 콜백 끝에 1회 fetch_add(RT-safe — atomic을 frame 루프 안에서 매번
     // 건드리지 않음). getter로 누적값 노출 → csv에서 delta 분석.
@@ -1416,6 +1467,12 @@ Java_com_synchorus_synchorus_NativeAudio_nativeSetMuted(
     engine().setMuted(muted == JNI_TRUE);
 }
 
+JNIEXPORT void JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeSetDebugForceStuck(
+    JNIEnv* /*env*/, jobject /*thiz*/, jboolean stuck) {
+    engine().setDebugForceStuck(stuck == JNI_TRUE);
+}
+
 JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeIsMuted(
     JNIEnv* /*env*/, jobject /*thiz*/) {
@@ -1426,6 +1483,12 @@ JNIEXPORT jboolean JNICALL
 Java_com_synchorus_synchorus_NativeAudio_nativeUnload(
     JNIEnv* /*env*/, jobject /*thiz*/) {
     return engine().unload() ? JNI_TRUE : JNI_FALSE;
+}
+
+JNIEXPORT jboolean JNICALL
+Java_com_synchorus_synchorus_NativeAudio_nativeReopenStream(
+    JNIEnv* /*env*/, jobject /*thiz*/) {
+    return engine().reopenStream() ? JNI_TRUE : JNI_FALSE;
 }
 
 JNIEXPORT void JNICALL

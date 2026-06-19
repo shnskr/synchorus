@@ -135,7 +135,7 @@
 
 ### HIGH
 
-**🟠🆕 릴리즈 첫 재생 간헐 멈춤 — stuck Oboe 스트림 (2026-06-19~20 (162)) — T1 완료, T2 대기**
+**🟢🆕 릴리즈 첫 재생 간헐 멈춤 — stuck Oboe 스트림 (2026-06-19~20 (162)) — T1+T2 완료, 검증됨**
 - 증상: release v0.0.132(SM S947N/Android 16)에서 로드 후 재생 눌러도 인앱 시계 동결+무음. 미니플레이어만 외삽으로 흐름. **스와이프 종료로 복구 안 됨, force-stop만 복구** → 한 번 stuck되면 영구 지속(체감 "엄청 자주").
 - 원인(확정): vf 동결 + **persistence**(onDestroy `stop()`=pause-only → 엔진 프로세스 싱글톤에 stuck 스트림 생존 → 재실행이 죽은 스트림 resume). 🔶강한추론: 스트림 `Started`인데 콜백 미호출. ❓추측: 최초 stuck 트리거. 상세 HISTORY (162).
 - ✅ **T1 (v0.0.133, 출시 안전망)**: `onDestroy` → `if(isChangingConfigurations) nativeStop() else nativeUnload()`. 스와이프/뒤로 종료 시 완전 close → **스와이프만으로 복구** 가능(force-stop 불필요). config-change 가드로 ANR 회귀 차단(멀티에이전트 검토). **검증 필요**: 정상재생/백그라운드/스와이프-재실행 fresh 회귀 스윕.

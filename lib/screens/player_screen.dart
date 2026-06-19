@@ -6,6 +6,7 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:package_info_plus/package_info_plus.dart';
 import 'package:wakelock_plus/wakelock_plus.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:flutter/foundation.dart' show kDebugMode;
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -722,6 +723,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
                 ),
               ],
             ),
+            // v0.0.134 (HISTORY (162) T2) 디버그 전용: 강제 stuck 트리거 (release엔 안 나옴).
+            // 누르면 native가 vf를 동결 → watchdog가 ~0.3s 뒤 reopen으로 복구하는지 검증.
+            if (kDebugMode)
+              Positioned(
+                left: 0,
+                child: IconButton(
+                  iconSize: 28,
+                  tooltip: '강제 stuck (디버그)',
+                  onPressed: hasAudio ? () => _audio.debugForceStuck() : null,
+                  icon: const Icon(Symbols.bug_report_rounded),
+                ),
+              ),
             Positioned(
               right: 0,
               child: IconButton(

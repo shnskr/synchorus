@@ -116,6 +116,19 @@ class NativeAudioSyncService {
   int _seekCorrectionAccum = 0;
   int _seekCount = 0;
   int _seekCooldownUntilMs = 0;
+  // v0.0.134 (HISTORY (162) T2): stuck 스트림(Started인데 콜백 사망) 자동복구 watchdog.
+  // 재생 중인데 virtualFrame이 _kWatchdogStuckMs 동안 안 늘면(=콜백 미호출) reopenStream.
+  // 오탐 방지 게이트: _playing && EOS 아님 && seek 쿨다운 아님 && 백오프 아님.
+  // Android 전용(iOS는 rebuildEngineAndResume 반응형 복구 보유). _kWatchdogEnabled=비상 off.
+  static const bool _kWatchdogEnabled = true;
+  static const int _kWatchdogStuckMs = 300;
+  Timer? _watchdogTimer;
+  int? _watchdogLastVf;
+  int _watchdogLastChangeMs = 0;
+  int _watchdogReopenCount = 0;
+  int _watchdogBackoffUntilMs = 0;
+  int _watchdogLastReopenMs = 0;
+  bool _watchdogBusy = false;
   // v0.0.124: 게스트 무음(underrun) logcat throttle용 직전 누적값 (PLAN ②).
   // csv는 호스트만 기록 → 게스트는 변화 시에만 logcat. -1=미지원(iOS).
   int _lastGuestUnderDecode = 0;
@@ -191,6 +204,7 @@ class NativeAudioSyncService {
           'activeFile=$_storedSafeName, currentUrl=$_currentUrl');
     }
     _isHost = isHost;
+    _startWatchdog(); // v0.0.134 (162) T2: stuck 스트림 자동복구 감시 (내부적으로 _playing 게이트)
     _messageSub?.cancel();
     _messageSub = _p2p.onMessage.listen(_onMessage);
 
@@ -1893,6 +1907,91 @@ class NativeAudioSyncService {
     );
   }
 
+  // ── v0.0.134 (HISTORY (162) T2) stuck 스트림 자동복구 watchdog ───────────────
+  // 재생 중 virtualFrame이 _kWatchdogStuckMs 동안 안 늘면(=Oboe 콜백 사망) reopenStream.
+  // fresh 스트림은 항상 정상 동작(HISTORY (162) 실측)이라 reopen이 신뢰 가능한 복구.
+  void _startWatchdog() {
+    if (!_kWatchdogEnabled || !Platform.isAndroid) return;
+    _watchdogTimer?.cancel();
+    _watchdogLastVf = null;
+    _watchdogReopenCount = 0;
+    _watchdogBackoffUntilMs = 0;
+    _watchdogTimer = Timer.periodic(
+        const Duration(milliseconds: 100), (_) => _watchdogTick());
+    debugPrint('[WD] started (android=${Platform.isAndroid})'); // v0.0.134 진단
+  }
+
+  void _stopWatchdog() {
+    _watchdogTimer?.cancel();
+    _watchdogTimer = null;
+  }
+
+  Future<void> _watchdogTick() async {
+    if (!_playing || _watchdogBusy) {
+      if (!_playing) _watchdogLastVf = null; // 정지 중 baseline 무효화 (재개 시 fresh)
+      return;
+    }
+    _watchdogBusy = true;
+    try {
+      // ⚠️ raw mVirtualFrame을 직접 읽는다. _engine.latest.virtualFrame은 getTimestamp
+      // 성공 시 framePos 시점으로 보정/외삽돼 ±수천 frame 진동(oboe_engine.cpp:556-559)
+      // → 동결 판정 불가. raw vf는 오디오 콜백만 전진 → "콜백 살아있나"의 정확한 신호.
+      final int vf;
+      try {
+        vf = await _engine.getVirtualFrame();
+      } catch (_) {
+        return;
+      }
+      if (!_playing) return; // await 사이 정지됐을 수 있음
+      final now = DateTime.now().millisecondsSinceEpoch;
+      // 게이트: 곡끝(EOS)/seek 쿨다운/reopen 백오프 → vf 멈춰도 정상이므로 baseline만 갱신.
+      final total = _engine.latest?.totalFrames ?? 0;
+      final atEos = total > 0 && vf >= total;
+      if (atEos || now < _seekCooldownUntilMs || now < _watchdogBackoffUntilMs) {
+        _watchdogLastVf = vf;
+        _watchdogLastChangeMs = now;
+        return;
+      }
+      if (_watchdogLastVf == null || vf != _watchdogLastVf) {
+        _watchdogLastVf = vf; // vf 전진 중 = 정상
+        _watchdogLastChangeMs = now;
+        // 30s 이상 정상 재생 지속 → 백오프 카운트 리셋 (고립 stuck은 늘 1s 복구,
+        // 백오프는 연속 재발(망가진 기기) 폭주 방지에만 작동).
+        if (_watchdogReopenCount > 0 && now - _watchdogLastReopenMs > 30000) {
+          _watchdogReopenCount = 0;
+        }
+        return;
+      }
+      final frozenMs = now - _watchdogLastChangeMs;
+      if (frozenMs >= _kWatchdogStuckMs) {
+        unawaited(_onWatchdogStuck(now)); // raw vf 동결 _kWatchdogStuckMs 경과 = stuck
+      }
+    } finally {
+      _watchdogBusy = false;
+    }
+  }
+
+  Future<void> _onWatchdogStuck(int now) async {
+    _watchdogReopenCount++;
+    _watchdogLastReopenMs = now;
+    // 지수 백오프 1→2→4→8→16s (진짜 망가진 기기에서 reopen 폭주 방지).
+    final backoffMs = 1000 << (_watchdogReopenCount.clamp(1, 5) - 1);
+    _watchdogBackoffUntilMs = now + backoffMs;
+    _watchdogLastVf = null;
+    _watchdogLastChangeMs = now;
+    debugPrint('[WATCHDOG] vf stuck ${_kWatchdogStuckMs}ms → reopen '
+        '(count=$_watchdogReopenCount, backoff=${backoffMs}ms)');
+    final ok = await _engine.reopenStream();
+    // reopen은 HAL framePos를 0으로 리셋 → anchor/drift 폭발 방지로 재정렬 강제(accum까지).
+    _resetDriftState();
+    debugPrint('[WATCHDOG] reopen=$ok, driftState reset');
+  }
+
+  /// 디버그 전용: watchdog 검증용 강제 stuck (kDebugMode UI에서만 호출).
+  Future<void> debugForceStuck() async {
+    await _engine.setDebugForceStuck(true);
+  }
+
   // ═══════════════════════════════════════════════════════════
   // 정리
   // ═══════════════════════════════════════════════════════════
@@ -1968,6 +2067,7 @@ class NativeAudioSyncService {
     _messageSub = null;
     _timestampSub?.cancel();
     _timestampSub = null;
+    _stopWatchdog(); // v0.0.134 (162) T2
     _stopObsBroadcast();
     _engine.stopPolling();
     unawaited(_engine.stop());

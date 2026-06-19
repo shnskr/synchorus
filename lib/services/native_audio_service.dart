@@ -199,6 +199,19 @@ class NativeAudioService {
     return await _channel.invokeMethod<bool>('unload') ?? false;
   }
 
+  /// v0.0.134 (HISTORY (162) T2): stuck 스트림(Started인데 콜백 사망) 자동복구.
+  /// 출력 스트림만 close→reopen. vf·디코드·파일 보존(현재 위치 재개). **Android 전용**
+  /// — iOS는 reopenStream 미구현(route/interruption 시 rebuildEngineAndResume 반응형
+  /// 복구 보유)이라 watchdog 호출부에서 Platform.isAndroid 게이트 필요.
+  Future<bool> reopenStream() async {
+    return await _channel.invokeMethod<bool>('reopenStream') ?? false;
+  }
+
+  /// v0.0.134 디버그 전용: watchdog 검증용 강제 stuck (vf 동결). kDebugMode UI에서만 호출.
+  Future<void> setDebugForceStuck(bool stuck) async {
+    await _channel.invokeMethod('setDebugForceStuck', stuck);
+  }
+
   /// §H Transpose pitch (cents 단위, 1 semitone = 100 cents). 범위 ±2400.
   Future<void> setSemitoneCents(int cents) async {
     await _channel.invokeMethod('setSemitoneCents', cents);
