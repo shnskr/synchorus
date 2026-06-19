@@ -16,7 +16,7 @@ publish_to: 'none' # Remove this line if you wish to publish to pub.dev
 # https://developer.apple.com/library/archive/documentation/General/Reference/InfoPlistKeyReference/Articles/CoreFoundationKeys.html
 # In Windows, build-name is used as the major, minor, and patch parts
 # of the product and file versions while build-number is used as the build suffix.
-version: 0.0.134+5
+version: 0.0.135+5
 
 environment:
   sdk: ^3.11.4
@@ -65,6 +65,10 @@ dependencies:
   # 레거시 baseline). 둥근 모서리로 더 부드러운 톤. play/pause만 FILL 1. (v0.0.130)
   material_symbols_icons: ^4.2951.0
   permission_handler: ^12.0.3
+  # 네이티브 스플래시: preserve/remove 런타임 API로 최소 표시 시간(1초) 보장 →
+  # 콜드/웜 스타트별 0초 깜빡임 제거(HISTORY 163). 런타임 import 위해 dev가 아닌
+  # dependencies에 둠. CLI 생성(dart run flutter_native_splash:create)도 여기서 동작. (v0.0.135)
+  flutter_native_splash: ^2.4.7
 
 dev_dependencies:
   flutter_test:
@@ -77,7 +81,6 @@ dev_dependencies:
   # rules and activating additional ones.
   flutter_lints: ^6.0.0
   flutter_launcher_icons: ^0.14.4
-  flutter_native_splash: ^2.4.7
 
 # For information on the generic Dart part of this file, see the
 # following page: https://dart.dev/tools/pub/pubspec

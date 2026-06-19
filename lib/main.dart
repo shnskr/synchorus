@@ -6,6 +6,7 @@ import 'package:audio_session/audio_session.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
+import 'package:flutter_native_splash/flutter_native_splash.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:google_mobile_ads/google_mobile_ads.dart';
 import 'package:path_provider/path_provider.dart';
@@ -25,8 +26,19 @@ const List<String> _kTestDeviceIds = <String>[
   '0BFACB8F367F18AD86CF1E3BFD6B7B78', // SM S901N / S22 (R3CT60D20XE)
 ];
 
+/// 네이티브 스플래시 최소 표시 시간(ms). 스플래시는 첫 Flutter 프레임에 자동으로
+/// 사라지는데, 콜드/웜 스타트 편차로 거의 0초에 휙 지나가 깜빡임처럼 보였음(HISTORY 163).
+/// preserve로 붙잡아 두고 main 진입 기준 이 시간을 채운 뒤 remove → 표시 시간 평탄화.
+/// main 진입 기준이라 엔진 로드 구간(프로세스 시작~Dart 진입)은 미포함 — 그 변동까지
+/// 잡으려면 네이티브 채널 필요(docs A안). 현재 B안: Dart만, 출시 단계 리스크 최소.
+const int _kMinSplashMs = 1000;
+
 Future<void> main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  // 스플래시를 첫 프레임 이후에도 붙잡아 둠(아래 remove까지 유지) — 최소 표시 시간 보장.
+  final binding = WidgetsFlutterBinding.ensureInitialized();
+  FlutterNativeSplash.preserve(widgetsBinding: binding);
+  // main 진입 시점부터 경과 측정 — _kMinSplashMs 채우는 기준.
+  final splashWatch = Stopwatch()..start();
 
   // release 빌드에선 모든 debugPrint를 no-op으로 — production logcat에 진단 로그
   // 안 나가게(+I/O 절감). debug/profile 빌드는 그대로 출력 → 디버깅·측정 가시성 유지.
@@ -83,6 +95,15 @@ Future<void> main() async {
       child: const SynchorusApp(),
     ),
   );
+
+  // 스플래시 최소 표시(B안): runApp으로 첫 프레임을 그리게 한 뒤, main 진입~지금 경과가
+  // _kMinSplashMs 미만이면 남은 만큼 채우고 remove(이미 넘었으면 즉시). 준비된 화면을
+  // 스플래시 뒤에 미리 그려둔 상태로 자연스럽게 전환 → 콜드/웜별 0초 깜빡임 제거.
+  final remaining = _kMinSplashMs - splashWatch.elapsedMilliseconds;
+  if (remaining > 0) {
+    await Future.delayed(Duration(milliseconds: remaining));
+  }
+  FlutterNativeSplash.remove();
 }
 
 class SynchorusApp extends ConsumerStatefulWidget {
