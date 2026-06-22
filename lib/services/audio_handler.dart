@@ -24,6 +24,12 @@ class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
   bool _loading = false;
   Duration _lastPosition = Duration.zero;
 
+  // A-B 구간 반복 경계 (호스트, player_screen이 setAbLoop으로 주입).
+  // 활성이면 effective A/B Duration, 비활성이면 둘 다 null.
+  // 미니플레이어(알림/잠금화면/블루투스/오토) seek을 [A,B]로 clamp하는 데 사용.
+  Duration? _loopStart;
+  Duration? _loopEnd;
+
   /// 동기화 서비스 연결 (방 입장 시)
   void attachSyncService(
     NativeAudioSyncService service, {
@@ -78,6 +84,8 @@ class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
     _audioReady = false;
     _loading = false;
     _lastPosition = Duration.zero;
+    _loopStart = null;
+    _loopEnd = null;
 
     playbackState.add(PlaybackState());
     mediaItem.add(null);
@@ -125,12 +133,34 @@ class NativeAudioHandler extends BaseAudioHandler with SeekHandler {
     }
   }
 
+  /// A-B 구간 반복 경계 설정 (player_screen에서 호출).
+  /// 활성이면 effective A/B Duration, 비활성이면 null/null.
+  void setAbLoop(Duration? start, Duration? end) {
+    _loopStart = start;
+    _loopEnd = end;
+  }
+
+  /// A-B 활성 시 position을 [A,B]로 clamp. 비활성이면 그대로.
+  Duration _clampToLoop(Duration position) {
+    final a = _loopStart;
+    final b = _loopEnd;
+    if (a == null || b == null) return position;
+    final ms = position.inMilliseconds.clamp(a.inMilliseconds, b.inMilliseconds);
+    return Duration(milliseconds: ms);
+  }
+
   @override
   Future<void> seek(Duration position) async {
     if (_isHost) {
-      _lastPosition = position;
+      // 미니플레이어(알림/잠금화면/블루투스/오토)의 시크바는 이 경로로만 들어옴.
+      // 인앱 시크바는 player_screen에서 이미 clamp하지만 여기엔 clamp가 없었음.
+      // clamp 후 보정 위치를 emit해야 OS 시크바 썸이 [A,B] 경계로 스냅백한다
+      // (positionStream 리스너는 _lastPosition만 갱신하고 playbackState를 재push
+      //  안 하므로, 여기서 emit 안 하면 재생만 막히고 썸은 드래그 자리에 남음).
+      final clamped = _clampToLoop(position);
+      _lastPosition = clamped;
       _emitPlaybackState();
-      await _syncService?.syncSeek(position);
+      await _syncService?.syncSeek(clamped);
     }
   }
 

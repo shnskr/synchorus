@@ -197,6 +197,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
           _abPointB = null;
           _seekSlots = List<Duration?>.filled(3, null);
         });
+        _syncAbToHandler();
       });
     }
 
@@ -259,6 +260,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _abPointB = tmp;
       }
     });
+    _syncAbToHandler();
   }
 
   void _resetAb() {
@@ -266,6 +268,7 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
       _abPointA = null;
       _abPointB = null;
     });
+    _syncAbToHandler();
   }
 
   void _clearAbPoint({required bool isA}) {
@@ -277,6 +280,18 @@ class _PlayerScreenState extends ConsumerState<PlayerScreen> {
         _abPointB = null;
       }
     });
+    _syncAbToHandler();
+  }
+
+  // A-B 구간을 audio_handler에 동기화 → 미니플레이어(알림/잠금화면/블루투스/오토)
+  // seek도 [A,B]로 clamp. active일 때만 effective 범위 전달, 비활성이면 null로 해제.
+  void _syncAbToHandler() {
+    final handler = ref.read(audioHandlerProvider);
+    if (_abActive) {
+      handler.setAbLoop(_effectiveA, _effectiveB);
+    } else {
+      handler.setAbLoop(null, null);
+    }
   }
 
   void _onSlotTap(int idx) {
